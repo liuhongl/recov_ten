@@ -594,6 +594,49 @@ TEN API 端口，例如 8080/tcp
 
 所以没有 SIP trunk 时，不应该停住，也不应该假装已经完成真实线路验证。正确做法是先完成本地 FreeSWITCH + 软电话链路测试，再接真实 SIP trunk。
 
+### 当前本地验证结果（2026-05-08）
+
+已经完成：
+
+```text
+MicroSIP 1000
+  -> 本地 FreeSWITCH 9196
+  -> echo()
+  -> MicroSIP 能听到回声
+```
+
+已经完成：
+
+```text
+MicroSIP 1000
+  -> 本地 FreeSWITCH 9199
+  -> mod_audio_stream v1.0.3
+  -> Media Hub /media/fs/fs_stage5a_local
+  -> 假 TEN 回声客户端 /media/ten/fs_stage5a_local
+  -> Media Hub
+  -> FreeSWITCH
+  -> MicroSIP 能听到回音
+```
+
+这说明本地真实电话音频已经可以从 FreeSWITCH 进入 Media Hub，并且 Media Hub 下行音频可以回到电话侧。
+
+但这还不等于完整 TEN 电话闭环。当前 `9199` 回音测试用的是假 TEN 客户端，不是 `sip_media_bridge`，也没有经过 ASR、LLM、TTS。
+
+下一步更准确的小阶段应该是：
+
+```text
+MicroSIP 1000
+  -> FreeSWITCH 9199
+  -> Media Hub
+  -> sip_media_bridge
+  -> TEN AudioFrame
+  -> sip_media_bridge_test_echo
+  -> sip_media_bridge
+  -> Media Hub
+  -> FreeSWITCH
+  -> MicroSIP
+```
+
 ## 9. 低延迟目标
 
 如果目标是用户说完后 1 秒左右听到 AI 回复，必须做流式链路。
@@ -629,6 +672,19 @@ FreeSWITCH + SIP trunk
   -> Media Hub
   -> sip_media_bridge
   -> TEN graph
+```
+
+本地阶段 5A 对 `mod_audio_stream` 的结论：
+
+```text
+已验证版本：mod_audio_stream v1.0.3
+上行：FreeSWITCH -> WebSocket raw binary PCM
+下行：WebSocket raw binary PCM -> FreeSWITCH 播放
+格式：8k mono s16le / L16
+帧大小：320 bytes
+帧时长：20ms
+必要配置：STREAM_PLAYBACK=true
+本地测试号码：9199
 ```
 
 如果想减少电话网关配置成本：

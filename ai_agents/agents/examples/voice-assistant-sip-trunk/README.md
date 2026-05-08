@@ -2,10 +2,12 @@
 
 Minimal staged example for connecting a SIP trunk phone call path to TEN.
 
-The current implementation covers stages 1 through 4. It validates graph
+The current implementation covers stages 1 through 5A. It validates graph
 startup, Media Hub control connection, Media Hub fake audio forwarding, and
-TEN `AudioFrame("pcm_frame")` roundtrip conversion. It still does not connect
-to FreeSWITCH, ASR, LLM, or TTS yet.
+TEN `AudioFrame("pcm_frame")` roundtrip conversion. Stage 5A additionally
+validates a local FreeSWITCH call through Media Hub using a fake TEN echo
+client. It still does not connect one real FreeSWITCH call through
+`sip_media_bridge`, ASR, LLM, or TTS yet.
 
 ## Stage 1 Graph
 
@@ -135,7 +137,51 @@ Expected fake FS result:
 fake_fs_audio_roundtrip_ok channel=<call_id>
 ```
 
-## Media Contract For Next FreeSWITCH Stage
+## Stage 5A Local FreeSWITCH Media Hub Echo
+
+Stage 5A validates real local phone media up to Media Hub and back to the
+phone side:
+
+```text
+MicroSIP -> FreeSWITCH 9199
+FreeSWITCH mod_audio_stream -> Media Hub /media/fs/fs_stage5a_local
+Media Hub -> fake_ten_audio_responder /media/ten/fs_stage5a_local
+fake_ten_audio_responder echoes PCM bytes
+Media Hub -> FreeSWITCH mod_audio_stream
+FreeSWITCH -> MicroSIP
+```
+
+The local FreeSWITCH container must provide `uuid_audio_stream`. In the current
+local test environment this is done by a git-ignored derived image under
+`ai_agents/local/freeswitch/image` with `mod_audio_stream` v1.0.3.
+
+Run Media Hub and the fake TEN echo responder inside `ten_agent_dev`, then
+dial `9199` from MicroSIP:
+
+```bash
+docker exec -d ten_agent_dev bash -lc "cd /app/agents/examples/voice-assistant-sip-trunk && python3 server/main.py --host 0.0.0.0 --port 9000 --heartbeat-timeout 60 > /tmp/sip_trunk_media_hub_stage5a.log 2>&1"
+docker exec -d ten_agent_dev bash -lc "cd /app/agents/examples/voice-assistant-sip-trunk && python3 server/fake_ten_audio_responder.py --url ws://127.0.0.1:9000 --channel fs_stage5a_local --mode echo --timeout 180 --max-inbound-chunks 1000 > /tmp/fake_ten_audio_responder_stage5a.log 2>&1"
+```
+
+Expected Media Hub log events:
+
+```text
+fs_connected channel=fs_stage5a_local
+media_paired channel=fs_stage5a_local
+audio_forwarded direction=fs_to_ten channel=fs_stage5a_local bytes=320
+audio_forwarded direction=ten_to_fs channel=fs_stage5a_local bytes=320
+```
+
+Expected fake TEN responder log events:
+
+```text
+fs_audio_received chunk=<n> bytes=320
+echo_sent chunk=<n> bytes=320
+```
+
+This stage still uses a fake TEN responder rather than `sip_media_bridge`.
+
+## Media Contract
 
 The validated media contract is:
 

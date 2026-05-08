@@ -57,6 +57,12 @@ tasks:
     cmds:
       - python3 server/fake_fs_audio_client.py --channel call_stage4_audio_frame_001
 
+  run-fake-ten-audio-responder:
+    desc: run fake TEN-side audio responder for local FreeSWITCH stage 5A test
+    dir: .
+    cmds:
+      - python3 server/fake_ten_audio_responder.py --channel fs_stage5a_local
+
   run-api-server:
     desc: run TEN api server for this example
     dir: ../../../server

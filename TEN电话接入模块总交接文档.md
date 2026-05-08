@@ -423,19 +423,24 @@ FreeSWITCH 负责或协助完成：
 PCM -> 电话侧 PCMA/PCMU
 ```
 
-下一阶段如果使用 `mod_audio_stream`，必须确认它的实际协议：
+本地阶段 5A 已确认 `mod_audio_stream` 的实际协议：
 
 ```text
-是否输出 raw PCM binary frame
-是否输出 JSON 包裹
-是否有 WAV header
-采样率是 8k 还是 16k
-每帧时长是多少
-下行回放需要 binary 还是 JSON 命令
-是否支持双向实时音频
+使用模块：mod_audio_stream v1.0.3
+启动命令：uuid_audio_stream <uuid> start <ws-url> mono 8k
+上行输出：raw binary L16 / PCM s16le
+采样率：8000 Hz
+声道：mono
+实测帧大小：320 bytes
+实测帧时长：20 ms
+下行回放：设置 STREAM_PLAYBACK=true 后，可接收 raw binary L16 回放
+WebSocket 路径：ws://host.docker.internal:9000/media/fs/{call_id}
+本地测试 call_id：fs_stage5a_local
 ```
 
-如果 FreeSWITCH 模块输出格式不是当前 Media Hub 契约，就不要改 TEN，优先在 FreeSWITCH adapter 或 Media Hub 侧做转换。
+`mod_audio_stream` v1.0.3 也支持下行 JSON/base64 音频格式，但阶段 5A 采用的是 raw binary PCM 回送，和当前 Media Hub 契约一致。
+
+如果后续真实部署中的 FreeSWITCH 模块输出格式不同，不要先改 TEN，优先在 FreeSWITCH adapter 或 Media Hub 侧做转换。
 
 ### 6.7 未来 Call Gateway API 数据草案
 
@@ -671,16 +676,63 @@ MicroSIP
 - `9196` echo 测试只验证 FreeSWITCH 本地电话侧链路，不经过 Media Hub，也不经过 TEN。
 - Windows 防火墙、Docker Desktop 网络、RTP 端口映射都会影响媒体流。后续如果“能注册但没声音”，优先查 SDP 地址和 RTP 端口，不要先改 TEN。
 
+### 7.6 本地 FreeSWITCH + Media Hub 双向媒体链路
+
+已完成本机部署和验证：
+
+```text
+MicroSIP
+  -> FreeSWITCH 9199
+  -> mod_audio_stream
+  -> Media Hub /media/fs/fs_stage5a_local
+  -> 假 TEN 回声客户端 /media/ten/fs_stage5a_local
+  -> Media Hub
+  -> mod_audio_stream
+  -> FreeSWITCH
+  -> MicroSIP
+```
+
+已验证：
+
+- 当前 FreeSWITCH 容器已具备 `uuid_audio_stream` API。
+- MicroSIP 拨打 `9199` 后，FreeSWITCH 能把真实电话侧音频送到 Media Hub。
+- Media Hub 能按同一个 `call_id` 配对 FreeSWITCH 侧和假 TEN 侧。
+- 假 TEN 回声客户端能收到 FreeSWITCH 上行 PCM，并原样回送。
+- 用户实际听到了回音。
+- 挂断后 FreeSWITCH `show calls` 为 `0`，Media Hub session 已释放。
+
+实测媒体格式：
+
+```text
+方向：FreeSWITCH -> Media Hub -> fake TEN
+帧大小：320 bytes
+帧时长：20 ms
+格式：PCM s16le / L16
+采样率：8000 Hz
+声道：mono
+
+方向：fake TEN -> Media Hub -> FreeSWITCH
+帧大小：320 bytes
+格式：同上
+```
+
+需要注意的细节：
+
+- 这个阶段使用的是假 TEN 回声客户端 `fake_ten_audio_responder.py`，不是 `sip_media_bridge`。
+- 这个阶段能证明真实 FreeSWITCH 媒体可以进入 Media Hub，并且 Media Hub 下行音频可以回到电话侧。
+- 这个阶段仍不证明真实电话通话已经穿过 `sip_media_bridge`、TEN AudioFrame、ASR、LLM 或 TTS。
+- 第一次测试失败的原因是假 TEN 侧没有应用层心跳，等待拨号期间被 Media Hub 心跳护栏清理，导致 FreeSWITCH 上行音频出现 `reason=no_peer`。已通过给假 TEN 客户端增加 `ping/pong` 心跳修正。
+- `9199` 是本地测试号码，不是业务号码；真实外呼阶段应由 Call Gateway 创建 call_id，并控制 FreeSWITCH originate 与 TEN /start。
+
 ## 8. 剩余未实现部分
 
 未实现：
 
-- FreeSWITCH 与 Media Hub 的真实媒体桥接。
-- FreeSWITCH 是否可用 `mod_audio_stream` 尚未最终确认。
 - Call Gateway。
 - ESL originate / hangup / event listener。
 - 真实 SIP trunk 配置。
 - 真实外呼手机号。
+- 同一通真实 FreeSWITCH 通话接入 `sip_media_bridge` 的 TEN AudioFrame graph。
 - ASR/LLM/TTS 电话场景 graph。
 - main_control 电话业务逻辑。
 - AI 开场白。
@@ -698,13 +750,7 @@ FreeSWITCH
   -> TEN AudioFrame
 ```
 
-但在进入下一阶段前，必须先确认 FreeSWITCH 容器是否具备可用的双向音频流能力，例如 `mod_audio_stream`。如果没有，需要选择：
-
-```text
-方案 A：更换含 mod_audio_stream 的 FreeSWITCH 镜像
-方案 B：基于当前镜像编译/安装 mod_audio_stream
-方案 C：先用 ESL/RTP 或其他临时桥接方案验证媒体链路
-```
+当前已经确认本地 FreeSWITCH 具备可用的双向音频流能力。下一阶段不要直接接 ASR/LLM/TTS，建议先把 `9199` 的真实 FreeSWITCH 媒体接到 `voice_assistant_sip_trunk_audio_frame_test`，验证同一通真实电话能走完 `FreeSWITCH -> Media Hub -> sip_media_bridge -> TEN AudioFrame -> echo -> sip_media_bridge -> Media Hub -> FreeSWITCH`。
 
 ## 9. 本次本地测试安装内容
 
@@ -716,11 +762,14 @@ FreeSWITCH 容器：
 
 ```text
 container name: ten_local_freeswitch
-image: safarov/freeswitch:latest
+image: ten-local-freeswitch-audio-stream:1.0.3
+base image: safarov/freeswitch:latest
 status: healthy
 ```
 
-注意：镜像使用 `latest`，后续交接给同事时如需严格复现，建议改成固定 tag 或 digest。
+本地镜像通过 `ai_agents/local/freeswitch/image/Dockerfile` 构建，只是在 `safarov/freeswitch:latest` 基础上加入 `mod_audio_stream.so`。该本地镜像和模块文件都在 `ai_agents/local/` 下，不提交到 git。
+
+注意：基础镜像仍使用 `latest`，后续交接给同事时如需严格复现，建议改成固定 tag 或 digest。
 
 ### 9.2 FreeSWITCH 持久化目录
 
@@ -748,13 +797,15 @@ E:\recov_ten\ai_agents\local\freeswitch\docker-compose.yml
 
 ```text
 E:\recov_ten\ai_agents\local\freeswitch\conf -> /etc/freeswitch
+E:\recov_ten\ai_agents\local\freeswitch\scripts -> /usr/share/freeswitch/scripts
 ```
 
 启动命令：
 
 ```powershell
 cd E:\recov_ten\ai_agents\local\freeswitch
-docker compose up -d
+docker build --pull=false -t ten-local-freeswitch-audio-stream:1.0.3 image
+docker compose up -d --no-build
 ```
 
 停止命令：
@@ -787,6 +838,9 @@ ESL 仍使用 FreeSWITCH 默认密码 `ClueCon`。当前只用于本地测试，
 /etc/freeswitch/autoload_configs/event_socket.conf.xml
   listen-ip = 0.0.0.0
 
+/etc/freeswitch/autoload_configs/modules.conf.xml
+  load module = mod_audio_stream
+
 /etc/freeswitch/vars.xml
   default_password = 非默认值，原 1234 已移除
   domain = 192.168.0.165
@@ -803,7 +857,30 @@ ESL 仍使用 FreeSWITCH 默认密码 `ClueCon`。当前只用于本地测试，
   aggressive-nat-detection = true
   ext-rtp-ip = autonat:${external_rtp_ip}
   ext-sip-ip = autonat:${external_sip_ip}
+
+/etc/freeswitch/dialplan/default.xml
+  9199 = ten_media_hub_stream_test
+  ten_media_hub_call_id = fs_stage5a_local
+  ten_media_hub_base_url = ws://host.docker.internal:9000/media/fs/
+  STREAM_PLAYBACK = true
+  STREAM_SAMPLE_RATE = 8000
+  STREAM_BUFFER_SIZE = 20
+  STREAM_HEART_BEAT = 5
+
+/usr/share/freeswitch/scripts/ten_audio_stream_start.lua
+  读取当前 channel uuid
+  拼接 ws://host.docker.internal:9000/media/fs/{call_id}
+  执行 uuid_audio_stream <uuid> start <ws-url> mono 8k
 ```
+
+Docker Compose 还增加了：
+
+```text
+extra_hosts:
+  host.docker.internal:host-gateway
+```
+
+原因：FreeSWITCH 容器需要通过 `host.docker.internal:9000` 访问映射到 `ten_agent_dev` 的 Media Hub。
 
 敏感信息说明：
 
@@ -859,6 +936,7 @@ FreeSWITCH 当前默认本地分机范围：
 ```text
 9196：FreeSWITCH echo test，已验证能听到回声
 9197：FreeSWITCH tone / milliwatt，可用于听音测试
+9199：FreeSWITCH -> Media Hub -> 假 TEN 回声客户端，已验证能听到回音
 ```
 
 ### 9.6 当前本地 IP 依赖
@@ -899,11 +977,33 @@ MicroSIP 注册：Registered(UDP-NAT)
 回声：成功
 10 秒接通延迟：已消除
 本地 FreeSWITCH 配置持久化：完成
+mod_audio_stream：已加载，uuid_audio_stream API 可用
+拨打 9199：成功
+FreeSWITCH -> Media Hub：成功
+Media Hub -> FreeSWITCH：成功
+用户电话侧听到回音：成功
 ```
 
 10 秒延迟原因：
 
 FreeSWITCH 默认配置中，如果 `default_password=1234`，dialplan 会触发安全提示并 `sleep(10000)`。已通过改成非默认密码解决。
+
+9199 回音测试结论：
+
+```text
+Media Hub 日志：
+  audio_forwarded direction=fs_to_ten channel=fs_stage5a_local bytes=320
+  audio_forwarded direction=ten_to_fs channel=fs_stage5a_local bytes=320
+
+fake TEN 回声客户端日志：
+  fs_audio_received chunk=... bytes=320
+  echo_sent chunk=... bytes=320
+
+FreeSWITCH：
+  show calls = 0 after hangup
+```
+
+第一次拨打 `9199` 没有回音的原因不是 FreeSWITCH 没有上行音频，而是假 TEN 测试客户端提前被 Media Hub 心跳护栏清理，Media Hub 出现 `audio_drop ... reason=no_peer`。已通过给假 TEN 客户端增加应用层心跳修正。
 
 ## 11. 常用检查命令
 
@@ -937,6 +1037,12 @@ docker exec ten_local_freeswitch sh -lc "fs_cli -H 127.0.0.1 -P 8021 -p ClueCon 
 docker exec ten_local_freeswitch sh -lc "fs_cli -H 127.0.0.1 -P 8021 -p ClueCon -x 'status'"
 ```
 
+查看 `mod_audio_stream` 是否可用：
+
+```powershell
+docker exec ten_local_freeswitch sh -lc "fs_cli -H 127.0.0.1 -P 8021 -p ClueCon -x 'show api uuid_audio_stream'"
+```
+
 启动 Media Hub：
 
 ```bash
@@ -958,6 +1064,22 @@ cd ai_agents/agents/examples/voice-assistant-sip-trunk
 task test-bridge-audio-frame-roundtrip
 ```
 
+阶段 5A 本地 FreeSWITCH 回音测试：
+
+```powershell
+# 1. 启动 Media Hub。当前本机端口 9000 由 ten_agent_dev 映射，建议在容器内启动。
+docker exec -d ten_agent_dev bash -lc "cd /app/agents/examples/voice-assistant-sip-trunk && python3 server/main.py --host 0.0.0.0 --port 9000 --heartbeat-timeout 60 > /tmp/sip_trunk_media_hub_stage5a.log 2>&1"
+
+# 2. 启动假 TEN 回声客户端。
+docker exec -d ten_agent_dev bash -lc "cd /app/agents/examples/voice-assistant-sip-trunk && python3 server/fake_ten_audio_responder.py --url ws://127.0.0.1:9000 --channel fs_stage5a_local --mode echo --timeout 180 --max-inbound-chunks 1000 > /tmp/fake_ten_audio_responder_stage5a.log 2>&1"
+
+# 3. 用 MicroSIP 拨打 9199，说话后应能听到回音。
+
+# 4. 查看日志。
+docker exec ten_agent_dev bash -lc "tail -n 80 /tmp/sip_trunk_media_hub_stage5a.log"
+docker exec ten_agent_dev bash -lc "tail -n 80 /tmp/fake_ten_audio_responder_stage5a.log"
+```
+
 ## 12. 重要注意事项
 
 ### 12.1 不要误判当前进度
@@ -968,12 +1090,13 @@ task test-bridge-audio-frame-roundtrip
 本地 softphone -> FreeSWITCH -> echo
 Media Hub fake audio
 TEN AudioFrame roundtrip
+本地 softphone -> FreeSWITCH -> Media Hub -> fake TEN echo -> Media Hub -> FreeSWITCH -> softphone
 ```
 
 当前没有完成：
 
 ```text
-FreeSWITCH -> Media Hub
+同一通真实 FreeSWITCH 通话 -> Media Hub -> sip_media_bridge -> TEN AudioFrame
 真实 SIP trunk
 真实手机号外呼
 完整 AI 电话闭环
@@ -1067,21 +1190,27 @@ FreeSWITCH 在 SDP 中返回了容器内部 RTP 地址和未映射 RTP 端口
 
 ## 13. 推荐下一步
 
-暂停文档整理后，下一步技术工作建议是：
+阶段 5A 已完成。下一步技术工作建议是阶段 5B：
 
-1. 检查当前 FreeSWITCH 容器是否有 `mod_audio_stream`。
-2. 如果有，新增本地测试拨号码，例如 `9199`，让 FreeSWITCH 把媒体送到 Media Hub。
-3. 如果没有，先决定镜像/编译/替代方案。
-4. 只验证 FreeSWITCH 到 Media Hub 的音频，不急着接 ASR/LLM/TTS。
-5. 阶段完成后输出测试结果，再决定是否进入真实 TEN 闭环。
+1. 启动 Media Hub。
+2. 启动 TEN API server。
+3. 使用同一个 `channel_name=fs_stage5a_local` 启动 `voice_assistant_sip_trunk_audio_frame_test`。
+4. 用 MicroSIP 拨打 `9199`。
+5. 验证真实 FreeSWITCH 通话能进入 `sip_media_bridge`，被转换成 TEN `AudioFrame("pcm_frame")`，再通过 `sip_media_bridge_test_echo` 回到电话侧。
+6. 阶段完成后输出测试结果，再决定是否进入 ASR/LLM/TTS 电话闭环。
 
-下一阶段通过标准：
+阶段 5B 通过标准：
 
 ```text
 MicroSIP 拨本地测试号码
   -> FreeSWITCH 接通
   -> Media Hub 收到电话侧 PCM
-  -> Media Hub 能把测试 PCM 发回电话侧
+  -> sip_media_bridge 收到 PCM
+  -> sip_media_bridge 发出 TEN AudioFrame
+  -> sip_media_bridge_test_echo 回传 TEN AudioFrame
+  -> sip_media_bridge 把 AudioFrame 转回 PCM
+  -> Media Hub 把 PCM 发回 FreeSWITCH
+  -> 电话侧能听到回音
   -> 挂断后 FreeSWITCH channel 和 Media Hub session 都释放
 ```
 
@@ -1092,8 +1221,9 @@ MicroSIP 拨本地测试号码
 ```text
 当前不是完整电话 AI 产品。
 当前是一个分阶段验证中的电话接入模块。
-已经验证本地电话侧和 TEN 媒体桥的若干独立环节。
-尚未把 FreeSWITCH 的真实媒体流接入 Media Hub。
+已经验证本地电话侧、Media Hub、TEN AudioFrame 桥的若干独立环节。
+已经验证本地 FreeSWITCH 真实媒体流可以接入 Media Hub 并回到电话侧。
+尚未验证同一通真实 FreeSWITCH 通话穿过 sip_media_bridge 和 TEN AudioFrame graph。
 真实 SIP trunk 完全未验证。
-下一步不要直接做业务话术，应先打通 FreeSWITCH -> Media Hub。
+下一步不要直接做业务话术，应先打通 FreeSWITCH -> Media Hub -> sip_media_bridge -> TEN AudioFrame。
 ```

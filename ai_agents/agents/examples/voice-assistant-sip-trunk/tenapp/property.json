@@ -1,0 +1,105 @@
+{
+  "ten": {
+    "predefined_graphs": [
+      {
+        "name": "voice_assistant_sip_trunk_cn_skeleton",
+        "auto_start": false,
+        "graph": {
+          "nodes": [
+            {
+              "type": "extension",
+              "name": "sip_media_bridge",
+              "addon": "sip_media_bridge",
+              "extension_group": "default",
+              "property": {
+                "channel": "default",
+                "media_hub_base_url": "${env:MEDIA_HUB_BASE_URL|ws://127.0.0.1:9000}",
+                "sample_rate": 8000,
+                "heartbeat_interval_seconds": 5,
+                "registration_timeout_seconds": 5
+              }
+            }
+          ],
+          "connections": []
+        }
+      },
+      {
+        "name": "voice_assistant_sip_trunk_audio_frame_test",
+        "auto_start": false,
+        "graph": {
+          "nodes": [
+            {
+              "type": "extension",
+              "name": "sip_media_bridge",
+              "addon": "sip_media_bridge",
+              "extension_group": "default",
+              "property": {
+                "channel": "default",
+                "media_hub_base_url": "${env:MEDIA_HUB_BASE_URL|ws://127.0.0.1:9000}",
+                "sample_rate": 8000,
+                "heartbeat_interval_seconds": 5,
+                "registration_timeout_seconds": 5
+              }
+            },
+            {
+              "type": "extension",
+              "name": "sip_media_bridge_test_echo",
+              "addon": "sip_media_bridge_test_echo",
+              "extension_group": "default",
+              "property": {}
+            }
+          ],
+          "connections": [
+            {
+              "extension": "sip_media_bridge",
+              "audio_frame": [
+                {
+                  "name": "pcm_frame",
+                  "dest": [
+                    {
+                      "extension": "sip_media_bridge_test_echo"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "extension": "sip_media_bridge_test_echo",
+              "audio_frame": [
+                {
+                  "name": "pcm_frame",
+                  "dest": [
+                    {
+                      "extension": "sip_media_bridge"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "log": {
+      "handlers": [
+        {
+          "matchers": [
+            {
+              "level": "info"
+            }
+          ],
+          "formatter": {
+            "type": "plain",
+            "colored": true
+          },
+          "emitter": {
+            "type": "console",
+            "config": {
+              "stream": "stdout"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

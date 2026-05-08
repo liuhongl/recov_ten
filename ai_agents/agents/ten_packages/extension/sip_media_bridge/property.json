@@ -1,0 +1,7 @@
+{
+  "channel": "default",
+  "media_hub_base_url": "ws://127.0.0.1:9000",
+  "sample_rate": 8000,
+  "heartbeat_interval_seconds": 5,
+  "registration_timeout_seconds": 5
+}

@@ -11,8 +11,9 @@
 - 基础单元测试。
 - FreeSWITCH 媒体 WebSocket 回声服务，用于第二阶段闭环验证。
 - 音频格式转换模块，用于第三阶段验证 PCM 重采样、分帧和 PCMA 编解码。
+- Qwen-Omni-Realtime 离线探测命令，用于第四阶段验证实时模型接入。
 
-后续阶段才会接入端到端实时语音模型。
+后续阶段才会把实时模型接入电话热链路。
 
 ## 本地启动
 
@@ -85,3 +86,36 @@ python -m app.main --config configs/local.example.toml
 ```
 
 然后用 MicroSIP 拨打 `9199`。如果说话后仍能听到自己的回声，说明电话侧 `8k PCM` 经过 `8k -> 16k -> 8k` 后仍能被 FreeSWITCH 正常播放。
+
+## 第四阶段实时模型离线测试
+
+```powershell
+cd <repo>\sip-realtime-voice-gateway
+python -m app.realtime_probe `
+  --config configs/local.example.toml `
+  --env-file ../ai_agents/.env `
+  --input-pcm ../ai_agents/agents/integration_tests/asr_guarder/tests/test_data/16k_zh_cn.pcm `
+  --output-dir artifacts/stage4 `
+  --timeout 90
+```
+
+也可以直接使用本地 WAV，命令会自动转换为模型需要的 `16kHz mono pcm_s16le`：
+
+```powershell
+python -m app.realtime_probe `
+  --config configs/local.example.toml `
+  --env-file ../ai_agents/.env `
+  --input-wav <wav-file> `
+  --output-dir artifacts/stage4-user-wav `
+  --timeout 120
+```
+
+输出：
+
+```text
+artifacts/stage4/realtime_output_24k.pcm
+artifacts/stage4/realtime_output_24k.wav
+artifacts/stage4/realtime_probe_summary.json
+```
+
+`artifacts/` 不提交到 git。

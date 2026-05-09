@@ -475,7 +475,7 @@ REALTIME_MODEL_PROVIDER=aliyun
 ALIYUN_DASHSCOPE_API_KEY=***
 ALIYUN_REALTIME_URL=wss://dashscope.aliyuncs.com/api-ws/v1/realtime
 ALIYUN_REALTIME_MODEL=qwen3.5-omni-plus-realtime
-ALIYUN_REALTIME_VOICE=Cherry
+ALIYUN_REALTIME_VOICE=Ethan
 
 FREESWITCH_MEDIA_HOST=0.0.0.0
 FREESWITCH_MEDIA_PORT=9100
@@ -605,11 +605,23 @@ MicroSIP -> FreeSWITCH -> sip-realtime-voice-gateway echo -> FreeSWITCH -> Micro
 
 通过标准：
 
-```text
-本地 PCM 输入 -> 实时模型 -> 输出音频文件可播放
-```
+  ```text
+  本地 PCM 输入 -> 实时模型 -> 输出音频文件可播放
+  ```
 
-### 9.5 阶段 5：电话端实时语音闭环
+当前实现状态：
+
+- 已新增 `app/realtime_client.py`，封装 Qwen-Omni-Realtime WebSocket 事件。
+- 已新增 `app/realtime_probe.py`，支持本地 16k PCM 输入并保存模型返回 24k PCM/WAV。
+- 已新增 `app/env_loader.py`，从环境变量或 `ai_agents/.env` 读取 DashScope Key，但不打印密钥。
+- 已新增 `app/wav_io.py`，用于保存可播放 WAV。
+  - 首次使用 `Cherry` 音色被模型拒绝，已改为 `Ethan`。
+  - 已用 `qwen3.5-omni-plus-realtime` 验证成功：模型识别输入音频并返回中文音频回复。
+  - 本次离线首个音频 delta 约 1281ms，`response.done` 约 1906ms。
+  - 已支持 `--input-wav`，会把本地 WAV 自动转换成 16kHz mono pcm_s16le 后发送给模型。
+  - 已用用户提供的 24kHz mono WAV 复测成功：首个音频 delta 约 1312ms，`response.done` 约 2077ms。
+    
+    ### 9.5 阶段 5：电话端实时语音闭环
 
 目标：完成第一条真正的端到端电话实时语音闭环。
 

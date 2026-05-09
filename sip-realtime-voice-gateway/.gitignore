@@ -2,3 +2,7 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 *.log
+artifacts/
+*.pcm
+*.wav
+*.jsonl

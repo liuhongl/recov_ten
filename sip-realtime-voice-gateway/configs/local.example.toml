@@ -16,7 +16,7 @@ echo_mode = "raw"
 provider = "aliyun"
 url = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
 model = "qwen3.5-omni-plus-realtime"
-voice = "Cherry"
+voice = "Ethan"
 
 [features]
 metrics_enabled = true

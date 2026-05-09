@@ -32,7 +32,7 @@ class RealtimeConfig:
     provider: str = "aliyun"
     url: str = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
     model: str = "qwen3.5-omni-plus-realtime"
-    voice: str = "Cherry"
+    voice: str = "Ethan"
 
 
 @dataclass(frozen=True)

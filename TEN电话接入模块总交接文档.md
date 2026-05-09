@@ -1,6 +1,6 @@
 # TEN 电话接入模块总交接文档
 
-最后更新：2026-05-08
+最后更新：2026-05-09
 
 ## 1. 文档目的
 
@@ -11,6 +11,27 @@
 - `TEN电话接入学习笔记.md`：概念、名词、链路和本地/真实线路区别的学习笔记。
 
 核心原则：不要让后续同事在多份阶段文档里判断当前状态。本文以当前事实为准。
+
+### 1.1 环境相关值约定
+
+本文中的本机路径、Windows 用户名、局域网 IP 都不是强制要求。接手同事不需要把电脑配置成和本机完全一样，只需要保持配置关系一致。
+
+后续文档统一使用以下占位符：
+
+| 占位符 | 含义 |
+| --- | --- |
+| `<repo-root>` | 接手同事本地克隆后的项目根目录 |
+| `<host-lan-ip>` | 当前电脑在局域网中的 IPv4 地址 |
+| `<windows-user>` | 当前 Windows 登录用户名 |
+| `<microsip-config>` | 当前电脑上的 MicroSIP 配置文件路径 |
+
+历史测试值只用于解释当时的测试现场，不应照抄为固定配置。例如：
+
+```text
+本机历史项目路径：E:\recov_ten
+阶段 5A / 5B 早期测试 IP：192.168.0.165
+阶段 6A 延迟复测 IP：192.168.43.52
+```
 
 ## 2. 第一性原理结论
 
@@ -102,6 +123,71 @@ FreeSWITCH /media/fs/{call_id}
   -> FreeSWITCH
 ```
 
+### 3.1 当前已实现链路位置图
+
+当前已经验证的是“本地软电话 + 本地 Docker FreeSWITCH + 本地 9199 测试号码”的最小 AI 电话闭环，不是真实 SIP trunk，也不是真实手机号外呼。
+
+```mermaid
+flowchart LR
+  subgraph Target["目标真实业务链路"]
+    Biz["业务系统<br/>未实现"]
+    CG["Call Gateway<br/>未实现"]
+    FSProd["FreeSWITCH<br/>生产/联调形态未验证"]
+    Trunk["SIP Trunk / 线路商<br/>未接入"]
+    Mobile["真实用户手机<br/>未验证"]
+
+    Biz -.-> CG
+    CG -.-> FSProd
+    FSProd -.-> Trunk
+    Trunk -.-> Mobile
+  end
+
+  subgraph Local6A["当前本地 6A 已验证链路"]
+    Softphone["MicroSIP 软电话<br/>已验证"]
+    FSLocal["Docker FreeSWITCH<br/>本地 9199"]
+    MH["Media Hub<br/>fs_stage5a_local"]
+    BridgeUp["sip_media_bridge<br/>PCM -> AudioFrame"]
+    ASR["Deepgram ASR<br/>已验证"]
+    Dialog["sip_trunk_dialog_controller<br/>已验证"]
+    LLM["DeepSeek / OpenAI-compatible LLM<br/>已验证"]
+    TTS["ElevenLabs TTS<br/>已验证"]
+    BridgeDown["sip_media_bridge<br/>AudioFrame -> 8k PCM"]
+
+    Softphone -->|"SIP/RTP 本地注册与拨号"| FSLocal
+    FSLocal -->|"mod_audio_stream<br/>8k PCM / 20ms / 320 bytes"| MH
+    MH -->|"PCM bytes"| BridgeUp
+    BridgeUp -->|"AudioFrame pcm_frame"| ASR
+    ASR -->|"final asr_result"| Dialog
+    Dialog -->|"streaming request"| LLM
+    LLM -->|"文本回复"| Dialog
+    Dialog -->|"tts_text_input"| TTS
+    TTS -->|"PCM AudioFrame"| BridgeDown
+    BridgeDown -->|"8k PCM / 20ms / 320 bytes"| MH
+    MH -->|"下行 PCM"| FSLocal
+    FSLocal -->|"RTP 播放"| Softphone
+  end
+
+  FSProd -.-> FSLocal
+```
+
+图中虚线表示“目标真实链路与当前本地验证链路的对应关系”，不表示真实线路已经打通。当前只是用 MicroSIP 软电话拨本地 `9199`，通过 Docker FreeSWITCH 模拟电话侧媒体进入 TEN。
+
+当前“已实现”的边界：
+
+| 总链路环节 | 当前状态 | 说明 |
+| --- | --- | --- |
+| MicroSIP 软电话 | 已验证 | 本地测试终端，不是真实用户手机 |
+| Docker FreeSWITCH 本地拨号 | 已验证 | `9196` 本地 echo、`9199` 媒体桥均已验证 |
+| FreeSWITCH -> Media Hub | 已验证 | 通过 `mod_audio_stream` 转发 8k PCM |
+| Media Hub 双向配对 | 已验证 | `/media/fs/{call_id}` 与 `/media/ten/{call_id}` 可按 channel 配对 |
+| sip_media_bridge 上行 | 已验证 | PCM bytes 可转为 TEN `AudioFrame("pcm_frame")` |
+| ASR/LLM/TTS 最小 AI graph | 已验证 | 6A 已听到 AI 回复 |
+| sip_media_bridge 下行 | 已验证 | 已加入下行重采样护栏，输出电话侧需要的 8k PCM |
+| 真实 SIP trunk | 未验证 | 当前没有真实 trunk 信息，也未接入线路商 |
+| Call Gateway / ESL 外呼控制 | 未实现 | 当前仍是人工用 MicroSIP 拨本地测试号 |
+| 真实用户手机号外呼 | 未验证 | 当前没有走运营商电话网络 |
+| AI 开场白、打断、VAD、并发 | 未实现 | 属于后续体验和生产化阶段 |
+
 ## 4. 业务需求
 
 当前明确需求：
@@ -126,13 +212,22 @@ FreeSWITCH /media/fs/{call_id}
 
 ## 5. 当前代码状态
 
-当前工作区：`E:\recov_ten`
+当前代码以仓库根目录为基准，本文后续用 `<repo-root>` 表示接手同事自己的项目根目录。
+
+本机历史测试路径为：
+
+```text
+E:\recov_ten
+```
+
+该路径不是要求，同事可以克隆到任意目录。
 
 新增或相关代码：
 
 ```text
 ai_agents/agents/examples/voice-assistant-sip-trunk/
 ai_agents/agents/ten_packages/extension/sip_media_bridge/
+ai_agents/agents/ten_packages/extension/sip_trunk_dialog_controller/
 ```
 
 当前示例 graph：
@@ -140,6 +235,7 @@ ai_agents/agents/ten_packages/extension/sip_media_bridge/
 ```text
 voice_assistant_sip_trunk_cn_skeleton
 voice_assistant_sip_trunk_audio_frame_test
+voice_assistant_sip_trunk_cn_ai_minimal
 ```
 
 当前 `sip_media_bridge` 关键配置：
@@ -385,9 +481,9 @@ sip_media_bridge 取出 audio_frame.get_buf()
 重要限制：
 
 ```text
-当前 sip_media_bridge 没有做重采样
 当前 sip_media_bridge 没有做 codec 编解码
-当前 sip_media_bridge 没有校验下行 AudioFrame 的 sample_rate 是否等于 8000
+当前 sip_media_bridge 上行假设输入已经是 8k mono s16le PCM
+当前 sip_media_bridge 下行已加入重采样护栏，但仍不负责电话侧 codec 编解码
 ```
 
 如果后续 TTS 输出 16k 或 24k PCM，必须在以下任一位置补齐转换：
@@ -410,6 +506,12 @@ PCMA / G.711 A-law
 PCMU / G.711 u-law
 ```
 
+当前已确认后续运营商线路 codec 为：
+
+```text
+PCMA / G.711 A-law
+```
+
 但进入 Media Hub 前必须变成：
 
 ```text
@@ -419,9 +521,11 @@ PCM s16le 8000 Hz mono
 FreeSWITCH 负责或协助完成：
 
 ```text
-电话侧 PCMA/PCMU -> PCM
-PCM -> 电话侧 PCMA/PCMU
+电话侧 PCMA -> PCM
+PCM -> 电话侧 PCMA
 ```
+
+因此，TEN 内部和模型侧仍应按 8k 电话音频处理。后续 ASR 模型选择应优先选择支持 8k 电话音频的模型，不要默认使用 16k 宽带语音模型。
 
 本地阶段 5A 已确认 `mod_audio_stream` 的实际协议：
 
@@ -639,8 +743,8 @@ fake_fs_client
 
 - 该阶段需要同时启动 Media Hub、TEN API server，并用同一个 `channel_name` 启动 `voice_assistant_sip_trunk_audio_frame_test`。
 - 测试 echo 扩展是 `sip_media_bridge_test_echo`，它只回传 AudioFrame，不做 ASR、LLM、TTS。
-- 当前 `sip_media_bridge` 假设上行 PCM 已经是 8k mono s16le，不做重采样、不做 codec 编解码。
-- 下行 AudioFrame 目前直接取 `get_buf()` 发回 Media Hub，没有强制校验 sample rate。如果后续接真实 TTS，要补 sample rate 校验或重采样。
+- 当前 `sip_media_bridge` 假设上行 PCM 已经是 8k mono s16le，不做 codec 编解码。
+- 下行 AudioFrame 已加入重采样护栏。如果 TTS 输出不是 8k mono s16le，会尝试转换为电话侧需要的 8k PCM 后再发回 Media Hub。
 - 这个阶段能证明 `PCM bytes <-> TEN AudioFrame` 成立，但仍不能证明电话侧 FreeSWITCH 媒体能进来。
 
 ### 7.5 本地 FreeSWITCH + MicroSIP 电话侧基础链路
@@ -669,7 +773,7 @@ MicroSIP
 需要注意的细节：
 
 - 本地 FreeSWITCH 配置保存在 `ai_agents/local/freeswitch/`，该目录已被 `.gitignore` 忽略，不应提交。
-- 当前配置依赖本机局域网 IP `192.168.0.165`。换网络、换 Wi-Fi、换机器后，需要同步更新 FreeSWITCH 和 MicroSIP 配置。
+- 当前配置依赖本机局域网 IP。换网络、换 Wi-Fi、换机器后，需要同步更新 FreeSWITCH 和 MicroSIP 配置。历史测试中该 IP 曾从 `192.168.0.165` 变为 `192.168.43.52`。
 - 之前“能拨通但听不到回声”的原因是 Docker NAT 下 FreeSWITCH SDP 返回了容器内部 RTP 地址和未映射 RTP 端口。当前通过 external RTP/SIP IP、RTP 端口范围和 NAT profile 配置修复。
 - 之前“接通约 10 秒”的原因是 FreeSWITCH 默认 `default_password=1234` 会触发 dialplan 安全提示和 `sleep(10000)`。当前已改成非默认密码，后续不要改回 `1234`。
 - 当前只配置并验证了一个 MicroSIP 分机 `1000`。如果要测试 1000 呼叫 1001，需要第二个软电话实例、第二台设备，或另一个 SIP 客户端。
@@ -724,6 +828,117 @@ MicroSIP
 - 第一次测试失败的原因是假 TEN 侧没有应用层心跳，等待拨号期间被 Media Hub 心跳护栏清理，导致 FreeSWITCH 上行音频出现 `reason=no_peer`。已通过给假 TEN 客户端增加 `ping/pong` 心跳修正。
 - `9199` 是本地测试号码，不是业务号码；真实外呼阶段应由 Call Gateway 创建 call_id，并控制 FreeSWITCH originate 与 TEN /start。
 
+### 7.7 本地 FreeSWITCH + sip_media_bridge + TEN AudioFrame 回音链路
+
+已完成本机部署和验证：
+
+```text
+MicroSIP
+  -> FreeSWITCH 9199
+  -> mod_audio_stream
+  -> Media Hub /media/fs/fs_stage5a_local
+  -> sip_media_bridge /media/ten/fs_stage5a_local
+  -> TEN AudioFrame("pcm_frame")
+  -> sip_media_bridge_test_echo
+  -> TEN AudioFrame("pcm_frame")
+  -> sip_media_bridge
+  -> Media Hub
+  -> mod_audio_stream
+  -> FreeSWITCH
+  -> MicroSIP
+```
+
+已验证：
+
+- 使用同一个 `channel_name=fs_stage5a_local` 启动 `voice_assistant_sip_trunk_audio_frame_test` 后，`sip_media_bridge` 能注册到 Media Hub。
+- MicroSIP 拨打 `9199` 后，真实电话侧音频能从 FreeSWITCH 进入 Media Hub。
+- Media Hub 能把 FreeSWITCH 上行 PCM 转发给 `sip_media_bridge`。
+- `sip_media_bridge` 能把 8k mono s16le PCM 转成 TEN `AudioFrame("pcm_frame")`。
+- `sip_media_bridge_test_echo` 能收到并回传该 AudioFrame。
+- `sip_media_bridge` 能把回传 AudioFrame 转回 PCM，并通过 Media Hub 发回 FreeSWITCH。
+- 用户电话侧实际听到了回音，且主观听感没有卡顿。
+- 挂断后 FreeSWITCH `show calls` 为 `0`。
+
+关键日志证据：
+
+```text
+Media Hub:
+  ten_registered channel=fs_stage5a_local sample_rate=8000
+  audio_forwarded direction=fs_to_ten channel=fs_stage5a_local bytes=320
+  audio_forwarded direction=ten_to_fs channel=fs_stage5a_local bytes=320
+
+TEN:
+  sip_media_bridge received_pcm_from_media_hub: channel=fs_stage5a_local, bytes=320, sample_rate=8000
+  sip_media_bridge_test_echo received_audio_frame: bytes=320, sample_rate=8000, channels=1, bytes_per_sample=2, samples_per_channel=160
+  sip_media_bridge sent_pcm_to_media_hub: channel=fs_stage5a_local, bytes=320, sample_rate=8000
+
+FreeSWITCH:
+  show calls = 0 after hangup
+```
+
+重要边界：
+
+- 这个阶段仍然是回音测试，不是完整 AI 对话。
+- 这个阶段不经过 ASR、LLM、TTS，也没有业务 `main_control`。
+- `9199` 仍是本地测试号码，不是真实业务号码。
+- 该阶段验证的是“真实本地电话媒体能穿过 TEN AudioFrame 桥”，但不证明真实 SIP trunk、公网 NAT、运营商线路一定可用。
+- 当前 `sip_media_bridge` 仍假设上行输入 PCM 已经是 8k mono s16le，不做 codec 编解码；下行已加入重采样护栏。
+
+### 7.8 本地 FreeSWITCH + 最小 AI 电话闭环
+
+已完成本机部署和验证：
+
+```text
+MicroSIP
+  -> FreeSWITCH 9199
+  -> mod_audio_stream
+  -> Media Hub /media/fs/fs_stage5a_local
+  -> sip_media_bridge /media/ten/fs_stage5a_local
+  -> Deepgram ASR
+  -> sip_trunk_dialog_controller
+  -> DeepSeek/OpenAI-compatible LLM
+  -> ElevenLabs TTS
+  -> sip_media_bridge
+  -> Media Hub
+  -> mod_audio_stream
+  -> FreeSWITCH
+  -> MicroSIP
+```
+
+已验证：
+
+- 使用 `voice_assistant_sip_trunk_cn_ai_minimal` graph 后，本地 `9199` 电话音频可以进入 ASR。
+- ASR 能识别中文短句，例如“你好呀”。
+- `sip_trunk_dialog_controller` 能在 ASR `final=True` 后调用 LLM。
+- DeepSeek/OpenAI-compatible LLM 能返回中文回复。
+- ElevenLabs TTS 在修正 API key 权限后能产出音频。
+- `sip_media_bridge` 能把 TTS 输出音频下采样/分片为电话侧需要的 `8000Hz / mono / s16le / 20ms / 320 bytes`。
+- 电话侧实际听到了 AI 回复。
+- 修正后主观听感无明显卡顿。
+
+本次 6A 延迟样本：
+
+```text
+测试语音：你好呀
+ASR interim：你好呀
+ASR final：你好呀
+AI 回复：你好！有什么可以帮你的吗？
+
+电话音频进入 -> ASR final: 约 2.8s
+ASR final -> LLM 第一段文本: 约 2.28s
+LLM 第一段文本 -> TTS 首包: 约 0.78s
+电话音频进入 -> 电话侧听到第一声 AI: 约 5.88s
+```
+
+重要边界：
+
+- 这是本地软电话链路验证，不是真实 SIP trunk 验证。
+- 当前仍由测试者手动用 MicroSIP 拨打 `9199`，没有经过 Call Gateway 和 ESL originate。
+- 当前没有 AI 开场白，只有用户说话后触发回复。
+- 当前 `dialog_controller` 等待 ASR `final=True` 后才触发 LLM，没有使用 ASR interim 预触发。
+- 当前没有 VAD 打断、播放中止、用户插话处理。
+- 当前只验证了单通短句样本，未做长通话、多轮、异常挂断、并发和生产监控验证。
+
 ## 8. 剩余未实现部分
 
 未实现：
@@ -732,25 +947,31 @@ MicroSIP
 - ESL originate / hangup / event listener。
 - 真实 SIP trunk 配置。
 - 真实外呼手机号。
-- 同一通真实 FreeSWITCH 通话接入 `sip_media_bridge` 的 TEN AudioFrame graph。
-- ASR/LLM/TTS 电话场景 graph。
 - main_control 电话业务逻辑。
 - AI 开场白。
 - 用户插话打断。
-- 端到端延迟打点。
+- VAD / endpointing 优化。
+- ASR interim 预触发。
+- 阿里系 ASR/LLM/TTS A/B graph。
+- 自动化端到端延迟打点。
 - 10 路并发压测。
 - 录音、回放、监控、告警。
 
 下一阶段建议先做：
 
 ```text
-FreeSWITCH
-  -> Media Hub
-  -> sip_media_bridge
-  -> TEN AudioFrame
+6B：国内低延迟模型链路 A/B 验证
+  -> 新增阿里系 ASR/LLM/TTS graph
+  -> 优先选择支持 8k 电话音频的 ASR
+  -> LLM 尝试阿里千问低延迟模型
+  -> TTS 尝试阿里 CosyVoice / Qwen TTS 流式能力
+  -> 和当前 Deepgram + DeepSeek + ElevenLabs 链路做同条件对比
+  -> 输出分段延迟数据
 ```
 
-当前已经确认本地 FreeSWITCH 具备可用的双向音频流能力。下一阶段不要直接接 ASR/LLM/TTS，建议先把 `9199` 的真实 FreeSWITCH 媒体接到 `voice_assistant_sip_trunk_audio_frame_test`，验证同一通真实电话能走完 `FreeSWITCH -> Media Hub -> sip_media_bridge -> TEN AudioFrame -> echo -> sip_media_bridge -> Media Hub -> FreeSWITCH`。
+6B 暂不做固定开场白、提示词缩短、回复话术优化和完整打断。原因是这些不是当前 6A 约 5 秒首响延迟的根本变量。6B 的核心目标是先判断国内流式模型链路是否能降低 ASR final、LLM 首句和 TTS 首包耗时。
+
+当前已经确认本地 FreeSWITCH 真实媒体可以穿过 `sip_media_bridge` 和最小 ASR/LLM/TTS graph，并且电话侧能听到 AI 回复。下一阶段建议先在本地 `9199` 链路上新增阿里系 A/B graph，并保留当前已验证 graph 作为 baseline，再进入真实 SIP trunk 和 Call Gateway 联调。
 
 ## 9. 本次本地测试安装内容
 
@@ -776,7 +997,7 @@ status: healthy
 本地持久化目录：
 
 ```text
-E:\recov_ten\ai_agents\local\freeswitch\
+<repo-root>\ai_agents\local\freeswitch\
 ```
 
 该目录已加入 `.gitignore`：
@@ -790,20 +1011,20 @@ ai_agents/local/
 compose 文件：
 
 ```text
-E:\recov_ten\ai_agents\local\freeswitch\docker-compose.yml
+<repo-root>\ai_agents\local\freeswitch\docker-compose.yml
 ```
 
 配置挂载：
 
 ```text
-E:\recov_ten\ai_agents\local\freeswitch\conf -> /etc/freeswitch
-E:\recov_ten\ai_agents\local\freeswitch\scripts -> /usr/share/freeswitch/scripts
+<repo-root>\ai_agents\local\freeswitch\conf -> /etc/freeswitch
+<repo-root>\ai_agents\local\freeswitch\scripts -> /usr/share/freeswitch/scripts
 ```
 
 启动命令：
 
 ```powershell
-cd E:\recov_ten\ai_agents\local\freeswitch
+cd <repo-root>\ai_agents\local\freeswitch
 docker build --pull=false -t ten-local-freeswitch-audio-stream:1.0.3 image
 docker compose up -d --no-build
 ```
@@ -811,7 +1032,7 @@ docker compose up -d --no-build
 停止命令：
 
 ```powershell
-cd E:\recov_ten\ai_agents\local\freeswitch
+cd <repo-root>\ai_agents\local\freeswitch
 docker compose down
 ```
 
@@ -843,9 +1064,9 @@ ESL 仍使用 FreeSWITCH 默认密码 `ClueCon`。当前只用于本地测试，
 
 /etc/freeswitch/vars.xml
   default_password = 非默认值，原 1234 已移除
-  domain = 192.168.0.165
-  external_rtp_ip = 192.168.0.165
-  external_sip_ip = 192.168.0.165
+  domain = <host-lan-ip>
+  external_rtp_ip = <host-lan-ip>
+  external_sip_ip = <host-lan-ip>
 
 /etc/freeswitch/autoload_configs/switch.conf.xml
   rtp-start-port = 16384
@@ -899,20 +1120,21 @@ MicroSIP Lite 3.22.5
 安装位置：
 
 ```text
-C:\Users\Tzk00\AppData\Local\MicroSIP\MicroSIP.exe
+C:\Users\<windows-user>\AppData\Local\MicroSIP\MicroSIP.exe
 ```
 
 配置文件：
 
 ```text
-C:\Users\Tzk00\AppData\Roaming\MicroSIP\MicroSIP.ini
+<microsip-config>
+常见位置：C:\Users\<windows-user>\AppData\Roaming\MicroSIP\MicroSIP.ini
 ```
 
 当前本地账号：
 
 ```text
-SIP Server: 192.168.0.165
-Domain: 192.168.0.165
+SIP Server: <host-lan-ip>
+Domain: <host-lan-ip>
 Username: 1000
 Auth ID: 1000
 Transport: UDP
@@ -936,15 +1158,17 @@ FreeSWITCH 当前默认本地分机范围：
 ```text
 9196：FreeSWITCH echo test，已验证能听到回声
 9197：FreeSWITCH tone / milliwatt，可用于听音测试
-9199：FreeSWITCH -> Media Hub -> 假 TEN 回声客户端，已验证能听到回音
+9199：FreeSWITCH -> Media Hub 测试号码；阶段 5A 已验证假 TEN 回声，阶段 5B 已验证 sip_media_bridge + TEN AudioFrame echo，阶段 6A 已验证最小 ASR/LLM/TTS AI 回复
 ```
 
 ### 9.6 当前本地 IP 依赖
 
-本次测试使用的宿主机局域网 IP：
+本地测试使用的是宿主机局域网 IP。这个值不是固定配置，会随网络变化。
 
 ```text
-192.168.0.165
+阶段 5A / 5B 早期测试：192.168.0.165
+阶段 6A 延迟复测：192.168.43.52
+实际复现时：以当前 Windows WLAN/以太网 IPv4 为准，即 <host-lan-ip>
 ```
 
 如果换网络、换电脑、换 Wi-Fi，该 IP 很可能变化。变化后必须同步更新：
@@ -968,7 +1192,7 @@ MicroSIP Account:
 
 ## 10. 本次测试结论
 
-2026-05-08 本地测试结果：
+截至 2026-05-09，本地测试结果：
 
 ```text
 Docker FreeSWITCH：healthy
@@ -982,6 +1206,10 @@ mod_audio_stream：已加载，uuid_audio_stream API 可用
 FreeSWITCH -> Media Hub：成功
 Media Hub -> FreeSWITCH：成功
 用户电话侧听到回音：成功
+9199 -> sip_media_bridge -> TEN AudioFrame echo：成功
+5B 听感：有回音，无明显卡顿
+9199 -> sip_media_bridge -> ASR/LLM/TTS -> 电话侧播放：成功
+6A 听感：能听到 AI 回复，修正后无明显卡顿，但首响延迟仍偏高
 ```
 
 10 秒延迟原因：
@@ -1004,6 +1232,63 @@ FreeSWITCH：
 ```
 
 第一次拨打 `9199` 没有回音的原因不是 FreeSWITCH 没有上行音频，而是假 TEN 测试客户端提前被 Media Hub 心跳护栏清理，Media Hub 出现 `audio_drop ... reason=no_peer`。已通过给假 TEN 客户端增加应用层心跳修正。
+
+9199 真实 TEN AudioFrame 回音测试结论：
+
+```text
+Media Hub 日志：
+  ten_registered channel=fs_stage5a_local sample_rate=8000
+  audio_forwarded direction=fs_to_ten channel=fs_stage5a_local bytes=320
+  audio_forwarded direction=ten_to_fs channel=fs_stage5a_local bytes=320
+
+TEN 日志：
+  sip_media_bridge received_pcm_from_media_hub: channel=fs_stage5a_local, bytes=320, sample_rate=8000
+  sip_media_bridge_test_echo received_audio_frame: bytes=320, sample_rate=8000, channels=1, bytes_per_sample=2, samples_per_channel=160
+  sip_media_bridge sent_pcm_to_media_hub: channel=fs_stage5a_local, bytes=320, sample_rate=8000
+
+用户听感：
+  有回音
+  无明显卡顿
+
+FreeSWITCH：
+  show calls = 0 after hangup
+```
+
+9199 最小 AI 电话闭环测试结论：
+
+```text
+链路：
+  MicroSIP
+    -> FreeSWITCH 9199
+    -> Media Hub
+    -> sip_media_bridge
+    -> Deepgram ASR
+    -> DeepSeek/OpenAI-compatible LLM
+    -> ElevenLabs TTS
+    -> sip_media_bridge
+    -> Media Hub
+    -> FreeSWITCH
+    -> MicroSIP
+
+用户语音：
+  你好呀
+
+ASR：
+  interim = 你好呀
+  final = 你好呀
+
+AI 回复：
+  你好！有什么可以帮你的吗？
+
+用户听感：
+  电话侧能听到 AI 回复
+  修正后无明显卡顿
+
+延迟：
+  电话音频进入到电话侧听到第一声 AI 约 5.88s
+```
+
+这说明 6A 的本地最小 AI 电话闭环已通过，但该结论只覆盖本地软电话链路，不覆盖真实 SIP trunk、真实手机号外呼、Call Gateway、VAD 打断、多轮稳定性和并发。
 
 ## 11. 常用检查命令
 
@@ -1080,6 +1365,44 @@ docker exec ten_agent_dev bash -lc "tail -n 80 /tmp/sip_trunk_media_hub_stage5a.
 docker exec ten_agent_dev bash -lc "tail -n 80 /tmp/fake_ten_audio_responder_stage5a.log"
 ```
 
+阶段 5B 本地 FreeSWITCH + TEN AudioFrame 回音测试：
+
+```powershell
+# 1. 清理旧的 Media Hub、假 TEN responder、TEN API server，避免端口或 channel 冲突。
+docker exec ten_agent_dev bash -lc "pkill -f 'server/fake_ten_audio_responder.py' || true; pkill -f 'server/main.py --host 0.0.0.0 --port 9000' || true; pkill -f './bin/api' || true"
+
+# 2. 启动 Media Hub。
+docker exec -d ten_agent_dev bash -lc "cd /app/agents/examples/voice-assistant-sip-trunk && python3 server/main.py --host 0.0.0.0 --port 9000 --heartbeat-timeout 60 > /tmp/sip_trunk_media_hub_stage5b.log 2>&1"
+
+# 3. 启动 TEN API server。
+docker exec -d ten_agent_dev bash -lc "cd /app/server && ./bin/api -tenapp_dir=/app/agents/examples/voice-assistant-sip-trunk/tenapp > /tmp/sip_trunk_api_stage5b.log 2>&1"
+
+# 4. 启动 AudioFrame 测试 graph。channel_name 必须和 9199 dialplan 中的 fs_stage5a_local 一致。
+$script = @'
+cat > /tmp/stage5b_start.json <<'JSON'
+{
+  "request_id": "stage5b-local",
+  "channel_name": "fs_stage5a_local",
+  "graph_name": "voice_assistant_sip_trunk_audio_frame_test",
+  "user_uid": 1000,
+  "bot_uid": 1001,
+  "token": "",
+  "properties": {},
+  "timeout": 600
+}
+JSON
+curl -sS -X POST http://127.0.0.1:8080/start -H 'Content-Type: application/json' --data-binary @/tmp/stage5b_start.json
+'@
+$script | docker exec -i ten_agent_dev bash -s
+
+# 5. 用 MicroSIP 拨打 9199，说话后应能听到回音。
+
+# 6. 查看日志和通话释放状态。
+docker exec ten_agent_dev bash -lc "tail -n 120 /tmp/sip_trunk_media_hub_stage5b.log"
+docker exec ten_agent_dev bash -lc "tail -n 120 /tmp/app-fs_stage5a_local-*.log"
+docker exec ten_local_freeswitch sh -lc "fs_cli -H 127.0.0.1 -P 8021 -p ClueCon -x 'show calls'"
+```
+
 ## 12. 重要注意事项
 
 ### 12.1 不要误判当前进度
@@ -1091,15 +1414,18 @@ docker exec ten_agent_dev bash -lc "tail -n 80 /tmp/fake_ten_audio_responder_sta
 Media Hub fake audio
 TEN AudioFrame roundtrip
 本地 softphone -> FreeSWITCH -> Media Hub -> fake TEN echo -> Media Hub -> FreeSWITCH -> softphone
+本地 softphone -> FreeSWITCH -> Media Hub -> sip_media_bridge -> TEN AudioFrame echo -> Media Hub -> FreeSWITCH -> softphone
+本地 softphone -> FreeSWITCH -> Media Hub -> sip_media_bridge -> ASR/LLM/TTS -> Media Hub -> FreeSWITCH -> softphone
 ```
 
 当前没有完成：
 
 ```text
-同一通真实 FreeSWITCH 通话 -> Media Hub -> sip_media_bridge -> TEN AudioFrame
 真实 SIP trunk
 真实手机号外呼
-完整 AI 电话闭环
+Call Gateway / ESL 外呼控制
+生产级完整 AI 电话产品
+AI 开场白、VAD 打断、并发和监控
 ```
 
 本地可以通，不等于真实 SIP trunk 一定可以通。
@@ -1188,33 +1514,117 @@ FreeSWITCH 在 SDP 中返回了容器内部 RTP 地址和未映射 RTP 端口
 
 后续如果换机器或网络，先检查 SDP 和 RTP 地址，不要只看 SIP 注册。
 
-## 13. 推荐下一步
+## 13. 阶段 6A 当前状态
 
-阶段 5A 已完成。下一步技术工作建议是阶段 5B：
-
-1. 启动 Media Hub。
-2. 启动 TEN API server。
-3. 使用同一个 `channel_name=fs_stage5a_local` 启动 `voice_assistant_sip_trunk_audio_frame_test`。
-4. 用 MicroSIP 拨打 `9199`。
-5. 验证真实 FreeSWITCH 通话能进入 `sip_media_bridge`，被转换成 TEN `AudioFrame("pcm_frame")`，再通过 `sip_media_bridge_test_echo` 回到电话侧。
-6. 阶段完成后输出测试结果，再决定是否进入 ASR/LLM/TTS 电话闭环。
-
-阶段 5B 通过标准：
+阶段 6A 的目标是把本地 `9199` 链路从回音测试推进到最小 AI 对话闭环：
 
 ```text
-MicroSIP 拨本地测试号码
-  -> FreeSWITCH 接通
-  -> Media Hub 收到电话侧 PCM
-  -> sip_media_bridge 收到 PCM
-  -> sip_media_bridge 发出 TEN AudioFrame
-  -> sip_media_bridge_test_echo 回传 TEN AudioFrame
-  -> sip_media_bridge 把 AudioFrame 转回 PCM
-  -> Media Hub 把 PCM 发回 FreeSWITCH
-  -> 电话侧能听到回音
-  -> 挂断后 FreeSWITCH channel 和 Media Hub session 都释放
+MicroSIP
+  -> FreeSWITCH 9199
+  -> Media Hub
+  -> sip_media_bridge
+  -> Deepgram ASR
+  -> DeepSeek/OpenAI-compatible LLM
+  -> ElevenLabs TTS
+  -> sip_media_bridge
+  -> Media Hub
+  -> FreeSWITCH
+  -> MicroSIP
 ```
 
-## 14. 交接给同事时必须说明的话
+当前代码已经加入了 `voice_assistant_sip_trunk_cn_ai_minimal` graph 和
+`sip_trunk_dialog_controller`，用于把最终 ASR 文本发给 LLM，再把 LLM 回复文本发给 TTS。
+
+6A 当前结论：
+
+```text
+状态：本地最小 AI 电话闭环已通过
+范围：仅限 MicroSIP + 本地 Docker FreeSWITCH + 本地 9199
+不包含：真实 SIP trunk、真实手机号外呼、Call Gateway、生产体验
+```
+
+已验证：
+
+```text
+OPENAI_API_BASE=https://api.deepseek.com/v1
+LLM model=deepseek-chat
+ASR vendor=Deepgram, model=nova-3, language=zh-CN, sample_rate=8000
+Media Hub TEN side registered channel=fs_stage5a_local sample_rate=8000
+sip_trunk_dialog_controller 已创建并启动
+Deepgram ASR WebSocket 已打开
+LLM 已初始化
+ElevenLabs TTS 权限已修正，TTS 可产出音频
+电话侧能听到 AI 回复
+```
+
+同时，`sip_media_bridge` 已加入下行音频护栏：如果 TTS 输出不是目标
+`8k mono s16le`，会尝试下混和重采样后再发回 Media Hub。当前 6A 配置把
+ElevenLabs TTS 输出设为 `pcm_16000`，目的是验证桥接层可以把 16k PCM 下采样到电话侧需要的 8k PCM。
+
+6A 不代表以下内容已经通过：
+
+```text
+真实 SIP trunk 可用
+公网 NAT / 运营商 RTP 路由可用
+Call Gateway 已能自动外呼
+用户接通后 AI 可主动播放开场白
+用户插话时可打断当前 TTS
+首响延迟达到 1s - 1.5s 目标
+多轮长通话稳定
+10 路并发稳定
+```
+
+## 14. 推荐下一步
+
+阶段 6A 已完成本地最小 AI 电话闭环。下一阶段建议不要立刻进入真实 SIP trunk，而是先做本地 6B 国内低延迟模型链路 A/B 验证，降低后续真实线路联调时的变量数量。
+
+建议 6B 范围：
+
+```text
+1. 保留当前 Deepgram + DeepSeek + ElevenLabs graph 作为 baseline。
+2. 新增阿里 ASR/TTS graph，优先验证 8k 电话 ASR 和流式 TTS。
+3. 新增全阿里 graph：阿里 ASR + 阿里千问低延迟 LLM + 阿里 TTS。
+4. LLM 可通过 openai_llm2_python 的 OpenAI-compatible base_url 切到阿里百炼。
+5. 对比每组的 ASR final、LLM 首句、TTS 首包和电话侧首响。
+```
+
+6B 暂不做：
+
+```text
+固定开场白
+提示词缩短
+回复话术优化
+完整用户插话打断
+Call Gateway
+真实 SIP trunk 联调
+```
+
+6B 候选模型链路：
+
+```text
+baseline:
+  Deepgram ASR + DeepSeek LLM + ElevenLabs TTS
+
+aliyun-asr-tts:
+  阿里 8k ASR + DeepSeek LLM + 阿里 TTS
+
+aliyun-full:
+  阿里 8k ASR + 阿里千问低延迟 LLM + 阿里 TTS
+```
+
+阿里 LLM 接入方式：
+
+```text
+OPENAI_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1
+OPENAI_API_KEY=<阿里百炼 DashScope API Key>
+OPENAI_MODEL=<千问低延迟模型，例如 qwen3.6-flash 或 qwen-plus>
+```
+
+注意：电话场景优先选择低延迟、稳定中文对话模型，不优先选择深度思考或 reasoning 类模型。电话首响的核心是尽快产出第一段可播文本。
+
+真实 SIP trunk 阶段可以并行准备信息，但不建议在 6B 前直接作为主线推进。原因是当前没有 trunk 账号、线路商地址、鉴权方式、编码要求和公网/NAT 条件；贸然进入会把线路问题、PBX 问题、AI 链路体验问题混在一起。
+
+## 15. 交接给同事时必须说明的话
 
 请明确告诉接手同事：
 
@@ -1223,7 +1633,11 @@ MicroSIP 拨本地测试号码
 当前是一个分阶段验证中的电话接入模块。
 已经验证本地电话侧、Media Hub、TEN AudioFrame 桥的若干独立环节。
 已经验证本地 FreeSWITCH 真实媒体流可以接入 Media Hub 并回到电话侧。
-尚未验证同一通真实 FreeSWITCH 通话穿过 sip_media_bridge 和 TEN AudioFrame graph。
+已经验证同一通本地真实 FreeSWITCH 通话可以穿过 sip_media_bridge 和 TEN AudioFrame echo graph。
+已经验证本地 9199 最小 ASR/LLM/TTS AI 电话闭环，电话侧能听到 AI 回复。
+当前验证使用 MicroSIP 软电话和本地 Docker FreeSWITCH，不是真实 SIP trunk。
 真实 SIP trunk 完全未验证。
-下一步不要直接做业务话术，应先打通 FreeSWITCH -> Media Hub -> sip_media_bridge -> TEN AudioFrame。
+运营商线路 codec 已确认是 PCMA，FreeSWITCH 需要将其解码成 8k PCM 后再进入 Media Hub。
+Call Gateway、ESL 外呼控制、AI 开场白、VAD 打断、并发和生产监控仍未实现。
+下一步建议先做本地 6B 国内低延迟模型链路 A/B 测试，再进入真实 SIP trunk 联调。
 ```

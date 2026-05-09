@@ -2,12 +2,11 @@
 
 Minimal staged example for connecting a SIP trunk phone call path to TEN.
 
-The current implementation covers stages 1 through 5A. It validates graph
-startup, Media Hub control connection, Media Hub fake audio forwarding, and
-TEN `AudioFrame("pcm_frame")` roundtrip conversion. Stage 5A additionally
-validates a local FreeSWITCH call through Media Hub using a fake TEN echo
-client. It still does not connect one real FreeSWITCH call through
-`sip_media_bridge`, ASR, LLM, or TTS yet.
+The current implementation covers stages 1 through 5B and adds the stage 6A
+minimal AI graph. Stages 5A and 5B validate local FreeSWITCH phone media through
+Media Hub and `sip_media_bridge`. Stage 6A currently starts ASR, LLM, TTS, and
+the dialog controller, but the live phone AI response test is blocked by the
+configured ElevenLabs key missing `text_to_speech` permission.
 
 ## Stage 1 Graph
 
@@ -180,6 +179,96 @@ echo_sent chunk=<n> bytes=320
 ```
 
 This stage still uses a fake TEN responder rather than `sip_media_bridge`.
+
+## Stage 5B Local FreeSWITCH TEN AudioFrame Echo
+
+Stage 5B validates real local phone media through the TEN bridge and
+AudioFrame echo graph:
+
+```text
+MicroSIP -> FreeSWITCH 9199
+FreeSWITCH mod_audio_stream -> Media Hub /media/fs/fs_stage5a_local
+Media Hub -> sip_media_bridge /media/ten/fs_stage5a_local
+sip_media_bridge -> TEN AudioFrame("pcm_frame")
+sip_media_bridge_test_echo -> TEN AudioFrame("pcm_frame")
+sip_media_bridge -> Media Hub
+Media Hub -> FreeSWITCH mod_audio_stream
+FreeSWITCH -> MicroSIP
+```
+
+Start Media Hub and the TEN API server inside `ten_agent_dev`, then start graph
+`voice_assistant_sip_trunk_audio_frame_test` with
+`channel_name=fs_stage5a_local`. Dial `9199` from MicroSIP.
+
+Expected Media Hub log events:
+
+```text
+ten_registered channel=fs_stage5a_local sample_rate=8000
+fs_connected channel=fs_stage5a_local
+media_paired channel=fs_stage5a_local
+audio_forwarded direction=fs_to_ten channel=fs_stage5a_local bytes=320
+audio_forwarded direction=ten_to_fs channel=fs_stage5a_local bytes=320
+```
+
+Expected TEN log events:
+
+```text
+sip_media_bridge received_pcm_from_media_hub: channel=fs_stage5a_local, bytes=320, sample_rate=8000
+sip_media_bridge_test_echo received_audio_frame: bytes=320, sample_rate=8000, channels=1, bytes_per_sample=2, samples_per_channel=160
+sip_media_bridge sent_pcm_to_media_hub: channel=fs_stage5a_local, bytes=320, sample_rate=8000
+```
+
+Verified result on 2026-05-08: the phone side heard echo with no obvious
+stutter, and FreeSWITCH `show calls` returned `0` after hangup.
+
+## Stage 6A Local FreeSWITCH Minimal AI Loop
+
+Stage 6A is intended to validate one local phone sentence through ASR, LLM, TTS,
+and back to the phone side:
+
+```text
+MicroSIP -> FreeSWITCH 9199
+FreeSWITCH mod_audio_stream -> Media Hub /media/fs/fs_stage5a_local
+Media Hub -> sip_media_bridge
+sip_media_bridge -> Deepgram ASR
+ASR final text -> sip_trunk_dialog_controller
+sip_trunk_dialog_controller -> DeepSeek/OpenAI-compatible LLM
+sip_trunk_dialog_controller -> ElevenLabs TTS
+TTS AudioFrame -> sip_media_bridge
+sip_media_bridge -> Media Hub
+Media Hub -> FreeSWITCH -> MicroSIP
+```
+
+Use graph `voice_assistant_sip_trunk_cn_ai_minimal`.
+
+Current 6A configuration:
+
+```text
+ASR: Deepgram nova-3, zh-CN, 8000 Hz linear16
+LLM: OPENAI_API_BASE=https://api.deepseek.com/v1, model=deepseek-chat
+TTS: ElevenLabs eleven_multilingual_v2, output_format=pcm_16000
+Bridge output guard: resample/downmix outgoing PCM to 8000 Hz mono s16le
+```
+
+Verified preflight result on 2026-05-08:
+
+```text
+sip_trunk_dialog_controller created and started
+Deepgram ASR WebSocket opened
+LLM initialized with deepseek-chat
+Media Hub TEN side registered channel=fs_stage5a_local sample_rate=8000
+```
+
+Known blocker:
+
+```text
+ElevenLabs WebSocket TTS returned code=1008 missing_permissions.
+ElevenLabs HTTP TTS probe returned 401 missing_permissions.
+The configured ELEVENLABS_TTS_KEY is missing text_to_speech permission.
+```
+
+Do not treat stage 6A as passed until the phone side hears a generated AI reply
+and hangup cleanup is verified.
 
 ## Media Contract
 

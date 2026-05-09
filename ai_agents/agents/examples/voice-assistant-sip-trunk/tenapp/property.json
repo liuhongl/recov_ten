@@ -78,6 +78,152 @@
             }
           ]
         }
+      },
+      {
+        "name": "voice_assistant_sip_trunk_cn_ai_minimal",
+        "auto_start": false,
+        "graph": {
+          "nodes": [
+            {
+              "type": "extension",
+              "name": "sip_media_bridge",
+              "addon": "sip_media_bridge",
+              "extension_group": "default",
+              "property": {
+                "channel": "default",
+                "media_hub_base_url": "${env:MEDIA_HUB_BASE_URL|ws://127.0.0.1:9000}",
+                "sample_rate": 8000,
+                "heartbeat_interval_seconds": 5,
+                "registration_timeout_seconds": 5
+              }
+            },
+            {
+              "type": "extension",
+              "name": "streamid_adapter",
+              "addon": "streamid_adapter",
+              "extension_group": "default",
+              "property": {}
+            },
+            {
+              "type": "extension",
+              "name": "stt",
+              "addon": "deepgram_asr_python",
+              "extension_group": "stt",
+              "property": {
+                "params": {
+                  "api_key": "${env:DEEPGRAM_API_KEY}",
+                  "model": "nova-3",
+                  "language": "zh-CN",
+                  "sample_rate": 8000,
+                  "encoding": "linear16",
+                  "interim_results": true,
+                  "punctuate": true,
+                  "keep_alive": true
+                }
+              }
+            },
+            {
+              "type": "extension",
+              "name": "llm",
+              "addon": "openai_llm2_python",
+              "extension_group": "chatgpt",
+              "property": {
+                "base_url": "${env:OPENAI_API_BASE|https://api.deepseek.com}",
+                "api_key": "${env:OPENAI_API_KEY}",
+                "frequency_penalty": 0.2,
+                "model": "${env:OPENAI_MODEL|deepseek-chat}",
+                "max_tokens": 256,
+                "prompt": "你是一个中文电话语音助手。回答要简短、自然、适合电话里听，除非用户要求展开，否则每次回复控制在两句话以内。",
+                "proxy_url": "${env:OPENAI_PROXY_URL|}",
+                "greeting": "",
+                "max_memory_length": 10
+              }
+            },
+            {
+              "type": "extension",
+              "name": "tts",
+              "addon": "elevenlabs_tts2_python",
+              "extension_group": "tts",
+              "property": {
+                "dump": false,
+                "dump_path": "./",
+                "params": {
+                  "key": "${env:ELEVENLABS_TTS_KEY}",
+                  "model_id": "eleven_multilingual_v2",
+                  "voice_id": "pNInz6obpgDQGcFmaJgB",
+                  "output_format": "pcm_16000"
+                }
+              }
+            },
+            {
+              "type": "extension",
+              "name": "dialog_controller",
+              "addon": "sip_trunk_dialog_controller",
+              "extension_group": "control",
+              "property": {
+                "llm_extension": "llm",
+                "tts_extension": "tts",
+                "response_language": "zh-CN",
+                "temperature": 0.7,
+                "max_context_messages": 10
+              }
+            }
+          ],
+          "connections": [
+            {
+              "extension": "sip_media_bridge",
+              "audio_frame": [
+                {
+                  "name": "pcm_frame",
+                  "dest": [
+                    {
+                      "extension": "streamid_adapter"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "extension": "streamid_adapter",
+              "audio_frame": [
+                {
+                  "name": "pcm_frame",
+                  "dest": [
+                    {
+                      "extension": "stt"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "extension": "stt",
+              "data": [
+                {
+                  "name": "asr_result",
+                  "dest": [
+                    {
+                      "extension": "dialog_controller"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "extension": "tts",
+              "audio_frame": [
+                {
+                  "name": "pcm_frame",
+                  "dest": [
+                    {
+                      "extension": "sip_media_bridge"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
       }
     ],
     "log": {

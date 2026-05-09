@@ -1,3 +1,4 @@
+import audioop
 import asyncio
 import contextlib
 import json
@@ -14,6 +15,7 @@ from .config import SipMediaBridgeConfig
 
 PCM_CHANNELS = 1
 PCM_BYTES_PER_SAMPLE = 2
+PCM_FRAME_DURATION_MS = 20
 
 
 class SipMediaBridgeExtension(AsyncExtension):
@@ -74,24 +76,121 @@ class SipMediaBridgeExtension(AsyncExtension):
             )
             return
 
-        payload = bytes(audio_frame.get_buf())
+        payload = self._normalize_outgoing_pcm(audio_frame, ten_env)
+        if payload is None:
+            return
         if len(payload) == 0:
             return
 
-        try:
-            await self._ws.send(payload)
-        except ConnectionClosed as err:
-            ten_env.log_warn(
-                "sip_media_bridge failed to send pcm to media hub: "
-                f"channel={self.config.channel}, code={err.code}"
-            )
-            return
+        frame_size = self._outgoing_frame_size_bytes()
+        sent_chunks = 0
+        sent_bytes = 0
+        for chunk in self._iter_outgoing_pcm_chunks(payload, frame_size):
+            try:
+                await self._ws.send(chunk)
+            except ConnectionClosed as err:
+                ten_env.log_warn(
+                    "sip_media_bridge failed to send pcm to media hub: "
+                    f"channel={self.config.channel}, code={err.code}"
+                )
+                return
+            sent_chunks += 1
+            sent_bytes += len(chunk)
+            await asyncio.sleep(PCM_FRAME_DURATION_MS / 1000)
 
         ten_env.log_info(
             "sip_media_bridge sent_pcm_to_media_hub: "
-            f"channel={self.config.channel}, bytes={len(payload)}, "
-            f"sample_rate={audio_frame.get_sample_rate()}"
+            f"channel={self.config.channel}, bytes={sent_bytes}, "
+            f"chunks={sent_chunks}, chunk_bytes={frame_size}, "
+            f"sample_rate={self.config.sample_rate}"
         )
+
+    def _normalize_outgoing_pcm(
+        self,
+        audio_frame: AudioFrame,
+        ten_env: AsyncTenEnv,
+    ) -> bytes | None:
+        payload = bytes(audio_frame.get_buf())
+        if len(payload) == 0:
+            return payload
+
+        source_sample_rate = audio_frame.get_sample_rate()
+        source_channels = audio_frame.get_number_of_channels()
+        source_bytes_per_sample = audio_frame.get_bytes_per_sample()
+
+        if source_sample_rate <= 0:
+            source_sample_rate = self.config.sample_rate
+
+        if source_bytes_per_sample != PCM_BYTES_PER_SAMPLE:
+            ten_env.log_warn(
+                "sip_media_bridge dropped unsupported outgoing audio: "
+                f"channel={self.config.channel}, "
+                f"bytes_per_sample={source_bytes_per_sample}"
+            )
+            return None
+
+        if source_channels <= 0:
+            source_channels = PCM_CHANNELS
+
+        try:
+            normalized = payload
+
+            if source_channels == 2:
+                normalized = audioop.tomono(
+                    normalized,
+                    source_bytes_per_sample,
+                    0.5,
+                    0.5,
+                )
+                source_channels = PCM_CHANNELS
+            elif source_channels != PCM_CHANNELS:
+                ten_env.log_warn(
+                    "sip_media_bridge dropped unsupported outgoing audio: "
+                    f"channel={self.config.channel}, "
+                    f"channels={source_channels}"
+                )
+                return None
+
+            if source_sample_rate != self.config.sample_rate:
+                normalized, _ = audioop.ratecv(
+                    normalized,
+                    source_bytes_per_sample,
+                    PCM_CHANNELS,
+                    source_sample_rate,
+                    self.config.sample_rate,
+                    None,
+                )
+                ten_env.log_info(
+                    "sip_media_bridge resampled outgoing audio: "
+                    f"channel={self.config.channel}, "
+                    f"from={source_sample_rate}, "
+                    f"to={self.config.sample_rate}, "
+                    f"bytes_before={len(payload)}, "
+                    f"bytes_after={len(normalized)}"
+                )
+
+            return normalized
+        except Exception as err:
+            ten_env.log_warn(
+                "sip_media_bridge failed to normalize outgoing audio: "
+                f"channel={self.config.channel}, error={err}"
+            )
+            return None
+
+    def _outgoing_frame_size_bytes(self) -> int:
+        samples_per_frame = self.config.sample_rate * PCM_FRAME_DURATION_MS // 1000
+        return samples_per_frame * PCM_CHANNELS * PCM_BYTES_PER_SAMPLE
+
+    def _iter_outgoing_pcm_chunks(
+        self,
+        payload: bytes,
+        frame_size: int,
+    ):
+        for offset in range(0, len(payload), frame_size):
+            chunk = payload[offset : offset + frame_size]
+            if len(chunk) < frame_size:
+                chunk = chunk + b"\x00" * (frame_size - len(chunk))
+            yield chunk
 
     async def _load_config(
         self,

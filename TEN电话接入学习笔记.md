@@ -620,9 +620,7 @@ MicroSIP 1000
 
 这说明本地真实电话音频已经可以从 FreeSWITCH 进入 Media Hub，并且 Media Hub 下行音频可以回到电话侧。
 
-但这还不等于完整 TEN 电话闭环。当前 `9199` 回音测试用的是假 TEN 客户端，不是 `sip_media_bridge`，也没有经过 ASR、LLM、TTS。
-
-下一步更准确的小阶段应该是：
+已经完成：
 
 ```text
 MicroSIP 1000
@@ -636,6 +634,10 @@ MicroSIP 1000
   -> FreeSWITCH
   -> MicroSIP
 ```
+
+这说明同一通本地真实电话已经可以穿过 `sip_media_bridge`，进入 TEN `AudioFrame("pcm_frame")`，再回到电话侧。
+
+但这还不等于完整 TEN 电话闭环。当前 `9199` 的阶段 5B 回音测试用的是 `sip_media_bridge_test_echo`，没有经过真实 ASR、LLM、TTS，也没有业务 `main_control`。
 
 ## 9. 低延迟目标
 
@@ -686,6 +688,40 @@ FreeSWITCH + SIP trunk
 必要配置：STREAM_PLAYBACK=true
 本地测试号码：9199
 ```
+
+本地阶段 5B 对 `sip_media_bridge` 的结论：
+
+```text
+真实电话媒体：已能进入 sip_media_bridge
+TEN AudioFrame：已能收到 8k mono s16le / 320 bytes / 20ms 音频帧
+回放方向：已能从 AudioFrame 转回 PCM 并发回电话侧
+用户听感：有回音，无明显卡顿
+未覆盖：ASR、LLM、TTS、业务话术、真实 SIP trunk
+```
+
+本地阶段 6A 当前记录：
+
+```text
+目标：9199 本地电话 -> ASR -> LLM -> TTS -> 电话侧听到 AI 回复
+新增 graph：voice_assistant_sip_trunk_cn_ai_minimal
+新增控制器：sip_trunk_dialog_controller
+ASR：Deepgram nova-3，zh-CN，8k linear16
+LLM：DeepSeek OpenAI-compatible，OPENAI_API_BASE=https://api.deepseek.com/v1，model=deepseek-chat
+TTS：ElevenLabs eleven_multilingual_v2，pcm_16000
+桥接护栏：sip_media_bridge 下行会尝试把非 8k mono s16le PCM 转成 8k mono s16le
+已验证：graph 可启动，dialog_controller 可创建，ASR WebSocket 可打开，LLM 可初始化
+未通过：ElevenLabs key 缺少 text_to_speech 权限，电话侧暂时无法听到 AI 回复
+```
+
+这次 TTS 阻塞的关键事实：
+
+```text
+ElevenLabs WebSocket TTS：vendor_error code=1008 missing_permissions
+ElevenLabs HTTP TTS 探测：401 missing_permissions
+错误含义：当前 ELEVENLABS_TTS_KEY 缺少 text_to_speech 权限
+```
+
+所以不要把 6A 当前问题误判成 FreeSWITCH、RTP、Media Hub、DeepSeek 或 `sip_media_bridge` 问题。下一步要先换成有 TTS 权限的 ElevenLabs key，或确认切换到其他支持中文且能输出 PCM 的 TTS provider。
 
 如果想减少电话网关配置成本：
 

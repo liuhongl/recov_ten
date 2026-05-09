@@ -36,6 +36,18 @@ class RealtimeConfig:
 
 
 @dataclass(frozen=True)
+class VadConfig:
+    speech_rms_threshold: int = 300
+    start_speech_ms: int = 60
+    end_silence_ms: int = 500
+    min_speech_ms: int = 240
+    max_utterance_ms: int = 12000
+    pre_speech_ms: int = 160
+    keep_silence_ms: int = 160
+    barge_in_enabled: bool = False
+
+
+@dataclass(frozen=True)
 class FeatureConfig:
     metrics_enabled: bool = True
     recording_enabled: bool = False
@@ -47,6 +59,7 @@ class GatewayConfig:
     logging: LoggingConfig = LoggingConfig()
     freeswitch: FreeSwitchConfig = FreeSwitchConfig()
     realtime: RealtimeConfig = RealtimeConfig()
+    vad: VadConfig = VadConfig()
     features: FeatureConfig = FeatureConfig()
 
 
@@ -102,6 +115,56 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
             url=_get(raw, "realtime", "url", default=RealtimeConfig.url),
             model=_get(raw, "realtime", "model", default=RealtimeConfig.model),
             voice=_get(raw, "realtime", "voice", default=RealtimeConfig.voice),
+        ),
+        vad=VadConfig(
+            speech_rms_threshold=_get_int(
+                raw,
+                "vad",
+                "speech_rms_threshold",
+                default=VadConfig.speech_rms_threshold,
+            ),
+            start_speech_ms=_get_int(
+                raw,
+                "vad",
+                "start_speech_ms",
+                default=VadConfig.start_speech_ms,
+            ),
+            end_silence_ms=_get_int(
+                raw,
+                "vad",
+                "end_silence_ms",
+                default=VadConfig.end_silence_ms,
+            ),
+            min_speech_ms=_get_int(
+                raw,
+                "vad",
+                "min_speech_ms",
+                default=VadConfig.min_speech_ms,
+            ),
+            max_utterance_ms=_get_int(
+                raw,
+                "vad",
+                "max_utterance_ms",
+                default=VadConfig.max_utterance_ms,
+            ),
+            pre_speech_ms=_get_int(
+                raw,
+                "vad",
+                "pre_speech_ms",
+                default=VadConfig.pre_speech_ms,
+            ),
+            keep_silence_ms=_get_int(
+                raw,
+                "vad",
+                "keep_silence_ms",
+                default=VadConfig.keep_silence_ms,
+            ),
+            barge_in_enabled=_get_bool(
+                raw,
+                "vad",
+                "barge_in_enabled",
+                default=VadConfig.barge_in_enabled,
+            ),
         ),
         features=FeatureConfig(
             metrics_enabled=_get_bool(
@@ -217,6 +280,40 @@ def _apply_env_overrides(config: GatewayConfig) -> GatewayConfig:
             url=os.getenv("ALIYUN_REALTIME_URL", config.realtime.url),
             model=os.getenv("ALIYUN_REALTIME_MODEL", config.realtime.model),
             voice=os.getenv("ALIYUN_REALTIME_VOICE", config.realtime.voice),
+        ),
+        vad=VadConfig(
+            speech_rms_threshold=_env_int(
+                "VAD_SPEECH_RMS_THRESHOLD",
+                config.vad.speech_rms_threshold,
+            ),
+            start_speech_ms=_env_int(
+                "VAD_START_SPEECH_MS",
+                config.vad.start_speech_ms,
+            ),
+            end_silence_ms=_env_int(
+                "VAD_END_SILENCE_MS",
+                config.vad.end_silence_ms,
+            ),
+            min_speech_ms=_env_int(
+                "VAD_MIN_SPEECH_MS",
+                config.vad.min_speech_ms,
+            ),
+            max_utterance_ms=_env_int(
+                "VAD_MAX_UTTERANCE_MS",
+                config.vad.max_utterance_ms,
+            ),
+            pre_speech_ms=_env_int(
+                "VAD_PRE_SPEECH_MS",
+                config.vad.pre_speech_ms,
+            ),
+            keep_silence_ms=_env_int(
+                "VAD_KEEP_SILENCE_MS",
+                config.vad.keep_silence_ms,
+            ),
+            barge_in_enabled=_env_bool(
+                "VAD_BARGE_IN_ENABLED",
+                config.vad.barge_in_enabled,
+            ),
         ),
         features=FeatureConfig(
             metrics_enabled=_env_bool(

@@ -621,7 +621,7 @@ MicroSIP -> FreeSWITCH -> sip-realtime-voice-gateway echo -> FreeSWITCH -> Micro
   - 已支持 `--input-wav`，会把本地 WAV 自动转换成 16kHz mono pcm_s16le 后发送给模型。
   - 已用用户提供的 24kHz mono WAV 复测成功：首个音频 delta 约 1312ms，`response.done` 约 2077ms。
     
-    ### 9.5 阶段 5：电话端实时语音闭环
+### 9.5 阶段 5：电话端实时语音闭环
 
 目标：完成第一条真正的端到端电话实时语音闭环。
 
@@ -659,29 +659,104 @@ queue_dropped_frames
 model_error_count
 ```
 
-### 9.6 阶段 6：打断与队列控制
+当前实现状态：
 
-目标：用户插话时，当前 AI 回复能停止，播放队列能清空，新一轮输入能继续处理。
+- 已新增电话端 realtime 媒体服务，启动参数为 `--media-mode realtime`。
+- 仍保留默认 `echo` 模式，前面阶段的 FreeSWITCH 回声测试不受影响。
+- 已接入本地能量 VAD，用于判断用户一句话结束后再提交模型。
+- 已实现电话侧 `8k PCM -> 16k PCM` 上行重采样。
+- 已实现模型侧 `24k PCM -> 8k PCM` 下行重采样。
+- 已实现下行 `20ms / 320 bytes` 播放队列，由单 worker 节奏化写回 FreeSWITCH。
+- 已加入最小打断护栏：AI 播放期间检测到用户开口时，清空本地播放队列并取消本地 turn task，避免旧回复和新回复混播。
+- 已通过自动化测试验证：旧 echo 服务、VAD 切句、realtime client 流式 delta 回调、模拟模型音频回放、播放中插话清队列均可用。
+- 首轮人工测试已确认：MicroSIP 能听到真实模型回复，停止说话到听到回复约 `2-3s`；同时发现旧实现会产生旧回复尾音和新回复混播，已做最小打断护栏修正，待复测。
+- 第二轮复测日志显示：三轮电话到模型、模型到电话均完成，`turns_failed=0`，最小打断护栏触发 `1` 次并清空 `16` 帧剩余播放音频。该轮还暴露出事实性回答问题：询问“今天几号”时模型答错日期，原因是当前电话 prompt 没注入当前日期，也没有工具查询能力。
+- 阶段 5 的最小打断护栏不等同于完整阶段 6。正式 `turn_id`、模型取消事件、迟到音频丢弃和更细状态机仍放到阶段 6。
+
+### 9.6 阶段 6：持久会话与完整打断控制
+
+目标：把阶段 5 的“能通”升级成“可控”。每通电话保持一个实时模型长连接，用户说话时持续流式发送音频，用户插话时当前 AI 回复能停止，播放队列能清空，新一轮输入能继续处理。
 
 范围：
 
+- 每通电话只建立一个 Qwen-Omni-Realtime WebSocket session。
+- 用户说话期间持续发送 `input_audio_buffer.append`，不再等整段话结束后一次性上传。
+- VAD 判定结束后发送 `input_audio_buffer.commit` 和 `response.create`。
 - 维护 `turn_id`。
 - 支持清空下行播放队列。
-- 支持取消当前模型 response。
+- 支持发送 `response.cancel` 取消当前模型 response。
+- 支持丢弃旧 `turn_id` 的迟到音频。
 - 记录打断次数和丢弃音频帧。
+- 默认 `end_silence_ms` 从 `800ms` 降到 `500ms`，减少本地断句等待。
 
 可测试项：
 
+- 单通电话内多轮对话只建立一次模型 WebSocket。
 - AI 正在说话时，用户插话。
 - 旧回复停止播放。
 - 新问题被识别并触发新回复。
 - 没有旧音频在新一轮继续播放。
+- 首包体感延迟相比阶段 5 不应变差，理想情况下有所下降。
 
 通过标准：
 
 ```text
-用户插话 -> 清空旧播放队列 -> 新一轮回复正常
+用户插话 -> response.cancel + 清空旧播放队列 + 旧 turn 失效 -> 新一轮回复正常
 ```
+
+当前实现状态：
+
+- 已新增 `RealtimeStreamingSession`，单通电话内复用一个 realtime WebSocket。
+- 已实现 `input_audio_buffer.clear`、`input_audio_buffer.append`、`input_audio_buffer.commit`、`response.create`、`response.cancel` 的客户端事件封装。
+- 已改造电话网关状态机：VAD 开始时创建 `turn_id`，说话期间持续 append，VAD 结束后 commit/create response。
+- 下行播放队列中的每一帧都携带 `turn_id`，旧 turn 音频不会继续播放到新 turn。
+- 首轮阶段 6 人工复测出现断续和“第一轮回复进入第二轮”的现象，日志显示 `dropped_stale_frames=0`，第二轮输入转写为“您好”，判断为本地 MicroSIP 外放回采导致 AI 自己触发打断，而非服务器侧旧 turn 串音。
+- 已默认关闭播放中 barge-in：`barge_in_enabled=false`。当前本地测试优先验证多轮稳定和不混播；完整打断需要耳机、真实电话回声消除或后续 AEC。
+- 已通过自动化测试验证：持久 session 多轮复用、电话音频回放、播放中插话清队列均可用。
+- 待人工拨打 `9199` 验证真实模型下的延迟、打断、尾音和多轮稳定性。
+- 进一步分析后确认：继续在“本地 VAD / Manual mode”上补丁式优化，不适合作为商用主线。后续转向阿里官方更适合语音通话的 Server VAD 路线，详见 `sip-realtime-voice-gateway/docs/阿里ServerVAD商用路径说明.md`。
+
+### 9.6B 阿里 Server VAD 商用路径
+
+目标：保留 FreeSWITCH 作为 SIP/RTP/PCMA 边界，将对话轮次控制从本地 VAD / Manual mode 迁移到阿里 Server VAD。
+
+目标链路：
+
+```text
+SIP / MicroSIP
+-> FreeSWITCH
+-> Gateway 持续发送 16k PCM
+-> 阿里 Server VAD
+-> response_id 绑定下行音频
+-> Gateway jitter buffer
+-> FreeSWITCH
+-> SIP / MicroSIP
+```
+
+不优先选择其他方案：
+
+- 不优先 B 方案：ASR -> LLM -> TTS 级联链路延迟更大，不符合当前低延迟电话客服目标。
+- 不优先 C 方案：RTC / Voice Agent 平台更适合 App/WebRTC 或全托管场景，国内 SIP 电话接入会增加供应商依赖和落地复杂度。
+
+分阶段：
+
+```text
+A1 Server VAD 离线事件流验证
+A2 电话持续 append + Server VAD 回复
+A3 response_id 下行隔离 + jitter buffer
+A4 官方打断 barge-in
+A5 商用护栏
+```
+
+当前 A1 已验证通过。已新增 `app.server_vad_probe` 离线探针，确认当前 DashScope Key、`qwen3.5-omni-plus-realtime`、`Ethan` 音色可以走 Server VAD 事件流，并能拿到可播放的模型输出音频。
+
+A1 的关键结果：
+
+- 短 PCM 样本完整触发 `speech_started -> speech_stopped -> committed -> response.created -> response.audio.delta -> response.done`。
+- Gateway 可以记录输入转写、输出转写、`response_id`、服务端事件和 24k 输出 WAV。
+- 用户提供的长 WAV 样本在 `silence_duration_ms=800` 时出现 `turn_detected` 取消；调整为 `silence_duration_ms=2000` 后成功输出回复。这说明 A2 中 Server VAD 参数必须可配置，不能写死。
+
+下一步进入 A2：电话持续 append + Server VAD 回复。A2 会触碰电话热链路，需要保留现有 echo / manual realtime 能力作为回退，并重点观察电话短问答下的首包延迟、断句完整性和多轮稳定性。
 
 ### 9.7 阶段 7：真实 SIP Trunk 准备
 

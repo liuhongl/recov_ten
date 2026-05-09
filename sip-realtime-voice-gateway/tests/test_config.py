@@ -32,6 +32,16 @@ def test_load_config_from_toml(tmp_path):
             model = "qwen3.5-omni-plus-realtime"
             voice = "Cherry"
 
+            [vad]
+            speech_rms_threshold = 400
+            start_speech_ms = 80
+            end_silence_ms = 700
+            min_speech_ms = 200
+            max_utterance_ms = 9000
+            pre_speech_ms = 120
+            keep_silence_ms = 100
+            barge_in_enabled = true
+
             [features]
             metrics_enabled = true
             recording_enabled = false
@@ -48,6 +58,9 @@ def test_load_config_from_toml(tmp_path):
     assert config.freeswitch.sample_rate == 8000
     assert config.freeswitch.echo_mode == "resample_16k_roundtrip"
     assert config.realtime.model == "qwen3.5-omni-plus-realtime"
+    assert config.vad.speech_rms_threshold == 400
+    assert config.vad.end_silence_ms == 700
+    assert config.vad.barge_in_enabled is True
     assert config.features.metrics_enabled is True
     assert config.features.recording_enabled is False
 
@@ -57,6 +70,8 @@ def test_environment_overrides(monkeypatch):
     monkeypatch.setenv("FREESWITCH_SAMPLE_RATE", "16000")
     monkeypatch.setenv("FREESWITCH_ECHO_MODE", "resample_16k_roundtrip")
     monkeypatch.setenv("ALIYUN_REALTIME_MODEL", "test-model")
+    monkeypatch.setenv("VAD_END_SILENCE_MS", "600")
+    monkeypatch.setenv("VAD_BARGE_IN_ENABLED", "true")
     monkeypatch.setenv("METRICS_ENABLED", "false")
 
     config = load_config()
@@ -65,6 +80,8 @@ def test_environment_overrides(monkeypatch):
     assert config.freeswitch.sample_rate == 16000
     assert config.freeswitch.echo_mode == "resample_16k_roundtrip"
     assert config.realtime.model == "test-model"
+    assert config.vad.end_silence_ms == 600
+    assert config.vad.barge_in_enabled is True
     assert config.features.metrics_enabled is False
 
 

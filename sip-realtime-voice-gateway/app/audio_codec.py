@@ -38,6 +38,14 @@ def pcm_s16le_to_samples(pcm: bytes) -> list[int]:
     return list(struct.unpack(f"<{len(pcm) // SAMPLE_WIDTH_BYTES}h", pcm))
 
 
+def pcm_s16le_rms(pcm: bytes) -> int:
+    samples = pcm_s16le_to_samples(pcm)
+    if not samples:
+        return 0
+    square_sum = sum(sample * sample for sample in samples)
+    return round(math.sqrt(square_sum / len(samples)))
+
+
 def samples_to_pcm_s16le(samples: Iterable[int | float]) -> bytes:
     return b"".join(
         struct.pack("<h", _clamp_int16(round(sample))) for sample in samples

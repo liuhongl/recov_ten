@@ -7,6 +7,7 @@ import pytest
 from app.audio_codec import (
     pcma_to_pcm_s16le,
     pcm_s16le_frame_bytes,
+    pcm_s16le_rms,
     pcm_s16le_sample_count,
     pcm_s16le_to_pcma,
     pcm_s16le_to_samples,
@@ -20,6 +21,11 @@ def test_pcm_frame_size_for_telephone_audio():
     assert pcm_s16le_frame_bytes(8000) == 320
     assert pcm_s16le_frame_bytes(16000) == 640
     assert pcm_s16le_frame_bytes(24000) == 960
+
+
+def test_pcm_rms_reports_signal_energy():
+    assert pcm_s16le_rms(samples_to_pcm_s16le([0, 0, 0])) == 0
+    assert pcm_s16le_rms(samples_to_pcm_s16le([1000, -1000])) == 1000
 
 
 def test_split_audio_frames_requires_aligned_audio_unless_padding():

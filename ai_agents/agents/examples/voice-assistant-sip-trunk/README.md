@@ -2,11 +2,11 @@
 
 Minimal staged example for connecting a SIP trunk phone call path to TEN.
 
-The current implementation covers stages 1 through 5B and adds the stage 6A
-minimal AI graph. Stages 5A and 5B validate local FreeSWITCH phone media through
-Media Hub and `sip_media_bridge`. Stage 6A currently starts ASR, LLM, TTS, and
-the dialog controller, but the live phone AI response test is blocked by the
-configured ElevenLabs key missing `text_to_speech` permission.
+The current implementation covers stages 1 through 6A and adds the stage 6B-1
+LLM A/B graph. Stages 5A and 5B validate local FreeSWITCH phone media through
+Media Hub and `sip_media_bridge`. Stage 6A validates the local `9199` minimal
+ASR/LLM/TTS phone loop. Stage 6B-1 keeps the same ASR/TTS path and swaps only
+the LLM to Aliyun DashScope through the OpenAI-compatible API.
 
 ## Stage 1 Graph
 
@@ -223,8 +223,8 @@ stutter, and FreeSWITCH `show calls` returned `0` after hangup.
 
 ## Stage 6A Local FreeSWITCH Minimal AI Loop
 
-Stage 6A is intended to validate one local phone sentence through ASR, LLM, TTS,
-and back to the phone side:
+Stage 6A validates one local phone sentence through ASR, LLM, TTS, and back to
+the phone side:
 
 ```text
 MicroSIP -> FreeSWITCH 9199
@@ -250,25 +250,49 @@ TTS: ElevenLabs eleven_multilingual_v2, output_format=pcm_16000
 Bridge output guard: resample/downmix outgoing PCM to 8000 Hz mono s16le
 ```
 
-Verified preflight result on 2026-05-08:
+Verified result:
 
 ```text
 sip_trunk_dialog_controller created and started
 Deepgram ASR WebSocket opened
 LLM initialized with deepseek-chat
 Media Hub TEN side registered channel=fs_stage5a_local sample_rate=8000
+Phone side heard generated AI reply
 ```
 
-Known blocker:
+Measured sample:
 
 ```text
-ElevenLabs WebSocket TTS returned code=1008 missing_permissions.
-ElevenLabs HTTP TTS probe returned 401 missing_permissions.
-The configured ELEVENLABS_TTS_KEY is missing text_to_speech permission.
+User text: 你好呀
+AI reply: 你好！有什么可以帮你的吗？
+Phone audio entered -> ASR final: about 2.8s
+ASR final -> first LLM text: about 2.28s
+First LLM text -> first TTS audio: about 0.78s
+Phone audio entered -> first audible AI: about 5.88s
 ```
 
-Do not treat stage 6A as passed until the phone side hears a generated AI reply
-and hangup cleanup is verified.
+## Stage 6B-1 Aliyun LLM A/B Graph
+
+Stage 6B-1 isolates LLM latency by keeping ASR and TTS unchanged while swapping
+only the LLM provider:
+
+```text
+Deepgram ASR + Aliyun DashScope/OpenAI-compatible LLM + ElevenLabs TTS
+```
+
+Use graph `voice_assistant_sip_trunk_cn_ai_aliyun_llm`.
+
+Required local environment variables:
+
+```text
+ALIYUN_DASHSCOPE_API_KEY=<local secret>
+ALIYUN_OPENAI_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1
+ALIYUN_OPENAI_MODEL=qwen-flash
+```
+
+Do not confuse this graph with Aliyun realtime voice models. It still uses the
+staged ASR -> LLM -> TTS path and only tests text LLM first-token/first-sentence
+latency.
 
 ## Media Contract
 

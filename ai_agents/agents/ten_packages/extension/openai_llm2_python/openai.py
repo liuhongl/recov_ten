@@ -64,6 +64,14 @@ class ReasoningMode(str, Enum):
     ModeV1 = "v1"
 
 
+def _mask_secret(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "***"
+    return f"{value[:4]}...{value[-4:]}"
+
+
 class OpenAIChatGPT:
     client = None
 
@@ -71,7 +79,7 @@ class OpenAIChatGPT:
         self.config = config
         self.ten_env = ten_env
         ten_env.log_info(
-            f"OpenAIChatGPT initialized with config: {config.api_key}"
+            f"OpenAIChatGPT initialized with api_key={_mask_secret(config.api_key)}"
         )
         self.http_client = None
         if config.proxy_url:

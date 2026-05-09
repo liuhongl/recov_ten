@@ -709,19 +709,129 @@ ASR：Deepgram nova-3，zh-CN，8k linear16
 LLM：DeepSeek OpenAI-compatible，OPENAI_API_BASE=https://api.deepseek.com/v1，model=deepseek-chat
 TTS：ElevenLabs eleven_multilingual_v2，pcm_16000
 桥接护栏：sip_media_bridge 下行会尝试把非 8k mono s16le PCM 转成 8k mono s16le
-已验证：graph 可启动，dialog_controller 可创建，ASR WebSocket 可打开，LLM 可初始化
-未通过：ElevenLabs key 缺少 text_to_speech 权限，电话侧暂时无法听到 AI 回复
+已验证：graph 可启动，dialog_controller 可创建，ASR WebSocket 可打开，LLM 可初始化，TTS 可产出音频，电话侧可听到 AI 回复
+当前边界：这是本地 MicroSIP + Docker FreeSWITCH + 9199 的最小 AI 电话闭环，不是真实 SIP trunk
 ```
 
-这次 TTS 阻塞的关键事实：
+阶段 6A 延迟样本：
 
 ```text
-ElevenLabs WebSocket TTS：vendor_error code=1008 missing_permissions
-ElevenLabs HTTP TTS 探测：401 missing_permissions
-错误含义：当前 ELEVENLABS_TTS_KEY 缺少 text_to_speech 权限
+测试语音：你好呀
+ASR interim：你好呀
+ASR final：你好呀
+AI 回复：你好！有什么可以帮你的吗？
+
+电话音频进入 -> ASR final：约 2.8s
+ASR final -> LLM 第一段文本：约 2.28s
+LLM 第一段文本 -> TTS 首包：约 0.78s
+电话音频进入 -> 电话侧听到第一声 AI：约 5.88s
 ```
 
-所以不要把 6A 当前问题误判成 FreeSWITCH、RTP、Media Hub、DeepSeek 或 `sip_media_bridge` 问题。下一步要先换成有 TTS 权限的 ElevenLabs key，或确认切换到其他支持中文且能输出 PCM 的 TTS provider。
+当前不要把 6A 的慢误判成 FreeSWITCH、RTP、Media Hub 或 `sip_media_bridge` 问题。日志看媒体链路是 20ms / 320 bytes 持续转发，主要慢点在 ASR final、LLM 首句和 TTS 首包。
+
+## 10.1 级联语音链路和 WebSocket 实时音频模型
+
+当前已经实现的是级联链路：
+
+```text
+电话侧 PCMA
+  -> FreeSWITCH 解码成 8k PCM
+  -> Media Hub
+  -> sip_media_bridge
+  -> ASR 把语音转文字
+  -> LLM 根据文字生成回复
+  -> TTS 把文字转语音
+  -> sip_media_bridge 把音频转回 8k PCM
+  -> FreeSWITCH 编码回 PCMA
+  -> 用户听到声音
+```
+
+这个链路的特点：
+
+```text
+每一层职责清楚
+容易逐段替换和测试
+可以保留当前 FreeSWITCH / Media Hub / sip_media_bridge
+但天然存在串行等待：ASR final -> LLM 首句 -> TTS 首包
+```
+
+6B-1 的阿里千问 `qwen-flash` 属于文本 LLM 替换：
+
+```text
+Deepgram ASR + DeepSeek LLM + ElevenLabs TTS
+替换为：
+Deepgram ASR + 阿里 qwen-flash LLM + ElevenLabs TTS
+```
+
+它只优化：
+
+```text
+ASR final -> LLM 第一段文本
+```
+
+它不改变：
+
+```text
+ASR 仍然负责语音转文字
+TTS 仍然负责文字转语音
+电话媒体仍然走 8k PCM
+整体仍是 ASR -> LLM -> TTS 级联链路
+```
+
+WebSocket 实时音频模型是另一种架构。它不是简单“把 LLM 换成 realtime”，而是让模型直接接收音频流并输出音频流：
+
+```text
+电话侧 PCMA
+  -> FreeSWITCH 解码成 8k PCM
+  -> Media Hub
+  -> 实时音频模型 WebSocket
+  -> 模型直接返回音频
+  -> Media Hub / FreeSWITCH
+  -> 用户听到声音
+```
+
+它可能把 ASR、LLM、TTS 合并到一个实时模型里：
+
+```text
+输入：音频流
+内部：识别、理解、生成、合成
+输出：音频流
+```
+
+优势：
+
+```text
+可以更低延迟
+更适合自然插话和全双工对话
+不一定需要等待完整 ASR final
+可能天然支持语音活动检测和打断
+```
+
+代价：
+
+```text
+架构变化更大
+TEN 现有 ASR/LLM/TTS 分段能力会被绕过一部分
+调试时不容易分清 ASR 慢、LLM 慢还是 TTS 慢
+对供应商绑定更强
+需要重新处理音频格式、会话状态、打断、取消、下行播放缓冲
+```
+
+所以当前阶段选择：
+
+```text
+6B-1：先做文本 LLM A/B，验证 qwen-flash 能否降低 LLM 首句延迟
+6B-2：再替换 TTS，验证 TTS 首包
+6B-3：再替换 8k 电话 ASR，验证 ASR final
+后续如果仍无法达到目标，再单独评估 WebSocket 实时音频模型
+```
+
+一句话记忆：
+
+```text
+qwen-flash：文本 LLM，替换级联链路中的 LLM 这一段
+realtime 音频模型：音频进、音频出，属于另一种实时语音架构
+```
 
 如果想减少电话网关配置成本：
 

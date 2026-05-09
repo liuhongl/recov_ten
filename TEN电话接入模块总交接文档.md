@@ -236,6 +236,7 @@ ai_agents/agents/ten_packages/extension/sip_trunk_dialog_controller/
 voice_assistant_sip_trunk_cn_skeleton
 voice_assistant_sip_trunk_audio_frame_test
 voice_assistant_sip_trunk_cn_ai_minimal
+voice_assistant_sip_trunk_cn_ai_aliyun_llm
 ```
 
 当前 `sip_media_bridge` 关键配置：
@@ -1605,6 +1606,9 @@ Call Gateway
 baseline:
   Deepgram ASR + DeepSeek LLM + ElevenLabs TTS
 
+aliyun-llm:
+  Deepgram ASR + 阿里千问 LLM + ElevenLabs TTS
+
 aliyun-asr-tts:
   阿里 8k ASR + DeepSeek LLM + 阿里 TTS
 
@@ -1620,7 +1624,14 @@ OPENAI_API_KEY=<阿里百炼 DashScope API Key>
 OPENAI_MODEL=<千问低延迟模型，例如 qwen3.6-flash 或 qwen-plus>
 ```
 
-注意：电话场景优先选择低延迟、稳定中文对话模型，不优先选择深度思考或 reasoning 类模型。电话首响的核心是尽快产出第一段可播文本。
+当前 6B-1 先选：
+
+```text
+graph: voice_assistant_sip_trunk_cn_ai_aliyun_llm
+model: qwen-flash
+```
+
+注意：电话场景优先选择低延迟、稳定中文对话模型，不优先选择深度思考或 reasoning 类模型。电话首响的核心是尽快产出第一段可播文本。阿里的 realtime 类模型属于实时音频/多模态架构，后续可以单独评估，但不属于当前 6B-1 的“只换文本 LLM”范围。
 
 真实 SIP trunk 阶段可以并行准备信息，但不建议在 6B 前直接作为主线推进。原因是当前没有 trunk 账号、线路商地址、鉴权方式、编码要求和公网/NAT 条件；贸然进入会把线路问题、PBX 问题、AI 链路体验问题混在一起。
 

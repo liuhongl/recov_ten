@@ -24,6 +24,8 @@ class SipMediaBridgeExtension(AsyncExtension):
         self.config = SipMediaBridgeConfig()
         self._ws: WebSocketClientProtocol | None = None
         self._connection_task: asyncio.Task | None = None
+        self._outgoing_audio_queue: asyncio.Queue[bytes] | None = None
+        self._outgoing_sender_task: asyncio.Task | None = None
         self._closing = False
 
     async def on_init(self, ten_env: AsyncTenEnv) -> None:
@@ -40,12 +42,22 @@ class SipMediaBridgeExtension(AsyncExtension):
             f"sample_rate={self.config.sample_rate}"
         )
         self._closing = False
+        self._outgoing_audio_queue = asyncio.Queue()
         self._connection_task = asyncio.create_task(
             self._run_media_hub_connection(ten_env)
+        )
+        self._outgoing_sender_task = asyncio.create_task(
+            self._outgoing_audio_sender(ten_env)
         )
 
     async def on_stop(self, ten_env: AsyncTenEnv) -> None:
         self._closing = True
+        if self._outgoing_sender_task is not None:
+            self._outgoing_sender_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._outgoing_sender_task
+            self._outgoing_sender_task = None
+        self._outgoing_audio_queue = None
         if self._connection_task is not None:
             self._connection_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -69,7 +81,7 @@ class SipMediaBridgeExtension(AsyncExtension):
         ten_env: AsyncTenEnv,
         audio_frame: AudioFrame,
     ) -> None:
-        if self._ws is None:
+        if self._ws is None or self._outgoing_audio_queue is None:
             ten_env.log_warn(
                 "sip_media_bridge dropped outgoing audio frame without "
                 f"media hub connection: channel={self.config.channel}"
@@ -83,27 +95,53 @@ class SipMediaBridgeExtension(AsyncExtension):
             return
 
         frame_size = self._outgoing_frame_size_bytes()
-        sent_chunks = 0
-        sent_bytes = 0
+        queued_chunks = 0
+        queued_bytes = 0
         for chunk in self._iter_outgoing_pcm_chunks(payload, frame_size):
-            try:
-                await self._ws.send(chunk)
-            except ConnectionClosed as err:
-                ten_env.log_warn(
-                    "sip_media_bridge failed to send pcm to media hub: "
-                    f"channel={self.config.channel}, code={err.code}"
-                )
-                return
-            sent_chunks += 1
-            sent_bytes += len(chunk)
-            await asyncio.sleep(PCM_FRAME_DURATION_MS / 1000)
+            await self._outgoing_audio_queue.put(chunk)
+            queued_chunks += 1
+            queued_bytes += len(chunk)
 
         ten_env.log_info(
-            "sip_media_bridge sent_pcm_to_media_hub: "
-            f"channel={self.config.channel}, bytes={sent_bytes}, "
-            f"chunks={sent_chunks}, chunk_bytes={frame_size}, "
+            "sip_media_bridge queued_pcm_to_media_hub: "
+            f"channel={self.config.channel}, bytes={queued_bytes}, "
+            f"chunks={queued_chunks}, chunk_bytes={frame_size}, "
             f"sample_rate={self.config.sample_rate}"
         )
+
+    async def _outgoing_audio_sender(
+        self,
+        ten_env: AsyncTenEnv,
+    ) -> None:
+        while not self._closing:
+            if self._outgoing_audio_queue is None:
+                await asyncio.sleep(PCM_FRAME_DURATION_MS / 1000)
+                continue
+
+            chunk = await self._outgoing_audio_queue.get()
+            try:
+                websocket = self._ws
+                if websocket is None:
+                    ten_env.log_warn(
+                        "sip_media_bridge dropped queued outgoing pcm without "
+                        f"media hub connection: channel={self.config.channel}, "
+                        f"bytes={len(chunk)}"
+                    )
+                    continue
+
+                try:
+                    await websocket.send(chunk)
+                except ConnectionClosed as err:
+                    ten_env.log_warn(
+                        "sip_media_bridge failed to send queued pcm to media hub: "
+                        f"channel={self.config.channel}, code={err.code}"
+                    )
+                    self._clear_outgoing_audio_queue()
+                    continue
+
+                await asyncio.sleep(PCM_FRAME_DURATION_MS / 1000)
+            finally:
+                self._outgoing_audio_queue.task_done()
 
     def _normalize_outgoing_pcm(
         self,
@@ -371,11 +409,32 @@ class SipMediaBridgeExtension(AsyncExtension):
                         "sip_media_bridge media hub control message: "
                         f"channel={self.config.channel}, type={message_type}"
                     )
+                    if message_type == "peer_disconnected":
+                        dropped_chunks = self._clear_outgoing_audio_queue()
+                        ten_env.log_info(
+                            "sip_media_bridge cleared outgoing audio queue: "
+                            f"channel={self.config.channel}, "
+                            f"reason=peer_disconnected, "
+                            f"dropped_chunks={dropped_chunks}"
+                        )
         except ConnectionClosed as err:
             ten_env.log_info(
                 "sip_media_bridge media hub connection closed: "
                 f"channel={self.config.channel}, code={err.code}"
             )
+
+    def _clear_outgoing_audio_queue(self) -> int:
+        if self._outgoing_audio_queue is None:
+            return 0
+
+        dropped_chunks = 0
+        while True:
+            try:
+                self._outgoing_audio_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return dropped_chunks
+            self._outgoing_audio_queue.task_done()
+            dropped_chunks += 1
 
     async def _send_pcm_to_graph(
         self,

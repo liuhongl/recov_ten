@@ -154,6 +154,89 @@ little-endian
 40ms 音频 = 640 bytes
 ```
 
+### 采样率、位深和 320 bytes 的含义
+
+`8k PCM -> 16k PCM -> 8k PCM` 里的 `8k` 和 `16k` 指的是采样率，不是 8 bit / 16 bit。
+
+采样率表示每秒取多少个声音样本：
+
+```text
+8kHz  = 每秒 8000 个采样点
+16kHz = 每秒 16000 个采样点
+24kHz = 每秒 24000 个采样点
+```
+
+它主要影响：
+
+```text
+可表达的最高声音频率
+每秒音频数据量
+模型或电话网关是否能正确识别格式
+错误解释时的语速和音调
+```
+
+从第一性原理看，数字音频就是连续声音波形的离散采样。采样率越高，每秒记录的点越密，能表达的高频越多，数据量也越大。电话语音常用 8kHz，因为电话人声主要关注可懂度；很多 AI ASR / 实时语音模型更偏好 16kHz 或更高，因为它能保留更多语音细节。
+
+但采样率高不等于一定更好。电话侧本来就是 8kHz 时，把它上采样到 16kHz 只是为了满足模型输入格式，不会凭空恢复已经不存在的高频细节。
+
+`16-bit PCM` 里的 `16-bit` 指的是位深，也就是每个采样点用多少 bit 表示振幅：
+
+```text
+16-bit = 每个采样点 2 bytes
+mono   = 1 个声道
+```
+
+所以 8kHz、16-bit、mono 的 20ms PCM 帧大小是：
+
+```text
+8000 samples/s * 0.02 s * 2 bytes * 1 channel = 320 bytes
+```
+
+16kHz、16-bit、mono 的 20ms PCM 帧大小是：
+
+```text
+16000 samples/s * 0.02 s * 2 bytes * 1 channel = 640 bytes
+```
+
+24kHz、16-bit、mono 的 20ms PCM 帧大小是：
+
+```text
+24000 samples/s * 0.02 s * 2 bytes * 1 channel = 960 bytes
+```
+
+`320 bytes in / 320 bytes out` 表示当前电话侧媒体帧是 8kHz、16-bit、mono、20ms，网关收到一帧 320 bytes，也回给 FreeSWITCH 一帧 320 bytes。这说明下行仍然符合电话侧播放节奏。
+
+如果 320 bytes 变大或变小，影响取决于原因：
+
+```text
+同样 8kHz / 16-bit / mono 下：
+160 bytes = 10ms 音频，包更频繁，调度开销更高，但理论延迟更低
+320 bytes = 20ms 音频，电话系统常用，延迟和稳定性比较平衡
+640 bytes = 40ms 音频，包更少，但每包自带更高播放等待时间
+```
+
+如果 FreeSWITCH 期望 20ms / 320 bytes，但网关乱发更大或更小的 PCM 块，常见问题是：
+
+```text
+播放节奏抖动
+声音断续或卡顿
+延迟增大
+缓冲区堆积
+音频被截断或拼接异常
+某些媒体模块直接丢帧或报警
+```
+
+更严重的是“采样率解释错”。例如把 16kHz PCM 当成 8kHz 播放，声音会变慢、音调变低；把 8kHz PCM 当成 16kHz 播放，声音会变快、音调变高。
+
+电话线上的 PCMA 不是 320 bytes。PCMA 是 G.711 A-law 压缩后的 8-bit 编码：
+
+```text
+PCMA 8kHz 20ms = 160 samples * 1 byte = 160 bytes
+PCM  8kHz 20ms = 160 samples * 2 bytes = 320 bytes
+```
+
+当前本地链路里，FreeSWITCH / `mod_audio_stream` 已经把电话侧 PCMA 解码成 8k PCM 给网关，所以网关看到的是 320 bytes 的 PCM 帧，而不是 160 bytes 的 PCMA 包。
+
 PCMA 和 PCM 的关系：
 
 ```text

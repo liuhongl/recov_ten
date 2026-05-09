@@ -1,0 +1,23 @@
+[server]
+host = "127.0.0.1"
+port = 9100
+
+[logging]
+level = "INFO"
+
+[freeswitch]
+media_host = "0.0.0.0"
+media_port = 9101
+sample_rate = 8000
+phone_codec = "PCMA"
+echo_mode = "raw"
+
+[realtime]
+provider = "aliyun"
+url = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+model = "qwen3.5-omni-plus-realtime"
+voice = "Cherry"
+
+[features]
+metrics_enabled = true
+recording_enabled = false

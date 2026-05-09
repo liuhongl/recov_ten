@@ -575,6 +575,15 @@ MicroSIP -> FreeSWITCH -> sip-realtime-voice-gateway echo -> FreeSWITCH -> Micro
 电话回声链路听感正常
 ```
 
+当前实现状态：
+
+- 已新增 `sip-realtime-voice-gateway/app/audio_codec.py`。
+- 已支持 `8k PCM -> 16k PCM`、`24k PCM -> 8k PCM`。
+- 已支持 `PCM s16le <-> PCMA / G.711 A-law`。
+- 已支持按固定字节数切分 20ms 音频帧。
+- 已新增 `resample_16k_roundtrip` 回声模式，用于电话链路听感验证。
+- 自动化测试已覆盖以上能力。
+
 ### 9.4 阶段 4：实时模型接入
 
 目标：不接电话，先验证网关可以独立连接 Qwen-Omni-Realtime 或其他端到端实时语音模型。

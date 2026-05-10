@@ -1,0 +1,377 @@
+<h1>SIP 实时语音网关交接总文档</h1>
+<h2>1. 当前结论</h2>
+<p>当前项目主线已经从旧 TEN 级联语音链路收敛为独立的 <code>sip-realtime-voice-gateway</code> 项目。</p>
+<p>本项目目标是支撑 AI 外呼和电话实时对话：</p>
+<pre><code>业务系统
+  -&gt; sip-realtime-voice-gateway HTTP 控制面
+  -&gt; FreeSWITCH / SIP Trunk
+  -&gt; 电话用户
+  -&gt; FreeSWITCH 9199 媒体链路
+  -&gt; sip-realtime-voice-gateway 实时媒体网关
+  -&gt; 豆包 S2S 端到端实时语音模型
+  -&gt; 电话用户</code></pre>
+<p>旧 TEN 链路已经不作为当前商用主线。原因是旧链路是：</p>
+<pre><code>ASR final -&gt; LLM -&gt; TTS -&gt; 电话播放</code></pre>
+<p>该结构串行等待多，体感延迟高。本项目当前主线使用端到端实时语音模型，电话音频持续进入模型，模型音频持续回到电话侧，并由网关负责播放时钟、打断和状态机。</p>
+<h2>2. 业务需求</h2>
+<p>当前模块面向 AI 外呼场景，业务系统需要能够：</p>
+<pre><code>1. 发起一通外呼。
+2. 传入被叫号码和业务上下文。
+3. 在电话接通后让 AI 与用户实时对话。
+4. 支持用户插话打断旧回复。
+5. 查询通话状态、接通耗时、通话时长和失败原因。
+6. 后续支持真实 SIP trunk、业务回调、持久化和生产监控。</code></pre>
+<p>本地测试中使用软电话 1000 模拟真实被叫用户；Windows 可用 MicroSIP，macOS 可用 Linphone 或 Zoiper。真实商用时，软电话会替换成运营商 SIP trunk 或企业中继线路。</p>
+<h2>3. 当前链路图</h2>
+<h3>3.1 本地测试链路</h3>
+<pre class="mermaid">flowchart LR
+  A[&quot;测试页 / 业务系统&quot;] --&gt; B[&quot;POST /calls&quot;]
+  B --&gt; C[&quot;网关 HTTP 控制面&quot;]
+  C --&gt; D[&quot;FreeSWITCH ESL originate&quot;]
+  D --&gt; E[&quot;本地软电话 1000&quot;]
+  E --&gt; F[&quot;接通后进入 9199&quot;]
+  F --&gt; G[&quot;mod_audio_stream&quot;]
+  G --&gt; H[&quot;实时媒体网关&quot;]
+  H --&gt; I[&quot;豆包 S2S 实时语音&quot;]
+  I --&gt; H
+  H --&gt; G
+  G --&gt; F
+  F --&gt; E</pre>
+<h3>3.2 真实 SIP Trunk 链路</h3>
+<pre class="mermaid">flowchart LR
+  A[&quot;业务系统&quot;] --&gt; B[&quot;POST /calls&quot;]
+  B --&gt; C[&quot;网关 HTTP 控制面&quot;]
+  C --&gt; D[&quot;FreeSWITCH ESL originate&quot;]
+  D --&gt; E[&quot;SIP trunk / 真实被叫号码&quot;]
+  E --&gt; F[&quot;接通后进入 9199&quot;]
+  F --&gt; G[&quot;当前 mod_audio_stream&lt;br/&gt;后续可替换商用 Media Adapter&quot;]
+  G --&gt; H[&quot;实时媒体网关&quot;]
+  H --&gt; I[&quot;豆包 S2S 实时语音&quot;]
+  I --&gt; H
+  H --&gt; G
+  G --&gt; F
+  F --&gt; E</pre>
+<p>真实线路替换点在 FreeSWITCH 外呼 endpoint 层。接通后的 <code>9199 -&gt; 实时媒体网关 -&gt; 豆包 S2S</code> 链路应保持一致。当前实现仍使用 <code>mod_audio_stream</code> 作为 Media Adapter；商用阶段如果它在播放完成事件、打断停止、并发稳定性上压测不达标，再替换为定制 FreeSWITCH 模块或商用媒体适配层。</p>
+<p>该链路在代码结构上可以按 <code>call_id/session_id</code> 多路复制，但当前还没有生产级并发上限、外呼队列和压测结论。本地 <code>1000</code> 软电话只能验证单路或小规模链路，不代表真实运营商并发能力。</p>
+<h2>4. 当前已经实现的能力</h2>
+<h3>4.1 实时媒体主链路</h3>
+<p>已经实现：</p>
+<pre><code>1. FreeSWITCH 9199 把电话媒体接入网关 WebSocket。
+2. 网关接收 8k / 20ms 电话上行 PCM。
+3. 网关把电话音频重采样到模型输入格式。
+4. 网关连接豆包 S2S 端到端实时语音模型。
+5. 网关接收模型音频 delta。
+6. 网关把模型音频重采样回 8k 电话帧。
+7. 网关按电话媒体节奏回放到 FreeSWITCH。</code></pre>
+<p>当前主模型链路为豆包 S2S，不再保留阿里 Realtime、火山硬件智能体和旧 ASR/LLM/TTS 级联链路作为运行时回退。</p>
+<h3>4.2 播放和打断</h3>
+<p>已经实现：</p>
+<pre><code>1. Playout Engine：把模型输出转换成稳定电话下行帧。
+2. Jitter / prefill：降低下行播放抖动。
+3. FreeSWITCH playback 事件闭环：等待 chunk_played / queue_completed。
+4. 用户插话时清空本地播放队列。
+5. 用户插话时调用 uuid_audio_stream &lt;uuid&gt; break 停止 FreeSWITCH 侧旧音频。
+6. 被打断的 assistant turn 不进入 committed history。
+7. 通过尾部静音和播放完成确认避免最后几个字被吞或串入下一轮。</code></pre>
+<h3>4.3 HTTP 外呼控制面</h3>
+<p>已经实现接口：</p>
+<pre><code>POST /calls
+GET  /calls
+GET  /calls/{call_id}
+POST /calls/{call_id}/hangup
+GET  /outbound-test
+GET  /docs/handoff
+GET  /docs/notes</code></pre>
+<p>本地测试页：</p>
+<pre><code>http://127.0.0.1:9100/outbound-test</code></pre>
+<p>文档浏览入口：</p>
+<pre><code>http://127.0.0.1:9100/docs/handoff
+http://127.0.0.1:9100/docs/notes</code></pre>
+<h3>4.4 FreeSWITCH 外呼状态机</h3>
+<p>当前外呼状态机已经接入 FreeSWITCH channel 事件：</p>
+<pre><code>CHANNEL_PROGRESS / CHANNEL_PROGRESS_MEDIA -&gt; ringing
+CHANNEL_ANSWER                            -&gt; answered
+媒体 WebSocket 连接                        -&gt; media_connected
+CHANNEL_HANGUP / CHANNEL_HANGUP_COMPLETE  -&gt; completed / busy / no_answer / failed</code></pre>
+<p>状态流转：</p>
+<pre class="mermaid">stateDiagram-v2
+  [*] --&gt; queued
+  queued --&gt; originating
+  originating --&gt; ringing: CHANNEL_PROGRESS
+  originating --&gt; answered: CHANNEL_ANSWER
+  ringing --&gt; answered: CHANNEL_ANSWER
+  answered --&gt; media_connected: media websocket connected
+  media_connected --&gt; completed: NORMAL_CLEARING
+  answered --&gt; completed: NORMAL_CLEARING
+  originating --&gt; busy: USER_BUSY / CALL_REJECTED
+  ringing --&gt; no_answer: NO_ANSWER
+  originating --&gt; failed: other hangup cause
+  ringing --&gt; failed: other hangup cause
+  media_connected --&gt; failed: other hangup cause</pre>
+<p>最新本地验证中，状态机已完成闭环：</p>
+<pre><code>status=completed
+phase=completed
+hangup_cause=NORMAL_CLEARING
+sip_status=200
+last_event_name=CHANNEL_HANGUP_COMPLETE</code></pre>
+<h2>5. 关键数据格式</h2>
+<h3>5.1 发起外呼请求</h3>
+<pre><code>POST /calls
+Content-Type: application/json</code></pre>
+<pre><code>{
+  &quot;destination&quot;: &quot;1000&quot;,
+  &quot;external_call_id&quot;: &quot;local-test-001&quot;,
+  &quot;caller_id_number&quot;: &quot;9000&quot;,
+  &quot;context&quot;: {
+    &quot;scene&quot;: &quot;local-outbound-test&quot;
+  }
+}</code></pre>
+<p>字段说明：</p>
+<pre><code>destination              被叫号码。当前本地为 1000；真实线路为手机号或运营商要求格式。
+external_call_id         业务系统自己的通话 ID，可选。
+caller_id_number         主叫号码。本地默认 9000，避免 1000 呼叫 1000 的自呼叫歧义。
+endpoint                 可选，覆盖默认 endpoint。
+context                  业务上下文 JSON，当前只保存和透传，后续可注入 AI prompt。
+originate_timeout_seconds 外呼超时，默认 30 秒。</code></pre>
+<h3>5.2 查询外呼响应</h3>
+<p><code>GET /calls</code> 和 <code>GET /calls/{call_id}</code> 会返回：</p>
+<pre><code>call_id
+external_call_id
+destination
+endpoint
+requested_endpoint
+dialplan_extension
+dialplan_context
+caller_id_name
+caller_id_number
+status
+phase
+phase_label
+created_at_ms
+started_at_ms
+ringing_at_ms
+answered_at_ms
+media_connected_at_ms
+media_disconnected_at_ms
+completed_at_ms
+elapsed_ms
+originate_elapsed_ms
+answer_latency_ms
+ringing_ms
+talk_duration_ms
+freeswitch_reply
+error
+hangup_cause
+sip_status
+sip_reason
+last_event_name
+failure_reason
+failure_label
+failure_hint
+sip_status_hint
+context</code></pre>
+<p>正常结束时：</p>
+<pre><code>status=completed
+phase=completed
+hangup_cause=NORMAL_CLEARING
+failure_reason=null</code></pre>
+<p>临时失败时：</p>
+<pre><code>status=failed
+phase=temporary_failure
+hangup_cause=NORMAL_TEMPORARY_FAILURE
+sip_status=503
+failure_reason=NORMAL_TEMPORARY_FAILURE</code></pre>
+<h3>5.3 FreeSWITCH originate 命令</h3>
+<p>网关通过 Event Socket 执行：</p>
+<pre><code>originate {origination_uuid=&lt;call_id&gt;,origination_caller_id_name=AI_Assistant,origination_caller_id_number=9000,originate_timeout=30,hangup_after_bridge=true,sip_realtime_gateway_call_id=&lt;call_id&gt;}&lt;endpoint&gt; 9199 XML default</code></pre>
+<p>本地默认 endpoint：</p>
+<pre><code>sofia_contact:*/{destination}</code></pre>
+<p>因此 <code>destination=1000</code> 会先解析成当前软电话注册 Contact，例如：</p>
+<pre><code>sofia/internal/sip:1000@192.168.x.x:51611;ob;fs_nat=yes;fs_path=...</code></pre>
+<p>真实 SIP trunk 通常改为：</p>
+<pre><code>sofia/gateway/&lt;trunk-name&gt;/{destination}</code></pre>
+<h3>5.4 电话媒体格式</h3>
+<p>电话侧核心媒体契约：</p>
+<pre><code>sample_rate = 8000 Hz
+channels = 1
+frame_duration_ms = 20
+PCM frame = 160 samples * 2 bytes = 320 bytes
+PCMA RTP payload = 160 bytes</code></pre>
+<p>含义：</p>
+<pre><code>8k         每秒 8000 个采样点，电话窄带语音常见格式。
+20ms       每一帧代表 20ms 声音，是电话实时播放的基本节奏。
+320 bytes  8k / 20ms / s16le / mono 的一帧 PCM 大小。</code></pre>
+<p>帧过大，会增加延迟；帧过小，会增加调度压力。当前 20ms 是电话系统常见折中。</p>
+<h3>5.5 模型媒体格式</h3>
+<p>当前网关内部会做采样率转换：</p>
+<pre><code>电话上行 8k PCM -&gt; 模型输入 16k PCM
+模型输出 24k PCM -&gt; 电话下行 8k PCM</code></pre>
+<p>最终发回电话侧仍必须满足 8k / 20ms / 320 bytes。</p>
+<h2>6. 本地测试环境</h2>
+<h3>6.1 组件</h3>
+<p>当前本地测试使用：</p>
+<pre><code>Docker Desktop
+sip_realtime_freeswitch 容器
+本地软电话 1000
+sip-realtime-voice-gateway
+豆包 S2S 实时语音服务</code></pre>
+<h3>6.2 端口</h3>
+<pre><code>FreeSWITCH SIP       5060/udp, 5060/tcp
+FreeSWITCH external  5080/udp, 5080/tcp
+FreeSWITCH RTP       16384-16484/udp
+FreeSWITCH ESL       18021 -&gt; container 8021
+网关 HTTP 控制面      9100
+网关媒体 WebSocket    9101</code></pre>
+<h3>6.3 启动 FreeSWITCH</h3>
+<pre><code>cd freeswitch-local
+docker compose up -d --build</code></pre>
+<p>容器名：</p>
+<pre><code>sip_realtime_freeswitch</code></pre>
+<h3>6.4 启动网关</h3>
+<pre><code>python -m app.main --config configs/local.example.toml --env-file .env --media-mode realtime</code></pre>
+<p>检查：</p>
+<pre><code>Invoke-RestMethod http://127.0.0.1:9100/ready</code></pre>
+<h3>6.5 本地软电话</h3>
+<p>本地分机：</p>
+<pre><code>账号：1000
+服务器：运行 FreeSWITCH Docker 的宿主机局域网 IPv4
+协议：UDP
+Windows 示例：MicroSIP
+macOS 示例：Linphone / Zoiper</code></pre>
+<p>如果外呼出现 <code>NORMAL_TEMPORARY_FAILURE</code> / SIP 503，先检查：</p>
+<pre><code>1. 软电话是否在线。
+2. FreeSWITCH 中 1000 是否 Registered。
+3. Ping-Status 是否 Reachable。
+4. show channels 是否存在未挂断通道。
+5. 软电话是否刚发生 NAT 端口变化，需要重新注册。</code></pre>
+<p>常用命令：</p>
+<pre><code>docker exec sip_realtime_freeswitch fs_cli -x &quot;sofia status profile internal reg&quot;
+docker exec sip_realtime_freeswitch fs_cli -x &quot;sofia_contact */1000&quot;
+docker exec sip_realtime_freeswitch fs_cli -x &quot;show channels&quot;</code></pre>
+<h3>6.6 本地配置</h3>
+<p><code>.env</code> 不允许提交。当前需要包含：</p>
+<pre><code>FREESWITCH_ESL_PASSWORD=...
+DOUBAO_S2S_APP_ID=...
+DOUBAO_S2S_ACCESS_TOKEN=...
+DOUBAO_S2S_APP_KEY=...</code></pre>
+<p>配置模板：</p>
+<pre><code>.env.example
+configs/local.example.toml</code></pre>
+<h2>7. 当前测试结果</h2>
+<p>自动化测试：</p>
+<pre><code>python -m pytest
+结果：82 passed</code></pre>
+<p>最新一次本地外呼测试：</p>
+<pre><code>destination=1000
+status=completed
+phase=completed
+hangup_cause=NORMAL_CLEARING
+sip_status=200
+last_event_name=CHANNEL_HANGUP_COMPLETE</code></pre>
+<p>耗时：</p>
+<pre><code>ringing_ms       约 2500ms
+answer_latency   约 2591ms
+talk_duration    约 18380ms
+elapsed          约 20971ms</code></pre>
+<p>FreeSWITCH 日志确认：</p>
+<pre><code>destination_number(9199) PASS
+Action answer()
+Action lua(sip_realtime_audio_stream_start.lua)
+mod_audio_stream start ws://host.docker.internal:9101/media/fs/&lt;call_id&gt;
+Hangup NORMAL_CLEARING</code></pre>
+<h2>8. 已知边界和未实现内容</h2>
+<p>当前未实现：</p>
+<pre><code>1. 通话记录持久化。当前 /calls 记录在内存中，网关重启后会清空。
+2. 业务系统 webhook 回调。
+3. 真实 SIP trunk 出局网关配置和运营商 CDR 对账。
+4. 外呼任务队列、并发限流、失败重试、黑名单、时间窗。
+5. 接口鉴权、签名、IP 白名单。
+6. 生产指标面板和告警。
+7. 业务上下文注入实时模型 system prompt。
+8. 本地 FreeSWITCH IP 参数化。当前本地配置仍需要按测试机器 LAN IPv4 调整。</code></pre>
+<p>当前已知边界：</p>
+<pre><code>1. 本地软电话只验证 FreeSWITCH 之后的电话媒体链路，不能替代真实运营商测试。
+2. 本地 NAT Contact 会变化，偶发 503 时先刷新软电话注册。
+3. mod_audio_stream 必须按实时流使用，不能把模型音频攒成大块后再发。
+4. 不要在同一通道上使用阻塞式 FreeSWITCH playback / speak 破坏实时媒体流。
+5. 正常结束用 hangup_cause=NORMAL_CLEARING 表示，不应当作为 failure_reason。
+6. 当前支持多通会话的代码结构，但尚未做生产级 max_active_calls、CPS、排队、重试和压测。
+7. 真实 SIP trunk 的返回码、CDR、DTMF、NAT、防火墙和并发限制必须以运营商实测为准。</code></pre>
+<h2>9. 代码和文件位置</h2>
+<p>主项目：</p>
+<pre><code>当前仓库根目录</code></pre>
+<p>关键代码：</p>
+<pre><code>app/main.py
+app/config.py
+app/health_server.py
+app/call_control.py
+app/freeswitch_event_socket.py
+app/realtime_phone_gateway.py
+app/doubao_s2s_client.py
+app/doubao_s2s_realtime.py
+app/playout_controller.py</code></pre>
+<p>本地 FreeSWITCH：</p>
+<pre><code>freeswitch-local/</code></pre>
+<p>测试：</p>
+<pre><code>tests/</code></pre>
+<p>文档：</p>
+<pre><code>static/pages/handoff.html
+static/pages/notes.html
+static/pages/agent-readme.html</code></pre>
+<h2>10. 后续实施路线</h2>
+<p>当前最大未知不是业务系统回调，也不是并发调度，而是真实运营商线路接入后 SIP 信令、PCMA/RTP、NAT、防火墙、挂机原因和媒体质量是否成立。因此下一阶段建议先做真实 SIP trunk 单路预验证，业务系统接入和并发护栏后移。</p>
+<h3>10.1 下一阶段：真实 SIP trunk 单路预验证</h3>
+<p>目标：</p>
+<pre><code>1. 配置真实 SIP trunk 出局网关。
+2. 用测试页或 POST /calls 发起单通真实外呼。
+3. 验证被叫号码格式、主叫号码规则、鉴权、PCMA、RTP、NAT、防火墙。
+4. 验证接通后仍进入 9199，并复用当前实时媒体网关和豆包 S2S 链路。
+5. 验证忙线、拒接、无人接、用户挂机、运营商错误码和 FreeSWITCH hangup_cause 映射。
+6. 记录运营商 CDR / SIP trace 与网关状态字段的对应关系。</code></pre>
+<p>本阶段只做人工单路或极小规模验证，不做批量外呼。至少应限制测试号码，避免误拨、连拨和非预期外呼。</p>
+<p>需要提前准备：</p>
+<pre><code>1. SIP trunk 服务器地址、端口、传输协议。
+2. 鉴权方式：账号密码或 IP 鉴权。
+3. 出局主叫号码规则。
+4. 被叫号码格式：本地号、手机号、区号、86 或 +86。
+5. RTP 端口范围、防火墙和 NAT 要求。
+6. codec 要求：当前目标为 PCMA。
+7. 运营商并发数、CPS、超时和风控限制。
+8. 忙线、拒接、无人接、用户挂机等返回码说明。</code></pre>
+<h3>10.2 后续阶段：业务系统接入基础能力</h3>
+<p>目标：</p>
+<pre><code>1. 外呼记录持久化，网关重启后仍能查询历史通话。
+2. external_call_id 幂等，避免业务系统重复提交导致重复外呼。
+3. completed / busy / no_answer / failed 等最终状态通过 webhook 回调业务系统。
+4. webhook 增加 HMAC 签名、重试和失败记录。
+5. context 中的业务参数可注入实时模型 system prompt。</code></pre>
+<h3>10.3 后续阶段：并发与外呼调度护栏</h3>
+<p>目标：</p>
+<pre><code>1. max_active_calls：限制同时通话数。
+2. max_originate_per_second：限制每秒发起数。
+3. 外呼等待队列、超时回收和取消。
+4. 失败重试、黑名单、时间窗、号码去重。
+5. 并发压测，验证 FreeSWITCH、网关、豆包 S2S 和 SIP trunk 的共同容量。</code></pre>
+<h3>10.4 后续阶段：商用媒体稳定性</h3>
+<p>目标：</p>
+<pre><code>1. 压测 mod_audio_stream 的 chunk_played / queue_completed 事件可靠性。
+2. 压测 uuid_audio_stream break 的打断停止耗时和成功率。
+3. 验证高并发下尾音完整、无旧回复串入、无持续卡顿。
+4. 如果 mod_audio_stream 不达标，替换为定制 FreeSWITCH 模块或商用 Media Adapter。</code></pre>
+<h3>10.5 最终商用形态</h3>
+<pre class="mermaid">flowchart LR
+  A[&quot;业务系统 / CRM / 工单&quot;] --&gt; B[&quot;外呼 API&lt;br/&gt;鉴权 / 幂等 / 限流&quot;]
+  B --&gt; C[&quot;外呼调度器&lt;br/&gt;队列 / 重试 / 时间窗&quot;]
+  C --&gt; D[&quot;FreeSWITCH / SBC&quot;]
+  D --&gt; E[&quot;运营商 SIP trunk&lt;br/&gt;PCMA / CDR / SIP trace&quot;]
+  E --&gt; F[&quot;真实电话用户&quot;]
+  D --&gt; G[&quot;Media Adapter&lt;br/&gt;播放完成 / 打断 / RTP 时钟&quot;]
+  G --&gt; H[&quot;实时语音网关&lt;br/&gt;状态机 / Playout / 会话历史&quot;]
+  H --&gt; I[&quot;豆包 S2S 实时语音&quot;]
+  I --&gt; H
+  H --&gt; G
+  G --&gt; D
+  H --&gt; J[&quot;通话记录 / 指标 / 录音策略&quot;]
+  J --&gt; K[&quot;Webhook 回调 / CDR 对账 / 告警&quot;]
+  K --&gt; A</pre>
+<p>最终商用不是“能打一通电话”即可，而是要同时满足：真实线路稳定、媒体播放可证明完成、打断可控、状态可追踪、业务可回调、并发可限制、失败可归因、日志和密钥合规。</p>

@@ -20,6 +20,16 @@ host = "127.0.0.1"
 port = 18021
 password_env = "FREESWITCH_ESL_PASSWORD"
 
+[outbound]
+enabled = true
+endpoint_template = "sofia_contact:*/{destination}"
+dialplan_extension = "9199"
+dialplan_context = "default"
+caller_id_name = "AI_Assistant"
+caller_id_number = "9000"
+originate_timeout_seconds = 30
+max_recent_calls = 200
+
 [doubao_s2s]
 app_id_env = "DOUBAO_S2S_APP_ID"
 access_token_env = "DOUBAO_S2S_ACCESS_TOKEN"
@@ -55,3 +65,10 @@ barge_in_enabled = false
 [features]
 metrics_enabled = true
 recording_enabled = false
+
+[postgres]
+enabled = false
+dsn_env = "POSTGRES_DSN"
+min_pool_size = 1
+max_pool_size = 5
+command_timeout_seconds = 5.0

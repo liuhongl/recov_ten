@@ -34,6 +34,16 @@ def test_load_config_from_toml(tmp_path):
             port = 18021
             password_env = "TEST_ESL_PASSWORD"
 
+            [outbound]
+            enabled = true
+            endpoint_template = "sofia_contact:*/{destination}"
+            dialplan_extension = "9199"
+            dialplan_context = "default"
+            caller_id_name = "AI_Agent"
+            caller_id_number = "95500"
+            originate_timeout_seconds = 45
+            max_recent_calls = 300
+
             [doubao_s2s]
             app_id_env = "TEST_DOUBAO_APP_ID"
             access_token_env = "TEST_DOUBAO_ACCESS_TOKEN"
@@ -69,6 +79,13 @@ def test_load_config_from_toml(tmp_path):
             [features]
             metrics_enabled = true
             recording_enabled = false
+
+            [postgres]
+            enabled = true
+            dsn_env = "TEST_POSTGRES_DSN"
+            min_pool_size = 1
+            max_pool_size = 7
+            command_timeout_seconds = 3.5
             """
         ),
         encoding="utf-8",
@@ -87,6 +104,12 @@ def test_load_config_from_toml(tmp_path):
     assert config.event_socket.host == "127.0.0.1"
     assert config.event_socket.port == 18021
     assert config.event_socket.password_env == "TEST_ESL_PASSWORD"
+    assert config.outbound.enabled is True
+    assert config.outbound.endpoint_template == "sofia_contact:*/{destination}"
+    assert config.outbound.caller_id_name == "AI_Agent"
+    assert config.outbound.caller_id_number == "95500"
+    assert config.outbound.originate_timeout_seconds == 45
+    assert config.outbound.max_recent_calls == 300
     assert config.doubao_s2s.app_id_env == "TEST_DOUBAO_APP_ID"
     assert config.doubao_s2s.access_token_env == "TEST_DOUBAO_ACCESS_TOKEN"
     assert config.doubao_s2s.app_key_env == "TEST_DOUBAO_APP_KEY"
@@ -106,6 +129,10 @@ def test_load_config_from_toml(tmp_path):
     assert config.vad.barge_in_enabled is True
     assert config.features.metrics_enabled is True
     assert config.features.recording_enabled is False
+    assert config.postgres.enabled is True
+    assert config.postgres.dsn_env == "TEST_POSTGRES_DSN"
+    assert config.postgres.max_pool_size == 7
+    assert config.postgres.command_timeout_seconds == 3.5
 
 
 def test_environment_overrides(monkeypatch):
@@ -118,6 +145,10 @@ def test_environment_overrides(monkeypatch):
     monkeypatch.setenv("FREESWITCH_ESL_HOST", "127.0.0.2")
     monkeypatch.setenv("FREESWITCH_ESL_PORT", "19021")
     monkeypatch.setenv("FREESWITCH_ESL_PASSWORD_ENV", "LOCAL_ESL_PASSWORD")
+    monkeypatch.setenv("OUTBOUND_ENDPOINT_TEMPLATE", "sofia/gateway/demo/{destination}")
+    monkeypatch.setenv("OUTBOUND_DIALPLAN_EXTENSION", "9199")
+    monkeypatch.setenv("OUTBOUND_CALLER_ID_NUMBER", "9000")
+    monkeypatch.setenv("OUTBOUND_ORIGINATE_TIMEOUT_SECONDS", "15")
     monkeypatch.setenv("DOUBAO_S2S_SPEAKER", "env-speaker")
     monkeypatch.setenv("DOUBAO_S2S_WS_URL", "wss://env.example.test/doubao")
     monkeypatch.setenv("DOUBAO_S2S_OUTPUT_SAMPLE_RATE", "24000")
@@ -130,6 +161,10 @@ def test_environment_overrides(monkeypatch):
     monkeypatch.setenv("VAD_END_SILENCE_MS", "600")
     monkeypatch.setenv("VAD_BARGE_IN_ENABLED", "true")
     monkeypatch.setenv("METRICS_ENABLED", "false")
+    monkeypatch.setenv("POSTGRES_ENABLED", "true")
+    monkeypatch.setenv("POSTGRES_DSN_ENV", "LOCAL_POSTGRES_DSN")
+    monkeypatch.setenv("POSTGRES_MAX_POOL_SIZE", "9")
+    monkeypatch.setenv("POSTGRES_COMMAND_TIMEOUT_SECONDS", "2.5")
 
     config = load_config()
 
@@ -142,6 +177,10 @@ def test_environment_overrides(monkeypatch):
     assert config.event_socket.host == "127.0.0.2"
     assert config.event_socket.port == 19021
     assert config.event_socket.password_env == "LOCAL_ESL_PASSWORD"
+    assert config.outbound.endpoint_template == "sofia/gateway/demo/{destination}"
+    assert config.outbound.dialplan_extension == "9199"
+    assert config.outbound.caller_id_number == "9000"
+    assert config.outbound.originate_timeout_seconds == 15
     assert config.doubao_s2s.speaker == "env-speaker"
     assert config.doubao_s2s.websocket_url == "wss://env.example.test/doubao"
     assert config.doubao_s2s.output_sample_rate == 24000
@@ -154,6 +193,16 @@ def test_environment_overrides(monkeypatch):
     assert config.vad.end_silence_ms == 600
     assert config.vad.barge_in_enabled is True
     assert config.features.metrics_enabled is False
+    assert config.postgres.enabled is True
+    assert config.postgres.dsn_env == "LOCAL_POSTGRES_DSN"
+    assert config.postgres.max_pool_size == 9
+    assert config.postgres.command_timeout_seconds == 2.5
+
+
+def test_default_outbound_caller_avoids_local_self_call():
+    config = load_config()
+
+    assert config.outbound.caller_id_number == "9000"
 
 
 def test_invalid_boolean_env(monkeypatch):

@@ -28,7 +28,7 @@ Stop any older local FreeSWITCH container that already uses ports `5060`,
 `5080`, `18021`, or `16384-16484`, then run:
 
 ```powershell
-cd sip-realtime-voice-gateway/freeswitch-local
+cd freeswitch-local
 docker compose up -d --build
 ```
 

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Standalone SIP realtime voice gateway skeleton"
 requires-python = ">=3.11"
 dependencies = [
+  "asyncpg>=0.29",
   "websockets>=13.1",
 ]
 

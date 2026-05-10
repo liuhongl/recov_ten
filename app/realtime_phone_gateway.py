@@ -33,6 +33,7 @@ from .realtime_types import (
     DEFAULT_OUTPUT_SAMPLE_RATE,
     RealtimeTurnResult,
 )
+from .postgres import PromptSnapshot
 
 LOGGER = logging.getLogger(__name__)
 
@@ -82,6 +83,19 @@ class PlaybackControlProtocol:
     async def stop(self) -> None: ...
 
     async def break_playback(self, media_uuid: str) -> bool: ...
+
+
+class PromptStoreProtocol:
+    async def get_prompt_snapshot(
+        self,
+        scene: str | None = None,
+        *,
+        fallback_instructions: str | None = None,
+    ) -> PromptSnapshot: ...
+
+
+class CallResultWriterProtocol:
+    def enqueue_nowait(self, payload: dict) -> bool: ...
 
 
 RealtimeSessionFactory = Callable[
@@ -201,6 +215,8 @@ class RealtimePhoneSessionStats:
     realtime_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     interruption_repair_active: bool = False
     playback_active: bool = False
+    prompt_scene: str = "default"
+    prompt_snapshot: PromptSnapshot | None = None
 
 
 class FreeSwitchRealtimeGatewayServer:
@@ -216,6 +232,10 @@ class FreeSwitchRealtimeGatewayServer:
         model_output_sample_rate: int | None = None,
         realtime_session_factory: RealtimeSessionFactory | None = None,
         playback_control: PlaybackControlProtocol | None = None,
+        prompt_store: PromptStoreProtocol | None = None,
+        call_result_writer: CallResultWriterProtocol | None = None,
+        on_media_connected: Callable[[str], None] | None = None,
+        on_media_disconnected: Callable[[str], None] | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("api_key is required")
@@ -278,6 +298,10 @@ class FreeSwitchRealtimeGatewayServer:
         self._realtime_session_factory = realtime_session_factory
         self._realtime_sessions: dict[str, RealtimeSessionProtocol] = {}
         self.playback_control = playback_control or self._create_playback_control()
+        self.prompt_store = prompt_store
+        self.call_result_writer = call_result_writer
+        self._on_media_connected = on_media_connected
+        self._on_media_disconnected = on_media_disconnected
 
     @property
     def address(self) -> tuple[str, int]:
@@ -340,6 +364,22 @@ class FreeSwitchRealtimeGatewayServer:
     def _realtime_identity_for_log(self) -> tuple[str, str]:
         return self.config.doubao_s2s.resource_id, self.config.doubao_s2s.speaker
 
+    def _notify_media_connected(self, call_id: str) -> None:
+        if self._on_media_connected is None:
+            return
+        try:
+            self._on_media_connected(call_id)
+        except Exception:
+            LOGGER.warning("media_connected_callback_failed call_id=%s", call_id)
+
+    def _notify_media_disconnected(self, call_id: str) -> None:
+        if self._on_media_disconnected is None:
+            return
+        try:
+            self._on_media_disconnected(call_id)
+        except Exception:
+            LOGGER.warning("media_disconnected_callback_failed call_id=%s", call_id)
+
     async def stop(self) -> None:
         if self._server is not None:
             self._server.close()
@@ -387,8 +427,10 @@ class FreeSwitchRealtimeGatewayServer:
             session.session_id,
             websocket.remote_address,
         )
+        self._notify_media_connected(call_id)
 
         try:
+            session.prompt_snapshot = await self._load_prompt_snapshot(session)
             await self._connect_realtime_session(session)
             async for message in websocket:
                 session.last_seen_at = time.time()
@@ -405,6 +447,7 @@ class FreeSwitchRealtimeGatewayServer:
                 err.code,
             )
         finally:
+            self._notify_media_disconnected(call_id)
             await self._shutdown_session(session, playback_task)
 
     async def _connect_realtime_session(
@@ -424,6 +467,38 @@ class FreeSwitchRealtimeGatewayServer:
             session.realtime_session_restarts,
         )
         return realtime_session
+
+    async def _load_prompt_snapshot(
+        self,
+        session: RealtimePhoneSessionStats,
+    ) -> PromptSnapshot | None:
+        if self.prompt_store is None:
+            return None
+        try:
+            snapshot = await self.prompt_store.get_prompt_snapshot(
+                session.prompt_scene,
+                fallback_instructions=self.instructions,
+            )
+        except Exception:
+            LOGGER.warning(
+                "prompt_snapshot_load_failed call_id=%s session_id=%s scene=%s",
+                session.call_id,
+                session.session_id,
+                session.prompt_scene,
+                exc_info=True,
+            )
+            return None
+
+        LOGGER.info(
+            "prompt_snapshot_loaded call_id=%s session_id=%s scene=%s "
+            "version=%s content_hash=%s",
+            session.call_id,
+            session.session_id,
+            snapshot.scene,
+            snapshot.version,
+            snapshot.content_hash,
+        )
+        return snapshot
 
     def _create_realtime_session(
         self,
@@ -453,11 +528,15 @@ class FreeSwitchRealtimeGatewayServer:
         self,
         session: RealtimePhoneSessionStats,
     ) -> str:
+        instructions = self.instructions
+        if session.prompt_snapshot is not None:
+            instructions = session.prompt_snapshot.instructions
+
         if not session.committed_exchanges:
-            return self.instructions
+            return instructions
 
         lines = [
-            self.instructions,
+            instructions,
             "",
             "以下是电话用户已经完整听到的历史对话，只能用于保持上下文。",
             "不要补说、续说或复述未出现在这段历史里的旧回复。",
@@ -1448,6 +1527,90 @@ class FreeSwitchRealtimeGatewayServer:
             session.turns_failed,
             int((session.disconnected_at - session.connected_at) * 1000),
         )
+        self._enqueue_call_result(session)
+
+    def _enqueue_call_result(self, session: RealtimePhoneSessionStats) -> None:
+        if self.call_result_writer is None:
+            return
+        payload = self._build_call_result_payload(session)
+        if not self.call_result_writer.enqueue_nowait(payload):
+            LOGGER.warning(
+                "call_result_enqueue_failed call_id=%s session_id=%s",
+                session.call_id,
+                session.session_id,
+            )
+
+    def _build_call_result_payload(
+        self,
+        session: RealtimePhoneSessionStats,
+    ) -> dict:
+        disconnected_at = session.disconnected_at or time.time()
+        prompt = (
+            session.prompt_snapshot.to_dict()
+            if session.prompt_snapshot is not None
+            else {
+                "scene": session.prompt_scene,
+                "version": "inline",
+                "instructions": self.instructions,
+            }
+        )
+        committed_exchanges = [
+            {
+                "turn_id": exchange.turn_id,
+                "input_transcript": exchange.input_transcript,
+                "output_transcript": exchange.output_transcript,
+            }
+            for exchange in session.committed_exchanges
+        ]
+        return {
+            "call_id": session.call_id,
+            "session_id": session.session_id,
+            "status": "completed",
+            "connected_at_ms": int(session.connected_at * 1000),
+            "disconnected_at_ms": int(disconnected_at * 1000),
+            "duration_ms": int((disconnected_at - session.connected_at) * 1000),
+            "prompt": prompt,
+            "input_transcripts": list(session.input_transcripts),
+            "output_transcripts": list(session.output_transcripts),
+            "committed_exchanges": committed_exchanges,
+            "metrics": {
+                "inbound_frames": session.inbound_frames,
+                "inbound_bytes": session.inbound_bytes,
+                "streamed_input_bytes": session.streamed_input_bytes,
+                "outbound_frames": session.outbound_frames,
+                "outbound_bytes": session.outbound_bytes,
+                "invalid_frame_count": session.invalid_frame_count,
+                "interruptions": session.interruptions,
+                "dropped_playback_frames": session.dropped_playback_frames,
+                "dropped_stale_frames": session.dropped_stale_frames,
+                "playback_underruns": session.playback_underruns,
+                "max_playback_queue_frames": session.max_playback_queue_frames,
+                "max_playback_send_gap_ms": session.max_playback_send_gap_ms,
+                "playback_send_gap_overruns": session.playback_send_gap_overruns,
+                "freeswitch_playback_events": session.freeswitch_playback_events,
+                "freeswitch_queue_completed_events": (
+                    session.freeswitch_queue_completed_events
+                ),
+                "freeswitch_break_requests": session.freeswitch_break_requests,
+                "freeswitch_break_failures": session.freeswitch_break_failures,
+                "realtime_interrupt_requests": session.realtime_interrupt_requests,
+                "realtime_interrupt_failures": session.realtime_interrupt_failures,
+                "context_repair_requests": session.context_repair_requests,
+                "realtime_session_restarts": session.realtime_session_restarts,
+                "gateway_history_committed_turns": (
+                    session.gateway_history_committed_turns
+                ),
+                "gateway_history_abandoned_turns": (
+                    session.gateway_history_abandoned_turns
+                ),
+                "replayed_input_frames": session.replayed_input_frames,
+                "replayed_input_bytes": session.replayed_input_bytes,
+                "turns_started": session.turns_started,
+                "turns_committed": session.turns_committed,
+                "turns_completed": session.turns_completed,
+                "turns_failed": session.turns_failed,
+            },
+        }
 
     def _session_is_busy(self, session: RealtimePhoneSessionStats) -> bool:
         return session.current_output_turn_id is not None or self._has_playback(session)

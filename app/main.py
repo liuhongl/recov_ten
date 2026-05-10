@@ -8,18 +8,23 @@ import os
 import threading
 from dataclasses import asdict, replace
 
+from .call_control import OutboundCallManager
 from .config import load_config
 from .env_loader import load_env_file
 from .freeswitch_media import FreeSwitchMediaEchoServer
 from .health_server import HealthServer
 from .logging_config import configure_logging
+from .postgres import PostgresRuntime
 from .doubao_s2s_client import (
     DEFAULT_REALTIME_APP_KEY,
     DoubaoS2SCredentials,
     DoubaoS2SSessionConfig,
 )
 from .doubao_s2s_realtime import DoubaoS2SServerVadSession
-from .realtime_phone_gateway import FreeSwitchRealtimeGatewayServer
+from .realtime_phone_gateway import (
+    DEFAULT_PHONE_INSTRUCTIONS,
+    FreeSwitchRealtimeGatewayServer,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -67,7 +72,15 @@ def main() -> int:
 
 
 async def _serve(config, *, media_mode: str) -> None:
-    health_server = HealthServer(config)
+    postgres_runtime = PostgresRuntime(
+        config,
+        fallback_instructions=DEFAULT_PHONE_INSTRUCTIONS,
+    )
+    await postgres_runtime.start()
+
+    outbound_manager = OutboundCallManager(config)
+    outbound_manager.start()
+    health_server = HealthServer(config, call_manager=outbound_manager)
     health_thread = threading.Thread(
         target=health_server.serve_forever,
         name="gateway-health-server",
@@ -103,6 +116,10 @@ async def _serve(config, *, media_mode: str) -> None:
             api_key="doubao-s2s",
             model_output_sample_rate=config.doubao_s2s.output_sample_rate,
             realtime_session_factory=session_factory,
+            prompt_store=postgres_runtime.prompt_store,
+            call_result_writer=postgres_runtime.call_result_writer,
+            on_media_connected=outbound_manager.mark_media_connected,
+            on_media_disconnected=outbound_manager.mark_media_disconnected,
         )
     else:
         raise ValueError(f"unsupported media_mode: {media_mode}")
@@ -112,6 +129,8 @@ async def _serve(config, *, media_mode: str) -> None:
         await media_server.serve_forever()
     finally:
         health_server.shutdown()
+        outbound_manager.shutdown()
+        await postgres_runtime.stop()
         health_thread.join(timeout=3)
 
 

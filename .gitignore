@@ -1,40 +1,11 @@
-# Python
 __pycache__/
-*.py[cod]
 .pytest_cache/
-.python_venv/
-.venv/
-
-# Environment and secrets
 .env
 .env.*
 !.env.example
-*.pem
-
-# Runtime artifacts
+*.py[cod]
 *.log
+artifacts/
 *.pcm
 *.wav
 *.jsonl
-artifacts/
-runtime/
-dist/
-
-# JavaScript / TypeScript
-node_modules/
-*.tsbuildinfo
-
-# IDE / OS local files
-.idea/
-*.iml
-*.code-workspace
-.DS_Store
-
-# Gateway local runtime artifacts
-sip-realtime-voice-gateway/artifacts/
-sip-realtime-voice-gateway/runtime/
-sip-realtime-voice-gateway/**/*.log
-sip-realtime-voice-gateway/**/*.pcm
-sip-realtime-voice-gateway/**/*.wav
-sip-realtime-voice-gateway/**/*.jsonl
-sip-realtime-voice-gateway/freeswitch-local/conf/tls/*.pem

@@ -1,0 +1,988 @@
+<h1>TEN 电话线路接入学习笔记</h1>
+<h2>1. 一句话理解</h2>
+<p>TEN 不应该直接接 SIP 电话线路。更合理的架构是：</p>
+<pre><code>电话线路由 FreeSWITCH / XSwitch / Asterisk 负责
+AI 实时对话由 TEN 负责
+中间用媒体桥把电话音频转换成 TEN 能处理的 AudioFrame</code></pre>
+<p>核心边界：</p>
+<pre><code>SIP/RTP/PCMA 世界：电话网关负责
+PCM/TEN AudioFrame 世界：媒体桥负责
+ASR/LLM/TTS 世界：TEN graph 负责
+外呼生命周期：Call Gateway 负责</code></pre>
+<h2>2. 总链路图</h2>
+<pre class="mermaid">flowchart LR
+  Biz[&quot;业务系统或运营后台&quot;]
+  CG[&quot;Call Gateway\n外呼控制&quot;]
+  FS[&quot;FreeSWITCH / XSwitch\n电话网关&quot;]
+  SIP[&quot;SIP Trunk\n线路商&quot;]
+  Phone[&quot;用户手机&quot;]
+
+  MH[&quot;Media Hub\n音频配对与转发&quot;]
+  Bridge[&quot;sip_media_bridge\nTEN 电话媒体适配&quot;]
+  ASR[&quot;ASR\n语音转文字&quot;]
+  Main[&quot;main_control\n业务对话逻辑&quot;]
+  LLM[&quot;LLM\n生成回复&quot;]
+  TTS[&quot;TTS\n文字转语音&quot;]
+
+  Biz --&gt;|&quot;POST /api/calls&quot;| CG
+  CG --&gt;|&quot;originate / hangup / events&quot;| FS
+  FS --&gt;|&quot;SIP 信令&quot;| SIP
+  SIP --&gt;|&quot;运营商网络&quot;| Phone
+
+  Phone --&gt;|&quot;用户说话&quot;| SIP
+  SIP --&gt;|&quot;RTP + PCMA&quot;| FS
+  FS --&gt;|&quot;解码成 PCM&quot;| MH
+  MH --&gt;|&quot;PCM bytes&quot;| Bridge
+  Bridge --&gt;|&quot;TEN AudioFrame: pcm_frame&quot;| ASR
+  ASR --&gt;|&quot;asr_result&quot;| Main
+  Main --&gt;|&quot;text_data&quot;| LLM
+  LLM --&gt;|&quot;text_data&quot;| Main
+  Main --&gt;|&quot;tts_text_input&quot;| TTS
+  TTS --&gt;|&quot;PCM AudioFrame&quot;| Bridge
+  Bridge --&gt;|&quot;8k PCM&quot;| MH
+  MH --&gt;|&quot;streamAudio / raw PCM&quot;| FS
+  FS --&gt;|&quot;编码成 PCMA&quot;| SIP
+  SIP --&gt;|&quot;播放给用户&quot;| Phone</pre>
+<h2>3. 关键名词</h2>
+<h3>SIP</h3>
+<p>SIP 是电话信令协议，负责“电话怎么建立和结束”。</p>
+<p>它处理的问题：</p>
+<pre><code>拨号
+振铃
+接通
+挂断
+协商音频编码</code></pre>
+<p>SIP 本身不传真正的声音，真正的声音通常走 RTP。</p>
+<h3>SIP Trunk</h3>
+<p>SIP Trunk 是线路商提供的公网电话线路能力。</p>
+<p>它让系统可以通过互联网协议呼叫真实手机号。</p>
+<p>常见能力：</p>
+<pre><code>外呼手机号
+呼入号码
+并发线路
+主叫号码
+IP 白名单
+语音编码协商</code></pre>
+<h3>RTP</h3>
+<p>RTP 是通话中真正传音频包的协议。</p>
+<p>可以理解成：</p>
+<pre><code>SIP 负责打电话
+RTP 负责传声音</code></pre>
+<h3>Codec</h3>
+<p>Codec 是音频编码格式。电话线路中不会直接传大块原始音频，通常会先编码。</p>
+<p>常见电话 codec：</p>
+<pre><code>PCMA / G.711 A-law
+PCMU / G.711 u-law
+Opus
+G.729</code></pre>
+<h3>PCMA</h3>
+<p>PCMA 也叫 G.711 A-law，是传统电话网常见音频编码。</p>
+<p>常见参数：</p>
+<pre><code>8 kHz
+mono
+8 bit
+64 kbps</code></pre>
+<p>它适合电话线路传输，但不适合直接给 AI 模型处理。</p>
+<h3>PCM</h3>
+<p>PCM 是原始数字音频波形。</p>
+<p>它不是 mp3、wav、PCMA、Opus，而是一串采样点。</p>
+<p>给 AI 使用时常见格式：</p>
+<pre><code>signed 16-bit PCM
+8 kHz 或 16 kHz
+mono
+little-endian</code></pre>
+<p>以 8k、16-bit、mono 为例：</p>
+<pre><code>1 秒音频 = 8000 个采样点 * 2 字节 = 16000 bytes
+20ms 音频 = 320 bytes
+40ms 音频 = 640 bytes</code></pre>
+<h3>采样率、位深和 320 bytes 的含义</h3>
+<p><code>8k PCM -&gt; 16k PCM -&gt; 8k PCM</code> 里的 <code>8k</code> 和 <code>16k</code> 指的是采样率，不是 8 bit / 16 bit。</p>
+<p>采样率表示每秒取多少个声音样本：</p>
+<pre><code>8kHz  = 每秒 8000 个采样点
+16kHz = 每秒 16000 个采样点
+24kHz = 每秒 24000 个采样点</code></pre>
+<p>它主要影响：</p>
+<pre><code>可表达的最高声音频率
+每秒音频数据量
+模型或电话网关是否能正确识别格式
+错误解释时的语速和音调</code></pre>
+<p>从第一性原理看，数字音频就是连续声音波形的离散采样。采样率越高，每秒记录的点越密，能表达的高频越多，数据量也越大。电话语音常用 8kHz，因为电话人声主要关注可懂度；很多 AI ASR / 实时语音模型更偏好 16kHz 或更高，因为它能保留更多语音细节。</p>
+<p>但采样率高不等于一定更好。电话侧本来就是 8kHz 时，把它上采样到 16kHz 只是为了满足模型输入格式，不会凭空恢复已经不存在的高频细节。</p>
+<p><code>16-bit PCM</code> 里的 <code>16-bit</code> 指的是位深，也就是每个采样点用多少 bit 表示振幅：</p>
+<pre><code>16-bit = 每个采样点 2 bytes
+mono   = 1 个声道</code></pre>
+<p>所以 8kHz、16-bit、mono 的 20ms PCM 帧大小是：</p>
+<pre><code>8000 samples/s * 0.02 s * 2 bytes * 1 channel = 320 bytes</code></pre>
+<p>16kHz、16-bit、mono 的 20ms PCM 帧大小是：</p>
+<pre><code>16000 samples/s * 0.02 s * 2 bytes * 1 channel = 640 bytes</code></pre>
+<p>24kHz、16-bit、mono 的 20ms PCM 帧大小是：</p>
+<pre><code>24000 samples/s * 0.02 s * 2 bytes * 1 channel = 960 bytes</code></pre>
+<p><code>320 bytes in / 320 bytes out</code> 表示当前电话侧媒体帧是 8kHz、16-bit、mono、20ms，网关收到一帧 320 bytes，也回给 FreeSWITCH 一帧 320 bytes。这说明下行仍然符合电话侧播放节奏。</p>
+<p>如果 320 bytes 变大或变小，影响取决于原因：</p>
+<pre><code>同样 8kHz / 16-bit / mono 下：
+160 bytes = 10ms 音频，包更频繁，调度开销更高，但理论延迟更低
+320 bytes = 20ms 音频，电话系统常用，延迟和稳定性比较平衡
+640 bytes = 40ms 音频，包更少，但每包自带更高播放等待时间</code></pre>
+<p>如果 FreeSWITCH 期望 20ms / 320 bytes，但网关乱发更大或更小的 PCM 块，常见问题是：</p>
+<pre><code>播放节奏抖动
+声音断续或卡顿
+延迟增大
+缓冲区堆积
+音频被截断或拼接异常
+某些媒体模块直接丢帧或报警</code></pre>
+<p>更严重的是“采样率解释错”。例如把 16kHz PCM 当成 8kHz 播放，声音会变慢、音调变低；把 8kHz PCM 当成 16kHz 播放，声音会变快、音调变高。</p>
+<p>电话线上的 PCMA 不是 320 bytes。PCMA 是 G.711 A-law 压缩后的 8-bit 编码：</p>
+<pre><code>PCMA 8kHz 20ms = 160 samples * 1 byte = 160 bytes
+PCM  8kHz 20ms = 160 samples * 2 bytes = 320 bytes</code></pre>
+<p>当前本地链路里，FreeSWITCH / <code>mod_audio_stream</code> 已经把电话侧 PCMA 解码成 8k PCM 给网关，所以网关看到的是 320 bytes 的 PCM 帧，而不是 160 bytes 的 PCMA 包。</p>
+<p>PCMA 和 PCM 的关系：</p>
+<pre><code>电话线路传输：PCMA
+FreeSWITCH 解码后：PCM
+TEN 处理：PCM
+FreeSWITCH 发回电话前：PCMA</code></pre>
+<h3>新实时网关里 20ms / 320 bytes 影响什么</h3>
+<p>在新的 SIP 实时语音网关最佳架构里，<code>20ms / 320 bytes</code> 是电话侧媒体时钟的最小处理粒度。</p>
+<pre><code>20ms：这一帧代表 20 毫秒声音
+320 bytes：8kHz / 16-bit / mono / 20ms 的 PCM s16le 数据大小</code></pre>
+<p>它影响的不是“模型聪不聪明”，而是电话播放是否稳定：</p>
+<pre><code>播放连续性：每 20ms 都要有可播放帧，否则容易断续
+打断响应：最多按 20ms 粒度丢弃旧音频，粒度越大打断越慢
+尾音完整性：最后一帧和尾部静音必须完整 drain，否则容易吞最后一个字
+调度压力：帧太小包太多，Python / WebSocket / Docker 更容易抖
+延迟：帧太大则每包自带更高等待时间</code></pre>
+<p>所以新方案的播放核心不是“模型返回一点就马上发一点”，而是：</p>
+<pre><code>模型音频 delta
+  -&gt; 网关重采样成 8k PCM
+  -&gt; 切成 20ms / 320 bytes 帧
+  -&gt; 放入 Playout Engine
+  -&gt; 由稳定播放时钟发给 FreeSWITCH</code></pre>
+<p>P1 已经把媒体契约锁定为：</p>
+<pre><code>电话/SIP 侧：PCMA / 8000Hz / mono / 20ms
+FreeSWITCH -&gt; Gateway：PCM s16le / 8000Hz / mono / 20ms / 320 bytes
+Gateway -&gt; FreeSWITCH：同样按电话媒体时钟输出</code></pre>
+<p>P2 要验证的就是这个播放核心：不接模型、不接真实电话播放，先离线证明“任意模型输出音频”能被稳定转换成电话侧 8k / 20ms 帧，并且支持 turn 隔离、cancel 和尾部 drain。</p>
+<h3>TEN AudioFrame</h3>
+<p>TEN AudioFrame 是 TEN 内部传递音频的标准“信封”。</p>
+<p>PCM 是内容，AudioFrame 是包装。</p>
+<p>示意：</p>
+<pre><code>AudioFrame {
+  name: &quot;pcm_frame&quot;,
+  sample_rate: 8000,
+  channels: 1,
+  bytes_per_sample: 2,
+  samples_per_channel: 160,
+  buffer: &lt;PCM bytes&gt;
+}</code></pre>
+<p>它的作用是告诉 TEN：</p>
+<pre><code>这是一段音频
+名字叫 pcm_frame
+采样率是多少
+几个声道
+每个采样点几个字节
+音频数据在哪
+应该通过 graph 发给哪个 extension</code></pre>
+<h3>TEN Graph</h3>
+<p>TEN Graph 是 TEN 的编排配置，定义哪些 extension 参与工作，以及消息如何流动。</p>
+<p>电话场景下，一个简化 graph 是：</p>
+<pre class="mermaid">flowchart LR
+  Bridge[&quot;sip_media_bridge&quot;]
+  ASR[&quot;ASR&quot;]
+  Main[&quot;main_control&quot;]
+  LLM[&quot;LLM&quot;]
+  TTS[&quot;TTS&quot;]
+
+  Bridge --&gt;|&quot;pcm_frame&quot;| ASR
+  ASR --&gt;|&quot;asr_result&quot;| Main
+  Main --&gt;|&quot;text_data&quot;| LLM
+  LLM --&gt;|&quot;text_data&quot;| Main
+  Main --&gt;|&quot;tts_text_input&quot;| TTS
+  TTS --&gt;|&quot;pcm_frame&quot;| Bridge</pre>
+<p>原来的 RTC 入口一般是 <code>agora_rtc</code>，电话场景要把入口换成 <code>sip_media_bridge</code>。</p>
+<h2>4. 各模块职责</h2>
+<h3>SIP Trunk</h3>
+<p>职责：</p>
+<pre><code>提供真实电话线路
+把电话打到手机号
+提供并发线路
+处理运营商侧路由</code></pre>
+<p>不负责：</p>
+<pre><code>AI 对话
+ASR / LLM / TTS
+业务逻辑</code></pre>
+<h3>FreeSWITCH</h3>
+<p>FreeSWITCH 是电话网关。</p>
+<p>职责：</p>
+<pre><code>接 SIP trunk
+拨号
+接通
+挂断
+处理 SIP 信令
+处理 RTP 音频
+把 PCMA 解码成 PCM
+把 PCM 编码回 PCMA</code></pre>
+<p>不负责：</p>
+<pre><code>物业费业务逻辑
+LLM 生成回复
+用户意图判断</code></pre>
+<h3>XSwitch</h3>
+<p>XSwitch 可以理解为 FreeSWITCH 体系的产品化平台。</p>
+<p>它可能替代：</p>
+<pre><code>裸 FreeSWITCH 配置
+部分呼叫控制
+部分路由和管理后台
+部分线路管理</code></pre>
+<p>但如果还要用 TEN 做实时 AI，仍然要确认：</p>
+<pre><code>能否开放双向实时音频流
+能否输出 8k PCM 或可转换音频
+能否拿到接通 / 挂断 / 失败事件
+能否配合 call_id 做会话隔离</code></pre>
+<h3>Call Gateway</h3>
+<p>Call Gateway 是外呼控制服务。</p>
+<p>一句话：</p>
+<pre><code>Call Gateway 管一通电话从创建到结束的生命周期</code></pre>
+<p>职责：</p>
+<pre><code>提供 POST /api/calls
+生成 call_id
+生成 FreeSWITCH 通话 uuid
+控制最大并发
+调用 TEN /start
+调用 FreeSWITCH / XSwitch 发起外呼
+监听接通、忙线、拒接、挂断事件
+接通后启动媒体流
+通话结束后调用 TEN /stop
+释放并发名额</code></pre>
+<p>不负责：</p>
+<pre><code>音频转发
+ASR / LLM / TTS
+SIP/RTP 底层处理</code></pre>
+<h3>Media Hub</h3>
+<p>Media Hub 是音频配对和转发层。</p>
+<p>职责：</p>
+<pre><code>接收 FreeSWITCH 的音频 WebSocket
+接收 TEN 侧 sip_media_bridge 的 WebSocket
+按 call_id 配对两边连接
+转发上行 PCM 到 TEN
+转发下行 PCM 到 FreeSWITCH
+防止多通电话串线</code></pre>
+<p>不负责：</p>
+<pre><code>打电话
+挂电话
+业务话术
+模型调用</code></pre>
+<h3>sip_media_bridge</h3>
+<p><code>sip_media_bridge</code> 是 TEN 内部的电话媒体适配 extension。</p>
+<p>上行职责：</p>
+<pre><code>从 Media Hub 收 PCM bytes
+创建 TEN AudioFrame(&quot;pcm_frame&quot;)
+设置 sample_rate、channels、bytes_per_sample 等元数据
+发送给 ASR</code></pre>
+<p>下行职责：</p>
+<pre><code>接收 TTS 输出的 AudioFrame(&quot;pcm_frame&quot;)
+取出 PCM bytes
+必要时把 16k 降采样到 8k
+发回 Media Hub</code></pre>
+<p>它只做媒体适配，不做业务逻辑。</p>
+<h3>main_control</h3>
+<p><code>main_control</code> 是业务对话控制层。</p>
+<p>职责：</p>
+<pre><code>接收 ASR 文本
+维护对话状态
+决定何时问身份
+决定何时说明欠费
+决定何时调用 LLM
+决定何时发 TTS
+决定何时结束通话
+生成通话结果摘要</code></pre>
+<p>不负责：</p>
+<pre><code>SIP 线路
+RTP 音频包
+音频 codec
+并发线路调度</code></pre>
+<h2>5. 一通电话的完整过程</h2>
+<h3>控制流</h3>
+<pre><code>1. 业务系统调用 POST /api/calls
+2. Call Gateway 创建 call_id
+3. Call Gateway 调 TEN /start，启动一个 worker
+4. Call Gateway 调 FreeSWITCH / XSwitch 发起外呼
+5. 电话接通后，FreeSWITCH 发接通事件
+6. Call Gateway 启动音频桥
+7. 用户挂断或 AI 完成后，Call Gateway 清理通话
+8. Call Gateway 调 TEN /stop</code></pre>
+<h3>媒体流</h3>
+<pre><code>用户说话
+  -&gt; SIP trunk
+  -&gt; RTP + PCMA
+  -&gt; FreeSWITCH / XSwitch
+  -&gt; PCM
+  -&gt; Media Hub
+  -&gt; sip_media_bridge
+  -&gt; TEN AudioFrame
+  -&gt; ASR
+  -&gt; main_control
+  -&gt; LLM
+  -&gt; TTS
+  -&gt; TEN AudioFrame
+  -&gt; sip_media_bridge
+  -&gt; PCM
+  -&gt; Media Hub
+  -&gt; FreeSWITCH / XSwitch
+  -&gt; PCMA
+  -&gt; 用户听到声音</code></pre>
+<h2>6. 当前方案和文档的对应关系</h2>
+<p>文档里的方案对应的是：</p>
+<pre><code>FreeSWITCH：电话世界
+TEN：AI 世界
+Call Gateway：外呼生命周期
+Media Hub：音频转发
+sip_media_bridge：TEN 和电话音频之间的适配器</code></pre>
+<p>所以它不是让 TEN 直接打电话，而是：</p>
+<pre><code>让 FreeSWITCH 接 SIP
+让 FreeSWITCH 把电话音频变成 PCM
+让 sip_media_bridge 把 PCM 接进 TEN
+让 TEN 完成 ASR/LLM/TTS
+再把 TTS PCM 送回 FreeSWITCH</code></pre>
+<h2>7. 是否需要 XSwitch</h2>
+<p>如果使用 XSwitch，可以简化电话网关侧工作。</p>
+<p>可能变成：</p>
+<pre><code>业务系统
+  -&gt; 轻量 Call Gateway
+  -&gt; XSwitch API / ESL
+  -&gt; SIP trunk
+  -&gt; 用户手机
+
+用户语音
+  -&gt; XSwitch
+  -&gt; 实时媒体流
+  -&gt; Media Hub
+  -&gt; sip_media_bridge
+  -&gt; TEN</code></pre>
+<p>使用 XSwitch 前需要确认：</p>
+<pre><code>是否能接第三方 SIP trunk
+是否能外呼手机号
+是否能提供接通 / 挂断 / 失败事件
+是否能开放双向实时音频流
+是否能和 TEN 做低延迟 PCM 对接
+是否支持 10 路及以上并发</code></pre>
+<p>如果 XSwitch 不能开放双向实时音频流，就只能让 XSwitch 自己做部分 AI 电话机器人能力，TEN 的实时语音 graph 价值会下降。</p>
+<h2>8. 本地软电话测试和真实 SIP trunk 测试</h2>
+<p>没有 SIP trunk 信息时，不能做真实外线电话测试，但仍然可以先做本地电话链路测试。</p>
+<p>本地测试的目标不是证明公网电话一定能通，而是先证明我们可控的半条链路成立。</p>
+<h3>两段链路的区别</h3>
+<pre><code>A. 我们可控段
+软电话 / FreeSWITCH
+  -&gt; Media Hub
+  -&gt; sip_media_bridge
+  -&gt; TEN
+  -&gt; Media Hub
+  -&gt; FreeSWITCH / 软电话
+
+B. 运营商公网段
+真实手机号 / 运营商网络
+  -&gt; SIP trunk
+  -&gt; NAT / 防火墙
+  -&gt; FreeSWITCH</code></pre>
+<p>本地软电话测试主要验证 A 段。</p>
+<p>真实 SIP trunk 测试会额外验证 B 段。</p>
+<p>关键判断：</p>
+<pre><code>本地可以 != 真实一定可以
+本地不可以 = 真实大概率也不可以</code></pre>
+<h3>本地测试能证明什么</h3>
+<pre><code>FreeSWITCH 能接 SIP call
+软电话能注册到 FreeSWITCH
+本地分机之间能互通
+FreeSWITCH 能把音频送到 Media Hub
+Media Hub 能按 call_id 配对
+TEN 能收到 PCM 并转成 AudioFrame
+TEN 输出的 PCM 能回到电话侧
+基本延迟、帧格式、断开清理是否合理</code></pre>
+<h3>本地测试不能证明什么</h3>
+<pre><code>运营商 SIP trunk 注册是否成功
+公网 IP / NAT / 防火墙是否正确
+真实 RTP 端口是否能穿透
+来电号码、出站号码、DTMF、挂断原因是否符合运营商规则
+运营商实际协商的 codec 是否符合预期
+公网抖动、丢包、回声、长时间稳定性</code></pre>
+<h3>本地测试需要准备什么</h3>
+<pre><code>本地 FreeSWITCH
+软电话客户端，例如 MicroSIP / Zoiper / Linphone
+本地分机账号，例如 1000 / 1001
+SIP 端口，通常是 5060/udp
+RTP 端口范围，常见是 16384-32768/udp
+Media Hub 端口，例如 9000/tcp
+TEN API 端口，例如 8080/tcp</code></pre>
+<p>本地测试也需要 FreeSWITCH。</p>
+<p>原因是软电话本身只是 SIP endpoint，不是 PBX，也不是媒体桥。没有 FreeSWITCH，就没有地方完成分机注册、呼叫路由、RTP 处理和媒体桥接。</p>
+<h3>推荐测试顺序</h3>
+<pre><code>1. 部署本地 FreeSWITCH
+2. 用软电话注册两个本地分机
+3. 1000 呼叫 1001，验证双方能听到声音
+4. 让 FreeSWITCH 把其中一通电话的媒体接到 Media Hub
+5. Media Hub 接 TEN sip_media_bridge
+6. 验证软电话声音能进入 TEN
+7. 验证 TEN 返回音频能被软电话听到
+8. 拿到 SIP trunk 后，再做真实外线呼入 / 呼出测试</code></pre>
+<h3>本地与真实线路的结论</h3>
+<p>本地测试是进入真实 SIP trunk 前的必要筛选。</p>
+<p>它能把问题范围从：</p>
+<pre><code>整个电话系统都可能有问题</code></pre>
+<p>缩小到：</p>
+<pre><code>我们可控段已验证，只剩 SIP trunk / 公网 / 运营商侧未验证</code></pre>
+<p>所以没有 SIP trunk 时，不应该停住，也不应该假装已经完成真实线路验证。正确做法是先完成本地 FreeSWITCH + 软电话链路测试，再接真实 SIP trunk。</p>
+<h3>当前本地验证结果（2026-05-08）</h3>
+<p>已经完成：</p>
+<pre><code>MicroSIP 1000
+  -&gt; 本地 FreeSWITCH 9196
+  -&gt; echo()
+  -&gt; MicroSIP 能听到回声</code></pre>
+<p>已经完成：</p>
+<pre><code>MicroSIP 1000
+  -&gt; 本地 FreeSWITCH 9199
+  -&gt; mod_audio_stream v1.0.3
+  -&gt; Media Hub /media/fs/fs_stage5a_local
+  -&gt; 假 TEN 回声客户端 /media/ten/fs_stage5a_local
+  -&gt; Media Hub
+  -&gt; FreeSWITCH
+  -&gt; MicroSIP 能听到回音</code></pre>
+<p>这说明本地真实电话音频已经可以从 FreeSWITCH 进入 Media Hub，并且 Media Hub 下行音频可以回到电话侧。</p>
+<p>已经完成：</p>
+<pre><code>MicroSIP 1000
+  -&gt; FreeSWITCH 9199
+  -&gt; Media Hub
+  -&gt; sip_media_bridge
+  -&gt; TEN AudioFrame
+  -&gt; sip_media_bridge_test_echo
+  -&gt; sip_media_bridge
+  -&gt; Media Hub
+  -&gt; FreeSWITCH
+  -&gt; MicroSIP</code></pre>
+<p>这说明同一通本地真实电话已经可以穿过 <code>sip_media_bridge</code>，进入 TEN <code>AudioFrame(&quot;pcm_frame&quot;)</code>，再回到电话侧。</p>
+<p>但这还不等于完整 TEN 电话闭环。当前 <code>9199</code> 的阶段 5B 回音测试用的是 <code>sip_media_bridge_test_echo</code>，没有经过真实 ASR、LLM、TTS，也没有业务 <code>main_control</code>。</p>
+<h2>9. 低延迟目标</h2>
+<p>如果目标是用户说完后 1 秒左右听到 AI 回复，必须做流式链路。</p>
+<p>关键点：</p>
+<pre><code>ASR 流式识别
+LLM 流式输出
+TTS 流式合成
+短句优先
+常用开场白预生成
+TTS 尽量直接输出 8k PCM
+音频分片控制在 20ms 或 40ms
+模型服务和电话网关尽量同地域部署
+用户插话时立刻 flush 当前 TTS</code></pre>
+<p>现实判断：</p>
+<pre><code>用户说完后，AI 第一段声音约 1 秒内出来：可以争取
+完整理解、完整生成、完整播放都在 1 秒内：不现实</code></pre>
+<h2>10. 最推荐的 MVP 路线</h2>
+<p>如果已经验证 FreeSWITCH 能外呼：</p>
+<pre><code>FreeSWITCH + SIP trunk
+  -&gt; mod_audio_stream
+  -&gt; Media Hub
+  -&gt; sip_media_bridge
+  -&gt; TEN graph</code></pre>
+<p>本地阶段 5A 对 <code>mod_audio_stream</code> 的结论：</p>
+<pre><code>已验证版本：mod_audio_stream v1.0.3
+上行：FreeSWITCH -&gt; WebSocket raw binary PCM
+下行：WebSocket raw binary PCM -&gt; FreeSWITCH 播放
+格式：8k mono s16le / L16
+帧大小：320 bytes
+帧时长：20ms
+必要配置：STREAM_PLAYBACK=true
+本地测试号码：9199</code></pre>
+<p>本地阶段 5B 对 <code>sip_media_bridge</code> 的结论：</p>
+<pre><code>真实电话媒体：已能进入 sip_media_bridge
+TEN AudioFrame：已能收到 8k mono s16le / 320 bytes / 20ms 音频帧
+回放方向：已能从 AudioFrame 转回 PCM 并发回电话侧
+用户听感：有回音，无明显卡顿
+未覆盖：ASR、LLM、TTS、业务话术、真实 SIP trunk</code></pre>
+<p>本地阶段 6A 当前记录：</p>
+<pre><code>目标：9199 本地电话 -&gt; ASR -&gt; LLM -&gt; TTS -&gt; 电话侧听到 AI 回复
+新增 graph：voice_assistant_sip_trunk_cn_ai_minimal
+新增控制器：sip_trunk_dialog_controller
+ASR：Deepgram nova-3，zh-CN，8k linear16
+LLM：DeepSeek OpenAI-compatible，OPENAI_API_BASE=https://api.deepseek.com/v1，model=deepseek-chat
+TTS：ElevenLabs eleven_multilingual_v2，pcm_16000
+桥接护栏：sip_media_bridge 下行会尝试把非 8k mono s16le PCM 转成 8k mono s16le
+已验证：graph 可启动，dialog_controller 可创建，ASR WebSocket 可打开，LLM 可初始化，TTS 可产出音频，电话侧可听到 AI 回复
+当前边界：这是本地 MicroSIP + Docker FreeSWITCH + 9199 的最小 AI 电话闭环，不是真实 SIP trunk</code></pre>
+<p>阶段 6A 延迟样本：</p>
+<pre><code>测试语音：你好呀
+ASR interim：你好呀
+ASR final：你好呀
+AI 回复：你好！有什么可以帮你的吗？
+
+电话音频进入 -&gt; ASR final：约 2.8s
+ASR final -&gt; LLM 第一段文本：约 2.28s
+LLM 第一段文本 -&gt; TTS 首包：约 0.78s
+电话音频进入 -&gt; 电话侧听到第一声 AI：约 5.88s</code></pre>
+<p>当前不要把 6A 的慢误判成 FreeSWITCH、RTP、Media Hub 或 <code>sip_media_bridge</code> 问题。日志看媒体链路是 20ms / 320 bytes 持续转发，主要慢点在 ASR final、LLM 首句和 TTS 首包。</p>
+<h2>10.1 级联语音链路和 WebSocket 实时音频模型</h2>
+<p>当前已经实现的是级联链路：</p>
+<pre><code>电话侧 PCMA
+  -&gt; FreeSWITCH 解码成 8k PCM
+  -&gt; Media Hub
+  -&gt; sip_media_bridge
+  -&gt; ASR 把语音转文字
+  -&gt; LLM 根据文字生成回复
+  -&gt; TTS 把文字转语音
+  -&gt; sip_media_bridge 把音频转回 8k PCM
+  -&gt; FreeSWITCH 编码回 PCMA
+  -&gt; 用户听到声音</code></pre>
+<p>这个链路的特点：</p>
+<pre><code>每一层职责清楚
+容易逐段替换和测试
+可以保留当前 FreeSWITCH / Media Hub / sip_media_bridge
+但天然存在串行等待：ASR final -&gt; LLM 首句 -&gt; TTS 首包</code></pre>
+<p>6B-1 的阿里千问 <code>qwen-flash</code> 属于文本 LLM 替换：</p>
+<pre><code>Deepgram ASR + DeepSeek LLM + ElevenLabs TTS
+替换为：
+Deepgram ASR + 阿里 qwen-flash LLM + ElevenLabs TTS</code></pre>
+<p>它只优化：</p>
+<pre><code>ASR final -&gt; LLM 第一段文本</code></pre>
+<p>它不改变：</p>
+<pre><code>ASR 仍然负责语音转文字
+TTS 仍然负责文字转语音
+电话媒体仍然走 8k PCM
+整体仍是 ASR -&gt; LLM -&gt; TTS 级联链路</code></pre>
+<p>WebSocket 实时音频模型是另一种架构。它不是简单“把 LLM 换成 realtime”，而是让模型直接接收音频流并输出音频流：</p>
+<pre><code>电话侧 PCMA
+  -&gt; FreeSWITCH 解码成 8k PCM
+  -&gt; Media Hub
+  -&gt; 实时音频模型 WebSocket
+  -&gt; 模型直接返回音频
+  -&gt; Media Hub / FreeSWITCH
+  -&gt; 用户听到声音</code></pre>
+<p>它可能把 ASR、LLM、TTS 合并到一个实时模型里：</p>
+<pre><code>输入：音频流
+内部：识别、理解、生成、合成
+输出：音频流</code></pre>
+<p>优势：</p>
+<pre><code>可以更低延迟
+更适合自然插话和全双工对话
+不一定需要等待完整 ASR final
+可能天然支持语音活动检测和打断</code></pre>
+<p>代价：</p>
+<pre><code>架构变化更大
+TEN 现有 ASR/LLM/TTS 分段能力会被绕过一部分
+调试时不容易分清 ASR 慢、LLM 慢还是 TTS 慢
+对供应商绑定更强
+需要重新处理音频格式、会话状态、打断、取消、下行播放缓冲</code></pre>
+<p>所以当前阶段选择：</p>
+<pre><code>6B-1：先做文本 LLM A/B，验证 qwen-flash 能否降低 LLM 首句延迟
+6B-2：再替换 TTS，验证 TTS 首包
+6B-3：再替换 8k 电话 ASR，验证 ASR final
+后续如果仍无法达到目标，再单独评估 WebSocket 实时音频模型</code></pre>
+<p>一句话记忆：</p>
+<pre><code>qwen-flash：文本 LLM，替换级联链路中的 LLM 这一段
+realtime 音频模型：音频进、音频出，属于另一种实时语音架构</code></pre>
+<p>如果想减少电话网关配置成本：</p>
+<pre><code>XSwitch
+  -&gt; 实时音频接口
+  -&gt; Media Hub
+  -&gt; sip_media_bridge
+  -&gt; TEN graph</code></pre>
+<p>不要优先做：</p>
+<pre><code>TEN 直接实现 SIP/RTP</code></pre>
+<p>原因：</p>
+<pre><code>SIP/RTP/PBX 是电话网关领域
+TEN 的优势是实时 AI 编排
+把两者强行混在 TEN 内部会增加复杂度和故障面</code></pre>
+<h2>11. 实时电话里的会话状态应该归谁管</h2>
+<p>实时电话客服里，模型服务端知道自己生成了什么，但不知道电话用户实际听到了什么。电话链路中真正可靠的事实是：</p>
+<pre><code>网关把哪些音频送到了电话播放队列
+哪些回复被用户插话打断
+哪些回复已经完整播放</code></pre>
+<p>所以商用实时电话链路里，会话状态应该由网关托管：</p>
+<pre><code>pending assistant turn：模型已经生成，但电话端还没确认完整播放
+committed history：电话端已经完整听到的历史
+abandoned turn：用户插话打断，不能写入历史</code></pre>
+<p>如果模型 <code>response.done</code> 早于电话 <code>playback_done</code>，模型服务端会认为上一条回复已经完成，但用户实际只听到一半。这时只靠提示词或 <code>session.update</code> 只能缓解，不能从根上删除模型服务端已经接受的上下文。</p>
+<p>当前新网关采用的根因修复思路是：</p>
+<pre><code>AI 回复完整播放后 -&gt; 写入 committed history
+AI 回复被插话打断 -&gt; 丢弃 pending turn
+打断后 -&gt; 用 committed history 重建 Realtime 会话
+重建后 -&gt; 重放最近一小段上行音频，避免插话开头丢失</code></pre>
+<p>注意：当前本地 FreeSWITCH 播放事件还可能拿不到，所以先用“网关下行播放队列 drain”近似代表播放完成。真实商用前最好修通 FreeSWITCH <code>queue_completed</code>，或者使用能明确上报真实播放完成的 media adapter。</p>
+<h2>12. 为什么要看豆包/火山</h2>
+<p>当前阿里 Qwen-Omni Realtime 链路已经可以做到语音进、语音出，但本地测试暴露了一个商用关键问题：打断后，如果供应商服务端已经把上一条回复完整写入自己的会话上下文，而电话用户实际只听了一半，下一轮就可能续说上一轮尾巴。</p>
+<p>因此评估供应商时，不能只看“模型聪不聪明”，要看它是否原生支持电话客服里的实时打断闭环：</p>
+<pre><code>同一会话内取消旧回复
+旧音频立即停止
+未播放完成的 assistant 内容不进入后续上下文
+用户插话期间的音频不丢开头
+能上报智能体状态或真实播放完成状态</code></pre>
+<p>豆包/火山值得看，是因为官方产品线里有两类能力更贴近这个问题：</p>
+<pre><code>豆包端到端实时语音大模型：
+语音直接进模型，语音直接出模型，官方定位包含低时延、自然打断和智能客服场景。
+
+火山 RTC 实时对话式 AI：
+更像托管式语音智能体，官方接口里有 interrupt 指令，可能能把播放、打断、智能体状态放在同一个实时系统里处理。</code></pre>
+<p>但这不等于“直接换豆包就一定好”。真正要验证的是：</p>
+<pre><code>能不能不重建模型连接就完成打断
+打断后会不会带出上一轮未播完的尾巴
+短句插话会不会丢开头
+首字延迟和打断停止耗时是否比当前方案更好
+它要求我们对接的是普通 WebSocket 语音 API，还是 RTC 房间/智能体 API</code></pre>
+<p>如果豆包/火山能原生解决这些问题，后续应该新增供应商 Media Adapter，而不是继续堆当前的重建/重放补偿逻辑。</p>
+<p>如果系统还要接自己的业务系统，并且 AI 音色要能切换，那么优先级会变：</p>
+<pre><code>优先看火山硬件对话智能体标准 WebSocket 协议
+其次看豆包端到端实时语音大模型 RealtimeAPI
+再看火山 RTC 房间式 AI 音视频互动方案
+最后才是继续在当前阿里 Qwen-Omni Realtime 链路上补丁式优化</code></pre>
+<p>原因是业务电话客服不只是“模型会说话”，还需要：</p>
+<pre><code>调用业务系统查订单、查用户、建工单
+控制工具调用权限
+记录每次业务调用日志
+处理接口超时和兜底话术
+按租户、线路或业务场景选择音色
+在用户插话时保持对话状态不乱</code></pre>
+<p>所以更稳的工程形态是：</p>
+<pre><code>电话音频 -&gt; FreeSWITCH -&gt; Gateway
+Gateway -&gt; 供应商实时智能体/实时语音模型
+供应商发起工具调用 -&gt; Gateway Business Tool Adapter
+Gateway -&gt; 自有业务系统
+业务结果 -&gt; Gateway -&gt; 供应商智能体/模型 -&gt; 电话播放</code></pre>
+<p>业务系统不建议直接暴露给模型公网调用。中间要有网关适配层，负责鉴权、参数校验、超时、限流、日志和脱敏。</p>
+<p>这几个名字要区分清楚：</p>
+<pre><code>豆包端到端 RealtimeAPI：
+纯 Speech2Speech WebSocket API。适合快速验证低延迟语音体验，可配置音色和人设，但业务工具调用闭环没有硬件智能体标准协议清晰。
+
+火山硬件对话智能体标准协议：
+WebSocket 全双工事件协议。支持音频流、server_vad、response.cancel、response.audio.delta、Function Calling、状态同步和指令控制。更适合把电话网关模拟成一个“服务端硬件设备”。
+
+火山 RTC 房间式 AI：
+面向 RTC 房间，不是电话入口。除非必须使用它的 RTC 能力，否则电话项目不优先走这条。</code></pre>
+<p>注意：RTC 不是电话。</p>
+<pre><code>RTC：互联网实时音视频房间，通常面向 App / Web / 小程序 / 设备 SDK。
+电话：SIP / RTP / PSTN / SIP Trunk，运营商线路进入 FreeSWITCH。</code></pre>
+<p>所以不能说“火山 RTC 支持电话”。更准确的说法是：</p>
+<pre><code>电话接入仍由 FreeSWITCH 负责。
+如果火山/豆包提供适合服务端网关或硬件设备接入的实时音频协议，本项目可以把电话音频桥接过去。
+如果只提供普通 RTC 客户端 SDK，不提供服务端/硬件/标准协议接入，就不适合当前电话主链路。</code></pre>
+<p>后续查官方文档时优先看这些入口：</p>
+<pre><code>火山硬件对话智能体产品文档：
+https://www.volcengine.com/docs/6348/1806621
+
+火山硬件对话智能体官方 SDK 集成指引：
+https://www.volcengine.com/docs/6348/1913817?lang=zh
+
+火山边缘智能语音对话智能体 Realtime API：
+https://www.volcengine.com/docs/6893/1389041
+
+豆包端到端实时语音大模型产品简介：
+https://www.volcengine.com/docs/6561/1594360
+
+豆包端到端实时语音大模型 API 接入文档：
+https://www.volcengine.com/docs/6561/1594357
+
+火山 RTC UpdateVoiceChat 打断智能体：
+https://www.volcengine.com/docs/6348/1316245
+
+火山 RTC AI 音视频互动方案能力入口：
+https://www.volcengine.com/docs/6348/1350595</code></pre>
+<h3>火山硬件智能体协议最小验证结果</h3>
+<p>已经用本地 SIP 实时语音网关新增探针验证过火山硬件对话智能体标准 WebSocket 协议：</p>
+<pre><code>动态注册设备：通过
+WebSocket 鉴权连接：通过
+发送文本型 conversation.item.create：通过
+接收 response.audio.delta：通过
+接收 response.audio_transcript：通过
+接收 response.done：通过
+导出 WAV 测试音频：通过</code></pre>
+<p>这说明网关服务端可以把自己模拟成“硬件设备”接入火山智能体。这个结论很重要，但边界也要说清楚：</p>
+<pre><code>已证明：供应商智能体协议可连通、可返回音频。
+未证明：电话 8k/20ms PCM 流已经稳定接入火山智能体。
+未证明：真实 SIP Trunk 下的打断、播放完成、并发和异常处理已经可商用。</code></pre>
+<p>这不会改变 SIP 接入边界：</p>
+<pre><code>真实电话 / MicroSIP
+  -&gt; FreeSWITCH
+  -&gt; SIP 实时语音网关
+  -&gt; 火山硬件智能体标准 WebSocket
+  -&gt; SIP 实时语音网关
+  -&gt; FreeSWITCH
+  -&gt; 电话用户</code></pre>
+<p>也就是说，火山硬件智能体替换的是“AI 实时语音后端”，不是 SIP/RTP 电话网关。后续真实 SIP Trunk 仍由 FreeSWITCH 负责，网关负责把电话音频转换成供应商协议需要的实时音频事件。</p>
+<p>本次最小探针的耗时样本：</p>
+<pre><code>首个 audio delta：约 2.3 秒
+response.done：约 11.9 秒</code></pre>
+<p>这个耗时只代表“文本输入 -&gt; 智能体生成一整段音频”的探针，不等于后续电话流式输入的最终体验。下一步接入电话媒体流后，要重新测：</p>
+<pre><code>用户说完到首个下行音频的耗时
+用户插话到旧音频停止的耗时
+插话后新问题是否丢开头
+第二轮回复是否还带上一轮未播完尾巴
+下行播放是否断续或吞尾字</code></pre>
+<h3>火山电话媒体适配的当前实现</h3>
+<p>现在已经把火山硬件智能体接入到 SIP 实时语音网关的电话媒体模式里，开关是：</p>
+<pre><code>REALTIME_MODEL_PROVIDER=volc_hardware</code></pre>
+<p>链路变成：</p>
+<pre><code>电话侧 8k/20ms PCM
+  -&gt; 网关重采样 16k PCM
+  -&gt; 火山 input_audio_buffer.append
+  -&gt; 火山 server_vad 判断用户说话开始/结束
+  -&gt; 火山 input_audio_buffer.committed
+  -&gt; 网关发送 response.create
+  -&gt; 火山 response.audio.delta
+  -&gt; 网关 Playout Engine 转 8k/20ms PCM
+  -&gt; FreeSWITCH 播放</code></pre>
+<p>这里有一个容易误解的点：<code>input_audio_buffer.committed</code> 不是“AI 已经开始回答”，它只表示一段用户音频已经提交。火山 Realtime API 需要再收到 <code>response.create</code> 才开始生成回复，所以网关适配层必须在 committed 后主动发 <code>response.create</code>。</p>
+<p>打断处理也和当前阿里补偿方案不同：</p>
+<pre><code>阿里当前方案：
+插话 -&gt; cancel -&gt; 清空播放 -&gt; 关闭旧会话 -&gt; 新建会话 -&gt; 重放最近上行音频
+
+火山当前方案：
+插话 -&gt; cancel -&gt; 清空播放 -&gt; 保持同一火山会话继续收音</code></pre>
+<p>所以火山方案理论上更接近我们要的商用方向：少一次重连，也少一次重放带来的额外延迟和短句丢开头风险。但这只是架构上更合理，最终还要靠 9199 实测确认。</p>
+<h2>13. 记忆口诀</h2>
+<pre><code>SIP：负责打电话的信令
+RTP：负责传声音
+PCMA：电话线上跑的编码音频
+PCM：AI 能处理的原始音频
+AudioFrame：TEN 内部装 PCM 的信封
+FreeSWITCH：电话交换机
+Call Gateway：电话调度员
+Media Hub：声音转运站
+sip_media_bridge：电话音频和 TEN 的翻译器
+TEN Graph：AI 对话流水线
+main_control：业务对话大脑</code></pre>
+<h2>14. 豆包 S2S 端到端实时语音记录</h2>
+<h3>14.1 Android 文档和服务端 API 的区别</h3>
+<p>Android 文档可以用来确认模型能力，例如是否支持端到端对话、16k PCM、音色配置和原始音频输出。</p>
+<p>但当前项目是服务端电话网关，不是 Android App：</p>
+<pre><code>Android App：
+手机麦克风/扬声器 -&gt; Android SDK -&gt; 豆包实时语音服务
+
+电话网关：
+FreeSWITCH/SIP -&gt; SIP 实时语音网关 -&gt; 豆包 S2S WebSocket API</code></pre>
+<p>所以实现时不能照搬 Android SDK。主依据应该是服务端 WebSocket API：鉴权 Header、二进制帧、事件号、StartConnection、StartSession、Audio Event、TTS Audio Event。</p>
+<h3>14.2 当前选择</h3>
+<p>版本方向：</p>
+<pre><code>优先 O2.0 / S2S</code></pre>
+<p>音色：</p>
+<pre><code>zh_female_vv_jupiter_bigtts</code></pre>
+<p>选择原因：</p>
+<pre><code>O/O2.0 更贴近低延迟助手、客服、外呼。
+SC/SC2.0 更贴近强人格、陪伴、角色和声音复刻。</code></pre>
+<h3>14.3 当前新增探针</h3>
+<p>新增文件：</p>
+<pre><code>app/doubao_s2s_client.py
+app/doubao_s2s_probe.py
+tests/test_doubao_s2s_client.py</code></pre>
+<p>当前探针先做两类验证：</p>
+<pre><code>文本输入 -&gt; 豆包 S2S -&gt; 返回文本和音频
+WAV 音频输入 -&gt; 豆包 S2S -&gt; 返回文本和音频</code></pre>
+<p>这个阶段还不切 9199 电话链路。先验证供应商 S2S 协议本身可用，再接入电话媒体。</p>
+<h3>14.4 数据格式</h3>
+<p>电话侧：</p>
+<pre><code>PCMA / 8k / mono / 20ms
+网关解码后为 8k PCM s16le
+每帧 320 bytes</code></pre>
+<p>豆包 S2S 侧：</p>
+<pre><code>输入：16k PCM s16le mono
+输出：16k PCM s16le mono</code></pre>
+<p>桥接关系：</p>
+<pre><code>上行：电话 8k PCM -&gt; 网关重采样 16k PCM -&gt; 豆包 S2S
+下行：豆包 S2S 24k float32 PCM -&gt; int16 PCM -&gt; 8k PCM -&gt; FreeSWITCH</code></pre>
+<p>如果真实输出仍然断续，优先判断：</p>
+<pre><code>1. 供应商下行 audio event 是否稳定。
+2. 网关 jitter/prebuffer 是否合理。
+3. FreeSWITCH/mod_audio_stream 播放时钟是否稳定。
+4. 是否需要换更底层的媒体适配，而不是继续调 prompt 或回复长度。</code></pre>
+<h3>14.5 本地环境变量</h3>
+<p>必填：</p>
+<pre><code>DOUBAO_S2S_APP_ID=
+DOUBAO_S2S_ACCESS_TOKEN=</code></pre>
+<p>可选：</p>
+<pre><code>DOUBAO_S2S_APP_KEY=官方实时语音固定 App-Key，通常不用覆盖
+DOUBAO_S2S_RESOURCE_ID=volc.speech.dialog
+DOUBAO_S2S_WS_URL=wss://openspeech.bytedance.com/api/v3/realtime/dialogue
+DOUBAO_S2S_SPEAKER=zh_female_vv_jupiter_bigtts
+DOUBAO_S2S_OUTPUT_SAMPLE_RATE=24000</code></pre>
+<p>这些值只能放在本地 <code>.env</code>，不能写进 git 文档。</p>
+<p>Header 映射结论：</p>
+<pre><code>X-Api-App-ID       -&gt; 控制台 APP ID
+X-Api-Access-Key  -&gt; 控制台 Access Key / Access Token
+X-Api-Resource-Id -&gt; volc.speech.dialog
+X-Api-App-Key     -&gt; 端到端实时语音服务固定 App-Key，不是控制台 Secret Key</code></pre>
+<p>注意：<code>X-Api-App-Key</code> 不是控制台 Secret Key。服务端曾明确返回固定实时语音 App-Key 期望值，因此不能把 Secret Key 填到 <code>X-Api-App-Key</code>。</p>
+<h3>14.6 当前验证状态</h3>
+<p>已完成：</p>
+<pre><code>本地假 WebSocket 协议测试通过
+StartConnection 事件封装通过
+StartSession 音色配置通过
+Audio Event 二进制帧通过
+配置加载测试通过</code></pre>
+<p>自动化命令：</p>
+<pre><code>python -m pytest
+python -m compileall app tests</code></pre>
+<p>结果：</p>
+<pre><code>72 passed
+compileall passed</code></pre>
+<p>还没完成：</p>
+<pre><code>9199 电话链路切换到豆包 S2S
+真实插话、吞尾字、断续和首包耗时测试</code></pre>
+<h3>14.7 真实探针结果</h3>
+<p>2026-05-10 已把豆包 S2S 控制台凭证写入本地仓库根目录 <code>.env</code>，并跑通文本探针和本地 WAV 音频探针。</p>
+<p>文本探针命令：</p>
+<pre><code>python -m app.doubao_s2s_probe `
+  --env-file .env `
+  --output-dir artifacts/doubao-s2s-probe `
+  --text &quot;请用一句话介绍你自己。&quot;</code></pre>
+<p>文本探针结果：</p>
+<pre><code>speaker = zh_female_vv_jupiter_bigtts
+output_audio_bytes = 195568
+output_transcript = 我叫豆包，我懂得很多知识，非常喜欢聊天呢。
+first_audio_delta_ms = 562
+response_done_ms = 1469
+output_sample_rate = 24000</code></pre>
+<p>音频探针命令：</p>
+<pre><code>python -m app.doubao_s2s_probe `
+  --env-file .env `
+  --output-dir artifacts/doubao-s2s-probe `
+  --wav &quot;C:\Users\Tzk00\Downloads\语音标签示例1.wav&quot;</code></pre>
+<p>音频探针结果：</p>
+<pre><code>input_audio_bytes = 336000
+input_transcript = 可当他的手触碰到对方的身体时，却感觉一阵冰冷僵硬，那触感不像是活人，更像是尸体。
+output_audio_bytes = 215730
+output_transcript = 我的妈呀！这也太吓人了！后来怎么样啦？
+first_audio_delta_ms = 16828
+response_done_ms = 16828
+output_sample_rate = 24000</code></pre>
+<p>本次 401 历史阻塞的真实原因：</p>
+<pre><code>1. 最初复制的 Access Key / Secret Key 字符存在差异。
+2. 曾误把控制台 Secret Key 当成 X-Api-App-Key。
+3. 修正 Access Key，并把 X-Api-App-Key 恢复为端到端实时语音固定 App-Key 后，真实联网探针通过。</code></pre>
+<p>音频探针的 <code>first_audio_delta_ms=16828</code> 不能直接等同于电话场景延迟，因为该 WAV 是按实时 20ms chunk 发送，并等待了服务端 VAD 结束。它证明的是“音频输入 -&gt; ASR -&gt; 对话 -&gt; TTS 音频输出”链路可用；真正电话延迟要在 9199 媒体链路切换到豆包 S2S 后重新测。</p>
+<h3>14.8 豆包 S2S 接入 9199 电话链路</h3>
+<p>本阶段目标是把已经跑通的豆包 S2S 探针接入真实电话媒体热路径。</p>
+<p>新增代码：</p>
+<pre><code>app/doubao_s2s_realtime.py
+tests/test_doubao_s2s_realtime.py</code></pre>
+<p>启动 provider：</p>
+<pre><code>REALTIME_MODEL_PROVIDER=doubao_s2s</code></pre>
+<p>当前本地仓库根目录 <code>.env</code> 已切到 <code>doubao_s2s</code>，该文件不进 git。</p>
+<p>9199 链路：</p>
+<pre><code>MicroSIP 拨 9199
+  -&gt; FreeSWITCH / mod_audio_stream
+  -&gt; SIP 实时语音网关
+  -&gt; 8k PCM 上行重采样为 16k PCM
+  -&gt; 豆包 S2S TaskAudio
+  -&gt; 豆包 S2S TTSAudioData 24k float32 PCM
+  -&gt; float32 转 int16
+  -&gt; Playout Engine 重采样为 8k / 20ms / 320 bytes
+  -&gt; FreeSWITCH
+  -&gt; 电话侧播放</code></pre>
+<p>关键注意点：</p>
+<pre><code>1. 最新 9199 实测证明豆包下行不是 16k int16 PCM，而是 24k float32 PCM。
+2. 必须先把 float32 转 int16，再按 24k -&gt; 8k 播放。
+3. 当前自动化验证证明适配器能把 ASR / Chat / TTS 事件映射到电话网关 turn。
+4. 下一步人工验证仍然要拨 9199，重点听是否连续、尾字是否完整、首包耗时是否可接受。
+5. 当前已启用 FreeSWITCH Event Socket，打断时会尝试清理 FreeSWITCH `mod_audio_stream` 播放队列，避免旧回复残留继续播放。</code></pre>
+<p>自动化和烟测结果：</p>
+<pre><code>python -m pytest：72 passed
+python -m compileall app tests：passed
+
+模拟 FreeSWITCH WebSocket 烟测：通过
+输入：本地 WAV 按 8k / 20ms 电话帧送入网关
+输出：网关收到豆包 S2S 下行后回出 8k 播放帧
+turns_started = 1
+turns_completed = 1
+playback_underruns = 0</code></pre>
+<p>烟测首个播放帧约 15.7s 出现，但这个数字包含整段 WAV 按真实 20ms 帧发送的时长，不等同于用户说完后的电话响应延迟。下一步要用 MicroSIP 拨 9199 做真实体感测试。</p>
+<p>人工启动命令：</p>
+<pre><code>python -m app.main `
+  --config configs/local.example.toml `
+  --env-file .env `
+  --media-mode realtime</code></pre>
+<h3>14.9 豆包 S2S 9199 根因修正记录</h3>
+<p>最近 9199 人工测试现象：</p>
+<pre><code>语速已经正常
+音色已经正常
+插话后仍偶发旧内容带入下一轮
+多轮后越往后越容易回答不完整，最后几个字缺失</code></pre>
+<p>日志判断：</p>
+<pre><code>每轮都出现 ChatEnded / event=559
+问题轮次没有看到 TTSFinished / event=359
+559 后仍可能继续收到 TTSAudioData / event=352</code></pre>
+<p>第一性原理结论：</p>
+<pre><code>ChatEnded 是文本对话结束，不是音频素材结束。
+电话侧真正关心的是“可播放音频是否完整到达并排入播放队列”。
+如果用 559 完成本轮，就可能在 359 前提前 flush / close，导致尾字被吞。</code></pre>
+<p>本次修正：</p>
+<pre><code>1. 豆包 S2S 适配器不再把 559 当成本轮完成。
+2. 只有 TTSFinished / 359 或 SessionFinished 才完成 turn。
+3. ChatEnded 的 content 不写入 output transcript，避免污染 committed history。
+4. 插话后关闭旧豆包 S2S 会话，用网关 committed history 重建新会话。
+5. 重建期间继续进来的上行音频加锁进入重放缓冲，避免插话开头丢失。</code></pre>
+<p>2026-05-10 追加复测发现：</p>
+<pre><code>每轮 TTSFinished / 359 已经能收到，模型侧 output_transcript 也完整。
+但本轮最后几个字仍没有在本轮听到，而是挪到下一轮开头。
+本地日志中 FreeSWITCH 播放事件仍为 0，说明还没有真实 queue_completed 可用。
+这说明问题已经从“供应商音频是否完整生成”进入“电话侧播放片段是否完整 drain”。</code></pre>
+<p>对应修正：</p>
+<pre><code>1. 网关在模型 turn 完成后 flush 残余下行音频帧。
+2. 再按 playback.tail_silence_ms 追加 20ms 对齐的静音尾帧。
+3. 追加日志 tail_silence_frames，用来确认本轮实际补了多少尾部静音帧。
+4. 新增自动化测试，验证 turn 完成后会发出残余音频帧 + 静音尾帧。</code></pre>
+<p>判断：</p>
+<pre><code>这是对“本地 9199 段尾吞字”的根因方向修复，但仍是播放层止血。
+最终商用更稳的做法是修通 FreeSWITCH queue_completed / chunk_played，或换成能上报真实播放完成的 media adapter。
+只有真实播放完成事件才能精确决定 assistant turn 是否进入 committed history。</code></pre>
+<p>自动化验证：</p>
+<pre><code>python -m pytest：74 passed
+python -m compileall app tests：passed</code></pre>
+<h3>14.10 主线收敛和代码清理决定</h3>
+<p>2026-05-10 尾字完整性复测通过后，当前主线确定为：</p>
+<pre><code>业务系统 / 外呼任务
+  -&gt; SIP 实时语音网关
+  -&gt; FreeSWITCH / SIP Trunk / PCMA
+  -&gt; 豆包 S2S 端到端实时语音
+  -&gt; FreeSWITCH
+  -&gt; 电话用户</code></pre>
+<p>清理决定：</p>
+<pre><code>1. 阿里 Qwen Realtime 链路不再作为运行时回退。
+2. 火山硬件智能体标准 WebSocket 线路不再作为运行时候选。
+3. 生产代码只保留豆包 S2S、FreeSWITCH、Event Socket、Playout Engine、媒体契约和本地 9199 验证链路。
+4. 历史调研结论保留在笔记中，但 README、配置和代码入口不再暴露旧 provider 选择，避免同事误配。</code></pre>
+<p>下一步人工复测 9199 时重点听：</p>
+<pre><code>1. 尾字是否完整。
+2. 插话后第二轮是否还带上一轮未播完内容。
+3. 连续多轮后是否仍会越答越短或提前断掉。
+4. 打断后是否还有明显卡顿。</code></pre>
+<h3>14.11 打断后不需要重复问的根因修复</h3>
+<p>2026-05-10 复测结论：</p>
+<pre><code>打断后听感很好。
+旧声音停止后，AI 能直接回复插话内容，不需要用户再问一遍。</code></pre>
+<p>根因：</p>
+<pre><code>打断识别成功
+旧播放停止成功
+豆包 S2S 热重启成功
+但热重启后没有把插话期间缓存的用户音频重新送入豆包</code></pre>
+<p>修复点：</p>
+<pre><code>豆包热重启完成后，网关把 repair_replay_frames_16k 重新 append_audio 到当前豆包会话。</code></pre>
+<p>复测日志关键证据：</p>
+<pre><code>realtime_interruption_audio_replayed replayed_input_frames=46 replayed_input_bytes=29440
+turn=6 input_transcript=你喜欢什么？
+turn=6 output_transcript=我喜欢好多东西呢，你呢？</code></pre>
+<p>这说明用户插话音频进入了新会话，模型也直接对插话内容作答。</p>
+<p>当前 9199 测试指标：</p>
+<pre><code>PLAYBACK_JITTER_BUFFER_MS=500
+playback_prefill_frames=25
+interruptions=1
+dropped_stale_frames=0
+playback_underruns=1
+max_playback_send_gap_ms=155
+playback_send_gap_overruns=13
+freeswitch_break_failures=0
+realtime_interrupt_failures=0
+gateway_history_committed_turns=5
+gateway_history_abandoned_turns=1
+turns_completed=6
+turns_failed=0</code></pre>
+<p>判断：</p>
+<pre><code>这是“打断后 AI 有时不回复”的根因修复。
+但它不是完整商用媒体状态机。</code></pre>
+<p>下一步不应该继续加业务功能，应该先做播放完成确认和媒体状态机：</p>
+<pre><code>1. 修通 FreeSWITCH queue_completed / chunk_played，或替换为可上报播放完成的 media adapter。
+2. 明确定义 assistant turn 的 queued / playing / completed / interrupted / abandoned。
+3. 只有真实 completed 的 assistant turn 才能进入 committed history。
+4. interrupted / abandoned 的 turn 不能污染模型上下文。
+5. 保留 500ms jitter buffer 作为当前本地体验基线，后续再根据播放事件和 send gap 指标调参。</code></pre>

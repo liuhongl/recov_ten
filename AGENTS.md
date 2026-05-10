@@ -2,18 +2,18 @@
 
 ## 项目边界
 
-当前仓库已经切到独立 SIP 实时语音网关方向，核心代码只在
-`sip-realtime-voice-gateway/` 下。旧 TEN 框架目录不再作为本项目实现依赖，
-不要再引用 `ai_agents/`、`core/`、`packages/`、`build/`、`third_party/` 等旧目录。
+当前仓库根目录就是独立 SIP 实时语音网关项目。不要再假设外层还有项目父目录，也不要引用旧 TEN 框架目录。
 
 ## 工作区域
 
-- `sip-realtime-voice-gateway/app/`：网关主逻辑，负责 FreeSWITCH 音频接入、端到端实时语音模型连接、播放控制和打断控制。
-- `sip-realtime-voice-gateway/configs/`：本地配置模板，真实密钥只放在本地 `.env` 或运行环境变量里。
-- `sip-realtime-voice-gateway/freeswitch-local/`：本地 9199 软电话验证用 FreeSWITCH Docker 运行时。
-- `sip-realtime-voice-gateway/tests/`：网关单元测试。
-- `SIP实时语音网关新项目方案.md`：新项目交接方案、业务链路和阶段计划。
-- `TEN电话接入学习笔记.md`：历史调研和电话链路知识笔记。
+- `app/`: 网关主逻辑，负责 FreeSWITCH 音频接入、端到端实时语音模型连接、播放控制和打断控制。
+- `configs/`: 本地配置模板，真实密钥只放在本地 `.env` 或运行环境变量里。
+- `freeswitch-local/`: 本地 9199 软电话验证用 FreeSWITCH Docker 运行时。
+- `tests/`: 网关单元测试。
+- `static/pages/handoff.html`: 当前交接总入口，包含业务链路、实现状态、数据格式、测试环境和后续事项。
+- `static/pages/notes.html`: 历史调研和电话链路知识笔记。
+- `static/pages/mac-softphone.html`: Mac 软电话接入 9199 本地测试指导。
+- `static/pages/agent-readme.html`: 推荐的 AI / Agent 协作方式。需要沉淀长期工作规则时，优先从这里同步到本文档。
 
 ## 开发约定
 

@@ -38,6 +38,18 @@ class EventSocketConfig:
 
 
 @dataclass(frozen=True)
+class OutboundCallConfig:
+    enabled: bool = True
+    endpoint_template: str = "sofia_contact:*/{destination}"
+    dialplan_extension: str = "9199"
+    dialplan_context: str = "default"
+    caller_id_name: str = "AI_Assistant"
+    caller_id_number: str = "9000"
+    originate_timeout_seconds: int = 30
+    max_recent_calls: int = 200
+
+
+@dataclass(frozen=True)
 class DoubaoS2SConfig:
     app_id_env: str = "DOUBAO_S2S_APP_ID"
     access_token_env: str = "DOUBAO_S2S_ACCESS_TOKEN"
@@ -84,16 +96,27 @@ class FeatureConfig:
 
 
 @dataclass(frozen=True)
+class PostgresConfig:
+    enabled: bool = False
+    dsn_env: str = "POSTGRES_DSN"
+    min_pool_size: int = 1
+    max_pool_size: int = 5
+    command_timeout_seconds: float = 5.0
+
+
+@dataclass(frozen=True)
 class GatewayConfig:
     server: ServerConfig = ServerConfig()
     logging: LoggingConfig = LoggingConfig()
     freeswitch: FreeSwitchConfig = FreeSwitchConfig()
     event_socket: EventSocketConfig = EventSocketConfig()
+    outbound: OutboundCallConfig = OutboundCallConfig()
     doubao_s2s: DoubaoS2SConfig = DoubaoS2SConfig()
     server_vad: ServerVadConfig = ServerVadConfig()
     playback: PlaybackConfig = PlaybackConfig()
     vad: VadConfig = VadConfig()
     features: FeatureConfig = FeatureConfig()
+    postgres: PostgresConfig = PostgresConfig()
 
 
 def load_config(path: str | Path | None = None) -> GatewayConfig:
@@ -174,6 +197,56 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
                 "event_socket",
                 "password_env",
                 default=EventSocketConfig.password_env,
+            ),
+        ),
+        outbound=OutboundCallConfig(
+            enabled=_get_bool(
+                raw,
+                "outbound",
+                "enabled",
+                default=OutboundCallConfig.enabled,
+            ),
+            endpoint_template=_get(
+                raw,
+                "outbound",
+                "endpoint_template",
+                default=OutboundCallConfig.endpoint_template,
+            ),
+            dialplan_extension=_get(
+                raw,
+                "outbound",
+                "dialplan_extension",
+                default=OutboundCallConfig.dialplan_extension,
+            ),
+            dialplan_context=_get(
+                raw,
+                "outbound",
+                "dialplan_context",
+                default=OutboundCallConfig.dialplan_context,
+            ),
+            caller_id_name=_get(
+                raw,
+                "outbound",
+                "caller_id_name",
+                default=OutboundCallConfig.caller_id_name,
+            ),
+            caller_id_number=_get(
+                raw,
+                "outbound",
+                "caller_id_number",
+                default=OutboundCallConfig.caller_id_number,
+            ),
+            originate_timeout_seconds=_get_int(
+                raw,
+                "outbound",
+                "originate_timeout_seconds",
+                default=OutboundCallConfig.originate_timeout_seconds,
+            ),
+            max_recent_calls=_get_int(
+                raw,
+                "outbound",
+                "max_recent_calls",
+                default=OutboundCallConfig.max_recent_calls,
             ),
         ),
         doubao_s2s=DoubaoS2SConfig(
@@ -337,9 +410,42 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
                 default=FeatureConfig.recording_enabled,
             ),
         ),
+        postgres=PostgresConfig(
+            enabled=_get_bool(
+                raw,
+                "postgres",
+                "enabled",
+                default=PostgresConfig.enabled,
+            ),
+            dsn_env=_get(
+                raw,
+                "postgres",
+                "dsn_env",
+                default=PostgresConfig.dsn_env,
+            ),
+            min_pool_size=_get_int(
+                raw,
+                "postgres",
+                "min_pool_size",
+                default=PostgresConfig.min_pool_size,
+            ),
+            max_pool_size=_get_int(
+                raw,
+                "postgres",
+                "max_pool_size",
+                default=PostgresConfig.max_pool_size,
+            ),
+            command_timeout_seconds=_get_float(
+                raw,
+                "postgres",
+                "command_timeout_seconds",
+                default=PostgresConfig.command_timeout_seconds,
+            ),
+        ),
     )
     config = _apply_env_overrides(config)
     _validate_media_contract(config.freeswitch)
+    _validate_postgres_config(config.postgres)
     return config
 
 
@@ -471,6 +577,40 @@ def _apply_env_overrides(config: GatewayConfig) -> GatewayConfig:
                 config.event_socket.password_env,
             ),
         ),
+        outbound=OutboundCallConfig(
+            enabled=_env_bool(
+                "OUTBOUND_CALLS_ENABLED",
+                config.outbound.enabled,
+            ),
+            endpoint_template=os.getenv(
+                "OUTBOUND_ENDPOINT_TEMPLATE",
+                config.outbound.endpoint_template,
+            ),
+            dialplan_extension=os.getenv(
+                "OUTBOUND_DIALPLAN_EXTENSION",
+                config.outbound.dialplan_extension,
+            ),
+            dialplan_context=os.getenv(
+                "OUTBOUND_DIALPLAN_CONTEXT",
+                config.outbound.dialplan_context,
+            ),
+            caller_id_name=os.getenv(
+                "OUTBOUND_CALLER_ID_NAME",
+                config.outbound.caller_id_name,
+            ),
+            caller_id_number=os.getenv(
+                "OUTBOUND_CALLER_ID_NUMBER",
+                config.outbound.caller_id_number,
+            ),
+            originate_timeout_seconds=_env_int(
+                "OUTBOUND_ORIGINATE_TIMEOUT_SECONDS",
+                config.outbound.originate_timeout_seconds,
+            ),
+            max_recent_calls=_env_int(
+                "OUTBOUND_MAX_RECENT_CALLS",
+                config.outbound.max_recent_calls,
+            ),
+        ),
         doubao_s2s=DoubaoS2SConfig(
             app_id_env=os.getenv(
                 "DOUBAO_S2S_APP_ID_ENV",
@@ -579,6 +719,22 @@ def _apply_env_overrides(config: GatewayConfig) -> GatewayConfig:
                 config.features.recording_enabled,
             ),
         ),
+        postgres=PostgresConfig(
+            enabled=_env_bool("POSTGRES_ENABLED", config.postgres.enabled),
+            dsn_env=os.getenv("POSTGRES_DSN_ENV", config.postgres.dsn_env),
+            min_pool_size=_env_int(
+                "POSTGRES_MIN_POOL_SIZE",
+                config.postgres.min_pool_size,
+            ),
+            max_pool_size=_env_int(
+                "POSTGRES_MAX_POOL_SIZE",
+                config.postgres.max_pool_size,
+            ),
+            command_timeout_seconds=_env_float(
+                "POSTGRES_COMMAND_TIMEOUT_SECONDS",
+                config.postgres.command_timeout_seconds,
+            ),
+        ),
     )
 
 
@@ -613,3 +769,14 @@ def _validate_media_contract(config: FreeSwitchConfig) -> None:
     from .media_contract import build_realtime_phone_contract
 
     build_realtime_phone_contract(config)
+
+
+def _validate_postgres_config(config: PostgresConfig) -> None:
+    if config.min_pool_size < 0:
+        raise ValueError("postgres.min_pool_size must be non-negative")
+    if config.max_pool_size < 1:
+        raise ValueError("postgres.max_pool_size must be positive")
+    if config.min_pool_size > config.max_pool_size:
+        raise ValueError("postgres.min_pool_size must not exceed max_pool_size")
+    if config.command_timeout_seconds <= 0:
+        raise ValueError("postgres.command_timeout_seconds must be positive")

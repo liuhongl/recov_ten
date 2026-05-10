@@ -1,0 +1,832 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SIP 实时语音网关外呼测试</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f4f6f8;
+        --surface: #ffffff;
+        --surface-soft: #f9fafb;
+        --text: #151922;
+        --muted: #667085;
+        --line: #d9dee8;
+        --green: #087443;
+        --green-soft: #e8f5ee;
+        --blue: #1d4ed8;
+        --blue-soft: #eaf1ff;
+        --amber: #9a5b13;
+        --amber-soft: #fff4df;
+        --red: #b42318;
+        --red-soft: #fff0ee;
+        --shadow: 0 12px 28px rgba(21, 25, 34, 0.08);
+        font-family: Inter, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      a {
+        color: inherit;
+      }
+
+      button,
+      input {
+        font: inherit;
+      }
+
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        border-bottom: 1px solid var(--line);
+        background: rgba(244, 246, 248, 0.96);
+        backdrop-filter: blur(10px);
+      }
+
+      .topbar-inner {
+        width: min(1360px, calc(100% - 24px));
+        height: 64px;
+        margin: 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+
+      .brand {
+        flex: 0 0 220px;
+        min-width: 220px;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .brand strong {
+        font-size: 17px;
+        line-height: 1.2;
+      }
+
+      .brand span {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.2;
+      }
+
+      .nav {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-left: auto;
+      }
+
+      .nav a,
+      .primary-action,
+      .secondary-action,
+      .danger-action {
+        min-height: 36px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 0 12px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        background: var(--surface);
+        color: var(--text);
+        text-decoration: none;
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 500;
+        line-height: 1;
+        white-space: nowrap;
+      }
+
+      .nav a {
+        min-width: 96px;
+      }
+
+      .nav a.active,
+      .nav a[aria-current="page"] {
+        border-color: #8ccfc0;
+        background: var(--green-soft);
+        color: #075c44;
+      }
+
+      .primary-action {
+        border-color: #075c44;
+        background: #075c44;
+        color: #ffffff;
+      }
+
+      .secondary-action:hover,
+      .nav a:hover {
+        border-color: #9aa7bb;
+      }
+
+      .danger-action {
+        border-color: #f2b8b5;
+        background: var(--red-soft);
+        color: var(--red);
+      }
+
+      .shell {
+        width: min(1360px, calc(100% - 24px));
+        margin: 18px auto 48px;
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
+        gap: 16px;
+        align-items: stretch;
+        margin-bottom: 16px;
+      }
+
+      .intro,
+      .system-panel,
+      .dial-panel,
+      .calls-panel,
+      .result-panel {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+
+      .hero > * {
+        min-width: 0;
+      }
+
+      .intro {
+        padding: 20px 22px;
+      }
+
+      .eyebrow {
+        margin: 0 0 8px;
+        color: var(--green);
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 30px;
+        line-height: 1.22;
+        font-weight: 750;
+      }
+
+      .intro p {
+        max-width: 920px;
+        margin: 12px 0 0;
+        color: var(--muted);
+        line-height: 1.7;
+      }
+
+      .hero-metrics {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 18px;
+      }
+
+      .metric {
+        min-height: 82px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 12px;
+        background: var(--surface-soft);
+      }
+
+      .metric span {
+        display: block;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .metric strong {
+        display: block;
+        margin-top: 8px;
+        font-size: 20px;
+        overflow-wrap: anywhere;
+      }
+
+      .system-panel {
+        padding: 18px;
+      }
+
+      .panel-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        min-height: 34px;
+        margin-bottom: 16px;
+      }
+
+      .panel-actions {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .panel-actions button {
+        min-height: 32px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 0 10px;
+        background: var(--surface);
+        color: var(--text);
+        cursor: pointer;
+        white-space: nowrap;
+      }
+
+      .panel-actions button:hover {
+        border-color: #9aa7bb;
+      }
+
+      h2 {
+        margin: 0;
+        font-size: 17px;
+        line-height: 1.3;
+      }
+
+      .status-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        background: #98a2b3;
+        box-shadow: 0 0 0 4px rgba(152, 162, 179, 0.15);
+      }
+
+      .status-dot.ok {
+        background: var(--green);
+        box-shadow: 0 0 0 4px rgba(8, 116, 67, 0.16);
+      }
+
+      .status-dot.error {
+        background: var(--red);
+        box-shadow: 0 0 0 4px rgba(180, 35, 24, 0.14);
+      }
+
+      .kv {
+        display: grid;
+        gap: 10px;
+      }
+
+      .kv-row {
+        display: grid;
+        grid-template-columns: 120px minmax(0, 1fr);
+        gap: 10px;
+        align-items: center;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .kv-row strong {
+        min-width: 0;
+        color: var(--text);
+        overflow-wrap: anywhere;
+      }
+
+      .panel-note {
+        margin: 12px 0 0;
+        padding-top: 12px;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      .workspace {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 16px;
+      }
+
+      .workspace > section {
+        min-width: 0;
+      }
+
+      .dial-panel,
+      .calls-panel,
+      .result-panel {
+        padding: 18px;
+      }
+
+      .form-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      label {
+        display: grid;
+        gap: 7px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .field-label {
+        color: var(--muted);
+      }
+
+      label.wide {
+        grid-column: 1 / -1;
+      }
+
+      input {
+        width: 100%;
+        min-height: 38px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 8px 10px;
+        background: var(--surface);
+        color: var(--text);
+      }
+
+      input:focus {
+        outline: 3px solid rgba(29, 78, 216, 0.12);
+        border-color: #84a4f8;
+      }
+
+      .form-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 16px;
+      }
+
+      .call-table {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+      }
+
+      .call-table th,
+      .call-table td {
+        border-bottom: 1px solid var(--line);
+        padding: 10px 8px;
+        text-align: left;
+        vertical-align: top;
+        font-size: 13px;
+      }
+
+      .call-table th {
+        color: var(--muted);
+        font-weight: 600;
+      }
+
+      .call-table td {
+        overflow-wrap: anywhere;
+      }
+
+      .badge {
+        display: inline-flex;
+        min-height: 24px;
+        align-items: center;
+        border-radius: 999px;
+        padding: 2px 9px;
+        background: var(--blue-soft);
+        color: var(--blue);
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      .badge.ok {
+        background: var(--green-soft);
+        color: var(--green);
+      }
+
+      .badge.warn {
+        background: var(--amber-soft);
+        color: var(--amber);
+      }
+
+      .badge.error {
+        background: var(--red-soft);
+        color: var(--red);
+      }
+
+      pre {
+        min-height: 120px;
+        max-height: 260px;
+        margin: 0;
+        overflow: auto;
+        border: 1px solid #263244;
+        border-radius: 8px;
+        padding: 14px;
+        background: #111827;
+        color: #d1fadf;
+        line-height: 1.55;
+        font-size: 12px;
+      }
+
+      .empty {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.7;
+      }
+
+      @media (max-width: 1180px) {
+        .hero {
+          grid-template-columns: minmax(0, 1fr) minmax(300px, 340px);
+        }
+      }
+
+      @media (max-width: 960px) {
+        .hero,
+        .workspace {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 640px) {
+        .topbar-inner,
+        .shell {
+          width: min(100% - 16px, 1360px);
+        }
+
+        .topbar-inner {
+          height: auto;
+          min-height: 76px;
+          align-items: flex-start;
+          flex-direction: column;
+          padding: 10px 0;
+        }
+
+        .brand {
+          flex: 0 1 auto;
+          min-width: 0;
+        }
+
+        .nav {
+          width: 100%;
+          margin-left: 0;
+          flex-wrap: wrap;
+        }
+
+        .nav a {
+          flex: 1 1 calc(50% - 4px);
+          min-width: 112px;
+        }
+
+        .hero-metrics,
+        .form-grid {
+          grid-template-columns: 1fr;
+        }
+
+        h1 {
+          font-size: 24px;
+        }
+
+        .call-table {
+          min-width: 680px;
+        }
+
+        .calls-scroll {
+          overflow-x: auto;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand">
+          <strong>SIP 实时语音网关</strong>
+          <span>本地 9199 外呼控制台</span>
+        </div>
+        <nav class="nav" aria-label="主导航">
+          <a class="active" href="/outbound-test" aria-current="page">外呼测试</a>
+          <a href="/docs/handoff">交接文档</a>
+          <a href="/docs/notes">学习笔记</a>
+          <a href="/docs/mac-softphone">Mac 接入指导</a>
+          <a href="/docs/agent-readme">推荐AGENT.md</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section class="hero" aria-labelledby="pageTitle">
+        <div class="intro">
+          <p class="eyebrow">HTTP 控制面 · POST /calls</p>
+          <h1 id="pageTitle">SIP 实时语音网关外呼测试</h1>
+          <p>
+            当前本地测试链路使用 1000 分机作为软电话被叫，Windows 可用 MicroSIP，
+            macOS 可用 Linphone 或 Zoiper；真实商用时替换为 SIP trunk 或企业中继号码，
+            接通后的 9199 到实时语音模型链路保持一致。
+          </p>
+          <div class="hero-metrics" aria-label="当前概览">
+            <div class="metric">
+              <span>外呼接口</span>
+              <strong>POST /calls</strong>
+            </div>
+            <div class="metric">
+              <span>默认主叫</span>
+              <strong>9000</strong>
+            </div>
+            <div class="metric">
+              <span>默认被叫</span>
+              <strong>1000</strong>
+            </div>
+          </div>
+        </div>
+
+        <aside class="system-panel" aria-labelledby="systemTitle">
+          <div class="panel-title">
+            <h2 id="systemTitle">网关状态</h2>
+            <div class="panel-actions">
+              <button id="refreshButton" type="button">刷新状态</button>
+              <span id="readyDot" class="status-dot" aria-hidden="true"></span>
+            </div>
+          </div>
+          <div class="kv">
+            <div class="kv-row"><span>页面接口</span><strong id="readyStatus">检测中</strong></div>
+            <div class="kv-row"><span>外呼开关</span><strong id="outboundEnabled">-</strong></div>
+            <div class="kv-row"><span>Event Socket</span><strong id="eventSocketEnabled">-</strong></div>
+            <div class="kv-row"><span>Endpoint</span><strong id="endpointTemplate">-</strong></div>
+            <div class="kv-row"><span>Dialplan</span><strong id="dialplanInfo">-</strong></div>
+          </div>
+          <p class="panel-note">这里只表示本页面 HTTP 控制接口是否可响应；电话链路是否成功，以接口返回和最近呼叫为准。</p>
+        </aside>
+      </section>
+
+      <section class="workspace">
+        <section class="dial-panel" aria-labelledby="dialTitle">
+            <div class="panel-title">
+              <h2 id="dialTitle">发起外呼</h2>
+              <span class="badge">本地验证</span>
+            </div>
+            <form id="callForm">
+              <div class="form-grid">
+                <label>
+                  被叫号码
+                  <input id="destination" name="destination" value="1000" autocomplete="tel" required />
+                </label>
+                <label>
+                  主叫号码
+                  <input id="callerNumber" name="caller_id_number" value="9000" autocomplete="tel" />
+                </label>
+                <label>
+                  主叫名称
+                  <input id="callerName" name="caller_id_name" value="AI Agent" />
+                </label>
+                <label>
+                  超时秒数
+                  <input id="timeoutSeconds" name="originate_timeout_seconds" type="number" min="3" max="120" value="30" />
+                </label>
+                <label>
+                  <span class="field-label">Dialplan Extension（接通后入口）</span>
+                  <input id="dialplanExtension" name="dialplan_extension" value="9199" />
+                </label>
+                <label>
+                  <span class="field-label">Dialplan Context（拨号上下文）</span>
+                  <input id="dialplanContext" name="dialplan_context" value="default" />
+                </label>
+                <label class="wide">
+                  <span class="field-label">业务标记（日志标记，不影响拨号）</span>
+                  <input id="metadataScene" name="metadata_scene" value="local-outbound-test" />
+                </label>
+              </div>
+              <div class="form-actions">
+                <button id="submitButton" class="primary-action" type="submit">发起呼叫</button>
+                <button id="hangupButton" class="danger-action" type="button" disabled>挂断当前呼叫</button>
+              </div>
+            </form>
+        </section>
+
+        <section class="result-panel" aria-labelledby="resultTitle">
+            <div class="panel-title">
+              <h2 id="resultTitle">接口返回</h2>
+              <span id="currentCallBadge" class="badge warn">未发起</span>
+            </div>
+            <pre id="resultOutput">等待操作...</pre>
+        </section>
+
+        <section class="calls-panel" aria-labelledby="callsTitle">
+            <div class="panel-title">
+              <h2 id="callsTitle">最近呼叫</h2>
+              <span id="callsCount" class="badge">0</span>
+            </div>
+            <div id="callsBody" class="calls-scroll">
+              <p class="empty">暂无呼叫记录。</p>
+            </div>
+        </section>
+      </section>
+    </main>
+
+    <script>
+      const readyDot = document.getElementById("readyDot");
+      const readyStatus = document.getElementById("readyStatus");
+      const outboundEnabled = document.getElementById("outboundEnabled");
+      const eventSocketEnabled = document.getElementById("eventSocketEnabled");
+      const endpointTemplate = document.getElementById("endpointTemplate");
+      const dialplanInfo = document.getElementById("dialplanInfo");
+      const resultOutput = document.getElementById("resultOutput");
+      const currentCallBadge = document.getElementById("currentCallBadge");
+      const callsBody = document.getElementById("callsBody");
+      const callsCount = document.getElementById("callsCount");
+      const submitButton = document.getElementById("submitButton");
+      const hangupButton = document.getElementById("hangupButton");
+      const refreshButton = document.getElementById("refreshButton");
+      const callForm = document.getElementById("callForm");
+
+      let currentCallId = null;
+
+      function setResult(payload) {
+        resultOutput.textContent =
+          typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+      }
+
+      function setBadge(element, label, tone) {
+        element.textContent = label;
+        element.className = "badge" + (tone ? ` ${tone}` : "");
+      }
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      function statusTone(call) {
+        const status = String(call.status || "");
+        const phase = String(call.phase || "");
+        if (status.includes("failed") || phase.includes("failed")) return "error";
+        if (status.includes("completed") || phase.includes("completed")) return "ok";
+        if (status.includes("hangup") || phase.includes("unanswered")) return "warn";
+        return "";
+      }
+
+      function callLabel(call) {
+        return call.phase_label || call.phase || call.status || "unknown";
+      }
+
+      function readyLabel(status) {
+        return status === "ready" ? "可用" : status || "可用";
+      }
+
+      async function fetchJson(url, options) {
+        const response = await fetch(url, options);
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload.error || `${response.status} ${response.statusText}`);
+        }
+        return payload;
+      }
+
+      async function refreshReady() {
+        try {
+          const payload = await fetchJson("/ready");
+          const outbound = payload.config?.outbound || {};
+          readyDot.classList.remove("error");
+          readyDot.classList.add("ok");
+          readyStatus.removeAttribute("title");
+          readyStatus.textContent = readyLabel(payload.status);
+          outboundEnabled.textContent = outbound.enabled ? "开启" : "关闭";
+          eventSocketEnabled.textContent = outbound.event_socket_enabled ? "开启" : "关闭";
+          endpointTemplate.textContent = outbound.endpoint_template || "-";
+          dialplanInfo.textContent = `${outbound.dialplan_context || "-"} / ${
+            outbound.dialplan_extension || "-"
+          }`;
+        } catch (error) {
+          readyDot.classList.remove("ok");
+          readyDot.classList.add("error");
+          readyStatus.textContent = "异常";
+          readyStatus.title = error.message;
+        }
+      }
+
+      async function refreshCalls() {
+        try {
+          const payload = await fetchJson("/calls?limit=20");
+          const calls = Array.isArray(payload.calls) ? payload.calls : [];
+          callsCount.textContent = String(calls.length);
+          if (calls.length === 0) {
+            callsBody.innerHTML = '<p class="empty">暂无呼叫记录。</p>';
+            return;
+          }
+
+          callsBody.innerHTML = `
+            <table class="call-table">
+              <thead>
+                <tr>
+                  <th>Call ID</th>
+                  <th>号码</th>
+                  <th>阶段</th>
+                  <th>耗时</th>
+                  <th>诊断</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${calls
+                  .map(
+                    (call) => `
+                      <tr>
+                        <td>${escapeHtml(call.call_id)}</td>
+                        <td>${escapeHtml(call.destination || "-")}</td>
+                        <td><span class="badge ${statusTone(call)}">${escapeHtml(
+                          callLabel(call)
+                        )}</span></td>
+                        <td>${escapeHtml(call.elapsed_ms ?? "-")} ms</td>
+                        <td>${escapeHtml(
+                          call.failure_label ||
+                            call.sip_status_hint ||
+                            call.hangup_cause ||
+                            call.last_event_name ||
+                            "-"
+                        )}</td>
+                      </tr>`
+                  )
+                  .join("")}
+              </tbody>
+            </table>`;
+        } catch (error) {
+          callsBody.innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
+        }
+      }
+
+      function formPayload() {
+        const formData = new FormData(callForm);
+        const payload = {};
+        for (const [key, value] of formData.entries()) {
+          const text = String(value).trim();
+          if (text) payload[key] = text;
+        }
+
+        if (payload.originate_timeout_seconds) {
+          payload.originate_timeout_seconds = Number(payload.originate_timeout_seconds);
+        }
+
+        if (payload.metadata_scene) {
+          payload.metadata = { scene: payload.metadata_scene };
+          delete payload.metadata_scene;
+        }
+        return payload;
+      }
+
+      callForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        submitButton.disabled = true;
+        setBadge(currentCallBadge, "提交中", "warn");
+        try {
+          const payload = await fetchJson("/calls", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(formPayload()),
+          });
+          currentCallId = payload.call?.call_id || null;
+          hangupButton.disabled = !currentCallId;
+          setBadge(currentCallBadge, currentCallId || "已提交", "ok");
+          setResult(payload);
+          await refreshCalls();
+        } catch (error) {
+          setBadge(currentCallBadge, "提交失败", "error");
+          setResult(error.message);
+        } finally {
+          submitButton.disabled = false;
+        }
+      });
+
+      hangupButton.addEventListener("click", async () => {
+        if (!currentCallId) return;
+        hangupButton.disabled = true;
+        try {
+          const payload = await fetchJson(`/calls/${encodeURIComponent(currentCallId)}/hangup`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ cause: "NORMAL_CLEARING" }),
+          });
+          setBadge(currentCallBadge, "已请求挂断", "warn");
+          setResult(payload);
+          await refreshCalls();
+        } catch (error) {
+          hangupButton.disabled = false;
+          setBadge(currentCallBadge, "挂断失败", "error");
+          setResult(error.message);
+        }
+      });
+
+      refreshButton.addEventListener("click", async () => {
+        await Promise.all([refreshReady(), refreshCalls()]);
+      });
+
+      Promise.all([refreshReady(), refreshCalls()]);
+      window.setInterval(refreshCalls, 2500);
+    </script>
+  </body>
+</html>

@@ -1,0 +1,225 @@
+<h1>Mac 软电话接入 9199 本地测试指导</h1>
+<p>本文档用于指导同事在 macOS 上替代 MicroSIP，使用 Mac 可用的 SIP 软电话接入本地 FreeSWITCH，并验证 <code>sip-realtime-voice-gateway</code> 的 <code>9199</code> 实时语音链路。</p>
+<p>更新时间：2026-05-10</p>
+<h2>结论</h2>
+<p>Mac 适配是可行的，核心网关代码不需要因为替换 MicroSIP 而改动。</p>
+<p>从第一性原理看，本地软电话只承担一件事：作为一个标准 SIP endpoint，与 FreeSWITCH 完成 SIP 注册、呼叫建立、RTP 音频收发和 codec 协商。只要 Mac 工具满足这些协议行为，FreeSWITCH 到网关的媒体链路仍然保持：</p>
+<pre><code>Mac SIP 软电话
+  -&gt; FreeSWITCH
+  -&gt; sip-realtime-voice-gateway
+  -&gt; 实时语音模型
+  -&gt; sip-realtime-voice-gateway
+  -&gt; FreeSWITCH
+  -&gt; Mac SIP 软电话</code></pre>
+<p>因此，替换点在 FreeSWITCH 前面的软电话工具，不在网关主逻辑。</p>
+<p>适配 Mac 的过程中必须保证原有 Windows / MicroSIP 测试链路仍然可用。Mac 接入只是在本地软电话入口层新增一种客户端选择，不能通过改坏 Windows 注册、拨入 <code>9199</code>、控制面外呼或 FreeSWITCH 到网关媒体链路来换取 Mac 侧通过。</p>
+<h2>推荐工具</h2>
+<p>优先级如下：</p>
+<ol>
+<li>Linphone Desktop</li>
+</ol>
+<ul>
+<li>推荐作为首选 Mac 图形界面软电话。</li>
+<li>官方下载页显示支持 macOS、Windows、Linux 桌面客户端。</li>
+<li>下载地址：https://www.linphone.org/en/download/</li>
+</ul>
+<ol>
+<li>Zoiper</li>
+</ol>
+<ul>
+<li>推荐作为备选 Mac 图形界面软电话。</li>
+<li>官方页面显示支持 macOS、Linux、Windows、iOS、Android 和浏览器等平台。</li>
+<li>下载地址：https://www.zoiper.com/</li>
+</ul>
+<ol>
+<li>baresip</li>
+</ol>
+<ul>
+<li>推荐作为命令行/自动化验证备选。</li>
+<li>可通过 Homebrew 安装。</li>
+<li>Homebrew 页面：https://formulae.brew.sh/formula/baresip</li>
+</ul>
+<p>MicroSIP 官方定位是 Windows SIP softphone，不适合作为 Mac 同事的工具要求。官方主页：https://www.microsip.org/</p>
+<h2>当前本地测试参数</h2>
+<p>默认本地分机：</p>
+<pre><code>SIP user / extension: 1000
+Password: tenlocal1000
+SIP server: &lt;运行 FreeSWITCH Docker 的宿主机局域网 IP&gt;
+SIP port: 5060
+Transport: UDP
+Dial number: 9199
+Preferred codec: PCMA / G.711 A-law
+Sample rate: 8000 Hz
+Frame duration: 20 ms</code></pre>
+<p>如果多人同时测试，不建议共用 <code>1000</code>。可以改用 <code>1001</code>、<code>1002</code> 等 FreeSWITCH 已存在的测试分机，密码仍使用 <code>tenlocal1000</code>。控制面外呼时把 <code>destination</code> 改为对应分机号即可。</p>
+<h2>需要修改的地方</h2>
+<h3>1. FreeSWITCH 本地地址</h3>
+<p>打开：</p>
+<pre><code>freeswitch-local/conf/vars.xml</code></pre>
+<p>确认以下三项指向运行 FreeSWITCH Docker 的宿主机局域网 IP，而不是旧的历史 IP：</p>
+<pre><code>&lt;X-PRE-PROCESS cmd=&quot;set&quot; data=&quot;domain=&lt;HOST_LAN_IP&gt;&quot;/&gt;
+&lt;X-PRE-PROCESS cmd=&quot;set&quot; data=&quot;external_rtp_ip=&lt;HOST_LAN_IP&gt;&quot;/&gt;
+&lt;X-PRE-PROCESS cmd=&quot;set&quot; data=&quot;external_sip_ip=&lt;HOST_LAN_IP&gt;&quot;/&gt;</code></pre>
+<p>例如宿主机 IP 是 <code>192.168.0.165</code>：</p>
+<pre><code>&lt;X-PRE-PROCESS cmd=&quot;set&quot; data=&quot;domain=192.168.0.165&quot;/&gt;
+&lt;X-PRE-PROCESS cmd=&quot;set&quot; data=&quot;external_rtp_ip=192.168.0.165&quot;/&gt;
+&lt;X-PRE-PROCESS cmd=&quot;set&quot; data=&quot;external_sip_ip=192.168.0.165&quot;/&gt;</code></pre>
+<p>修改后重启 FreeSWITCH 容器：</p>
+<pre><code>cd freeswitch-local
+docker compose restart</code></pre>
+<h3>2. Docker 端口</h3>
+<p>确认 <code>docker-compose.yml</code> 暴露了 SIP 和 RTP 端口：</p>
+<pre><code>ports:
+  - &quot;5060:5060/tcp&quot;
+  - &quot;5060:5060/udp&quot;
+  - &quot;5080:5080/tcp&quot;
+  - &quot;5080:5080/udp&quot;
+  - &quot;18021:8021/tcp&quot;
+  - &quot;16384-16484:16384-16484/udp&quot;</code></pre>
+<p>如果 Mac 和 FreeSWITCH 不在同一台机器，Windows/macOS 防火墙要允许：</p>
+<pre><code>5060/tcp
+5060/udp
+16384-16484/udp</code></pre>
+<h3>3. Codec 收敛</h3>
+<p>当前网关的电话媒体契约是：</p>
+<pre><code>PCMA / 8000 Hz / mono / 20 ms</code></pre>
+<p>Mac 软电话里应优先启用或只启用：</p>
+<pre><code>G.711 A-law / PCMA</code></pre>
+<p>可保留 <code>G.711 u-law / PCMU</code> 作为备选，但不要优先使用 Opus、G722、G729 等宽带或压缩 codec。否则 FreeSWITCH 可能发生转码，测试结果会混入额外变量。</p>
+<p>如果希望 FreeSWITCH 侧也更确定，可以在 <code>vars.xml</code> 中把 codec 顺序收紧：</p>
+<pre><code>&lt;X-PRE-PROCESS cmd=&quot;set&quot; data=&quot;global_codec_prefs=PCMA,PCMU&quot;/&gt;
+&lt;X-PRE-PROCESS cmd=&quot;set&quot; data=&quot;outbound_codec_prefs=PCMA,PCMU&quot;/&gt;</code></pre>
+<p>修改后同样需要重启 FreeSWITCH 容器。</p>
+<h3>4. 文案泛化</h3>
+<p>代码热路径不需要改。为了避免后续误解，可以把 README、测试页和诊断文案中的 <code>MicroSIP</code> 泛化成：</p>
+<pre><code>本地软电话（MicroSIP / Linphone / Zoiper）</code></pre>
+<p>这属于文档和 UI 文案改动，不是 Mac 适配的必要条件。</p>
+<h2>Linphone 配置建议</h2>
+<p>新建 SIP 账号时按以下思路填写：</p>
+<pre><code>Username: 1000
+Display name: 1000
+SIP domain / SIP server: &lt;HOST_LAN_IP&gt;
+Password: tenlocal1000
+Transport: UDP
+Proxy: sip:&lt;HOST_LAN_IP&gt;:5060</code></pre>
+<p>音频 codec 设置：</p>
+<pre><code>Enable: PCMA / G.711 A-law
+Optional: PCMU / G.711 u-law
+Disable or lower priority: Opus, G722, G729</code></pre>
+<p>如果 Linphone 注册不上，优先检查：</p>
+<pre><code>1. Mac 和 FreeSWITCH 宿主机是否在同一局域网。
+2. SIP server 是否填写宿主机 LAN IP，而不是 Docker 容器 IP。
+3. FreeSWITCH 的 vars.xml 是否仍是旧 IP。
+4. 防火墙是否拦截 5060/udp。</code></pre>
+<h2>Zoiper 配置建议</h2>
+<p>新建 SIP 账号时按以下思路填写：</p>
+<pre><code>User / Login: 1000
+Password: tenlocal1000
+Domain / Host: &lt;HOST_LAN_IP&gt;
+Port: 5060
+Transport: UDP
+Auth username: 1000</code></pre>
+<p>音频 codec 同样优先：</p>
+<pre><code>G.711 a-law / PCMA</code></pre>
+<p>如果 Zoiper 显示账号已注册但没有声音，通常不是账号问题，而是 RTP 方向问题。优先检查：</p>
+<pre><code>1. 16384-16484/udp 是否从 Docker 映射到宿主机。
+2. 宿主机防火墙是否允许 UDP RTP。
+3. vars.xml 的 external_rtp_ip 是否是宿主机 LAN IP。
+4. Mac 是否开了 VPN 或代理导致路由绕行。</code></pre>
+<h2>baresip 命令行备选</h2>
+<p>安装：</p>
+<pre><code>brew install baresip</code></pre>
+<p>配置账号时使用：</p>
+<pre><code>sip:1000@&lt;HOST_LAN_IP&gt;;auth_pass=tenlocal1000</code></pre>
+<p>baresip 更适合排查协议层问题。它没有图形界面软电话直观，但日志更适合判断注册、INVITE、SDP 和 RTP 是否正常。</p>
+<h2>验证步骤</h2>
+<h3>A. 启动 FreeSWITCH</h3>
+<pre><code>cd freeswitch-local
+docker compose up -d --build</code></pre>
+<h3>B. 启动网关</h3>
+<pre><code>python -m app.main --config configs/local.example.toml</code></pre>
+<p>确认健康检查：</p>
+<pre><code>Invoke-RestMethod http://127.0.0.1:9100/health</code></pre>
+<h3>C. Mac 软电话注册</h3>
+<p>在 Mac 软电话里注册 <code>1000</code>。注册成功后，可以在 FreeSWITCH 容器内检查：</p>
+<pre><code>docker exec -it sip_realtime_freeswitch fs_cli -x &quot;show registrations&quot;</code></pre>
+<p>期望看到类似：</p>
+<pre><code>1000,&lt;HOST_LAN_IP&gt;,...,sofia/internal/sip:1000@&lt;MAC_IP&gt;:&lt;MAC_PORT&gt;,...</code></pre>
+<h3>D. 主动拨入验证</h3>
+<p>在 Mac 软电话拨：</p>
+<pre><code>9199</code></pre>
+<p>期望链路：</p>
+<pre><code>Mac softphone -&gt; FreeSWITCH 9199 -&gt; gateway media WebSocket -&gt; 实时语音模型 -&gt; Mac softphone</code></pre>
+<h3>E. 控制面外呼验证</h3>
+<p>浏览器打开：</p>
+<pre><code>http://127.0.0.1:9100/outbound-test</code></pre>
+<p>或使用命令：</p>
+<pre><code>Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:9100/calls `
+  -ContentType &quot;application/json&quot; `
+  -Body (@{
+    destination = &quot;1000&quot;
+    external_call_id = &quot;mac-softphone-test-001&quot;
+    caller_id_number = &quot;9000&quot;
+  } | ConvertTo-Json)</code></pre>
+<p>期望流程：</p>
+<pre><code>网关 POST /calls
+  -&gt; FreeSWITCH Event Socket originate
+  -&gt; sofia_contact */1000 解析 Mac 当前注册 Contact
+  -&gt; 呼叫 Mac 软电话
+  -&gt; Mac 接听
+  -&gt; 进入 9199
+  -&gt; 接入实时语音模型</code></pre>
+<h2>常见问题</h2>
+<h3>1. 注册失败</h3>
+<p>优先检查：</p>
+<pre><code>账号：1000
+密码：tenlocal1000
+服务器：宿主机 LAN IP，不是 127.0.0.1，也不是 Docker 容器 IP
+端口：5060
+传输：UDP</code></pre>
+<p>如果 FreeSWITCH 的 <code>vars.xml</code> 仍指向旧 IP，也会导致注册或呼叫行为异常。</p>
+<h3>2. 能注册但拨 9199 不通</h3>
+<p>检查：</p>
+<pre><code>1. FreeSWITCH 容器是否运行。
+2. 5060/udp 是否放行。
+3. 9199 拨号计划是否仍存在。
+4. 网关是否已经监听 9101 媒体端口。</code></pre>
+<p>9199 本地拨号计划应指向：</p>
+<pre><code>ws://host.docker.internal:9101/media/fs/${uuid}</code></pre>
+<h3>3. 能接通但听不到声音</h3>
+<p>这通常是 RTP 或 codec 问题，不是网关 HTTP 控制面问题。</p>
+<p>检查：</p>
+<pre><code>1. Mac 防火墙、宿主机防火墙、VPN。
+2. Docker RTP 端口 16384-16484/udp。
+3. vars.xml 的 external_rtp_ip。
+4. 软电话 codec 是否使用 PCMA。</code></pre>
+<h3>4. 外呼返回 USER_BUSY</h3>
+<p>含义通常是对端忙线或拒接。处理：</p>
+<pre><code>1. 确认 Mac 软电话没有占线。
+2. 发起外呼后及时接听。
+3. 不要同时在多个设备上共用同一个 1000 分机测试。
+4. 主叫号码保持 9000，不要用 1000 呼叫 1000。</code></pre>
+<h3>5. 外呼返回 NORMAL_TEMPORARY_FAILURE</h3>
+<p>常见原因是 Contact 瞬时不可达、NAT 或软电话注册状态陈旧。处理：</p>
+<pre><code>1. 重新注册软电话账号。
+2. 重启 Mac 软电话。
+3. 检查 show registrations 中的 Contact 是否是 Mac 当前 IP。
+4. 检查 Mac 是否切换了网络、VPN 或热点。</code></pre>
+<h2>验收标准</h2>
+<p>一次 Mac 软电话适配可以认为通过，需要满足：</p>
+<pre><code>1. Mac 软电话成功注册到 FreeSWITCH。
+2. show registrations 能看到对应分机和 Mac 当前 Contact。
+3. Mac 主动拨 9199 可以进入 AI 实时语音链路。
+4. POST /calls destination=1000 可以呼叫到 Mac 软电话。
+5. 接听后能进入 9199，并听到模型回复。
+6. Windows / MicroSIP 原有链路仍然可以注册、拨入 9199，并通过控制面外呼接通。
+7. 日志中没有持续的 codec、RTP、Event Socket 或 media WebSocket 错误。</code></pre>
+<h2>不建议改的地方</h2>
+<p>Mac 软电话替换不应引发以下改动：</p>
+<pre><code>1. 不要重写网关 SIP/RTP 协议栈。
+2. 不要绕过 FreeSWITCH 直接让软电话连网关。
+3. 不要修改 Doubao S2S、Playout Engine、打断控制主逻辑。
+4. 不要把 phone_codec 从 PCMA 改成 Opus/G722 来迎合某个软电话默认配置。</code></pre>
+<p>软电话只是本地测试入口。真实商用上线时，这个入口会继续被 SIP trunk 或企业中继替换，接通后的 <code>9199 -&gt; sip-realtime-voice-gateway -&gt; 实时语音模型</code> 主链路应保持稳定。</p>

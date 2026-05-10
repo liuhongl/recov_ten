@@ -1,0 +1,831 @@
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import os
+import re
+import threading
+import time
+import uuid
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import Any
+
+from .config import GatewayConfig, OutboundCallConfig
+from .freeswitch_event_socket import (
+    ChannelStateEvent,
+    EventSocketError,
+    FreeSwitchEventSocketClient,
+)
+
+LOGGER = logging.getLogger(__name__)
+
+SAFE_TOKEN_RE = re.compile(r"^[^\s{},]+$")
+
+
+class CallControlError(ValueError):
+    def __init__(self, message: str, *, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+@dataclass(frozen=True)
+class CreateCallRequest:
+    destination: str
+    external_call_id: str | None = None
+    endpoint: str | None = None
+    dialplan_extension: str | None = None
+    dialplan_context: str | None = None
+    caller_id_name: str | None = None
+    caller_id_number: str | None = None
+    originate_timeout_seconds: int | None = None
+    context: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class OutboundCallRecord:
+    call_id: str
+    destination: str
+    endpoint: str
+    dialplan_extension: str
+    dialplan_context: str
+    caller_id_name: str
+    caller_id_number: str
+    originate_timeout_seconds: int
+    external_call_id: str | None = None
+    context: dict[str, Any] = field(default_factory=dict)
+    status: str = "queued"
+    created_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
+    updated_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
+    started_at_ms: int | None = None
+    completed_at_ms: int | None = None
+    originate_completed_at_ms: int | None = None
+    ringing_at_ms: int | None = None
+    answered_at_ms: int | None = None
+    media_connected_at_ms: int | None = None
+    media_disconnected_at_ms: int | None = None
+    freeswitch_reply: str | None = None
+    error: str | None = None
+    requested_endpoint: str | None = None
+    hangup_cause: str | None = None
+    sip_status: str | None = None
+    sip_reason: str | None = None
+    last_event_name: str | None = None
+    last_event_at_ms: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        diagnostics = _build_call_diagnostics(self)
+        return {
+            "call_id": self.call_id,
+            "external_call_id": self.external_call_id,
+            "destination": self.destination,
+            "endpoint": self.endpoint,
+            "requested_endpoint": self.requested_endpoint,
+            "dialplan_extension": self.dialplan_extension,
+            "dialplan_context": self.dialplan_context,
+            "caller_id_name": self.caller_id_name,
+            "caller_id_number": self.caller_id_number,
+            "originate_timeout_seconds": self.originate_timeout_seconds,
+            "context": self.context,
+            "status": self.status,
+            "created_at_ms": self.created_at_ms,
+            "updated_at_ms": self.updated_at_ms,
+            "started_at_ms": self.started_at_ms,
+            "completed_at_ms": self.completed_at_ms,
+            "originate_completed_at_ms": self.originate_completed_at_ms,
+            "ringing_at_ms": self.ringing_at_ms,
+            "answered_at_ms": self.answered_at_ms,
+            "media_connected_at_ms": self.media_connected_at_ms,
+            "media_disconnected_at_ms": self.media_disconnected_at_ms,
+            "freeswitch_reply": self.freeswitch_reply,
+            "error": self.error,
+            "hangup_cause": self.hangup_cause,
+            "sip_status": self.sip_status,
+            "sip_reason": self.sip_reason,
+            "last_event_name": self.last_event_name,
+            "last_event_at_ms": self.last_event_at_ms,
+            **diagnostics,
+        }
+
+
+class FreeSwitchOutboundDialer:
+    def __init__(self, config: GatewayConfig) -> None:
+        self.config = config
+
+    async def originate(self, command: str) -> str:
+        client = self._make_client()
+        try:
+            await client.connect()
+            return await client.api(command)
+        finally:
+            await client.close()
+
+    async def resolve_endpoint(self, endpoint: str) -> str:
+        if not endpoint.startswith("sofia_contact:"):
+            return endpoint
+
+        query = endpoint.removeprefix("sofia_contact:").strip()
+        _require_safe_token(query, "endpoint")
+        client = self._make_client()
+        try:
+            await client.connect()
+            reply = (await client.api(f"sofia_contact {query}")).strip()
+        finally:
+            await client.close()
+
+        if not reply or reply.startswith(("error/", "-ERR")):
+            raise CallControlError(
+                f"could not resolve FreeSWITCH contact for {query}: {reply}",
+                status_code=503,
+            )
+        return reply
+
+    async def hangup(self, call_id: str, *, cause: str) -> str:
+        client = self._make_client()
+        try:
+            await client.connect()
+            return await client.api(f"uuid_kill {call_id} {cause}")
+        finally:
+            await client.close()
+
+    def _make_client(self) -> FreeSwitchEventSocketClient:
+        event_socket = self.config.event_socket
+        password = os.getenv(event_socket.password_env, "")
+        if not password:
+            raise CallControlError(
+                f"missing Event Socket password env: {event_socket.password_env}",
+                status_code=503,
+            )
+        return FreeSwitchEventSocketClient(
+            host=event_socket.host,
+            port=event_socket.port,
+            password=password,
+        )
+
+
+DialerFactory = Callable[[], FreeSwitchOutboundDialer]
+
+
+class OutboundCallManager:
+    def __init__(
+        self,
+        config: GatewayConfig,
+        *,
+        dialer_factory: DialerFactory | None = None,
+    ) -> None:
+        self.config = config
+        self._dialer_factory = dialer_factory or (lambda: FreeSwitchOutboundDialer(config))
+        self._calls: dict[str, OutboundCallRecord] = {}
+        self._lock = threading.RLock()
+        self._executor = ThreadPoolExecutor(
+            max_workers=4,
+            thread_name_prefix="outbound-call-control",
+        )
+        self._event_stop = threading.Event()
+        self._event_future = None
+
+    def start(self) -> None:
+        if self._event_future is not None:
+            return
+        if not self.config.outbound.enabled or not self.config.event_socket.enabled:
+            return
+        self._event_stop.clear()
+        self._event_future = self._executor.submit(self._run_event_listener_worker)
+
+    def shutdown(self) -> None:
+        self._event_stop.set()
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+    def create_call(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.config.outbound.enabled:
+            raise CallControlError("outbound calls are disabled", status_code=503)
+        if not self.config.event_socket.enabled:
+            raise CallControlError(
+                "FreeSWITCH Event Socket is disabled; outbound calls require it",
+                status_code=503,
+            )
+
+        request = parse_create_call_request(payload)
+        record = self._build_record(request)
+        with self._lock:
+            self._calls[record.call_id] = record
+            self._trim_locked()
+
+        self._executor.submit(self._run_originate_worker, record.call_id)
+        LOGGER.info(
+            "outbound_call_queued call_id=%s destination=%s endpoint=%s",
+            record.call_id,
+            record.destination,
+            record.endpoint,
+        )
+        return record.to_dict()
+
+    def list_calls(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock:
+            records = sorted(
+                self._calls.values(),
+                key=lambda call: call.created_at_ms,
+                reverse=True,
+            )
+            return [record.to_dict() for record in records[:limit]]
+
+    def get_call(self, call_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            record = self._calls.get(call_id)
+            return None if record is None else record.to_dict()
+
+    def handle_channel_event(self, event: ChannelStateEvent) -> None:
+        with self._lock:
+            record = self._calls.get(event.call_id)
+            if record is None:
+                return
+            self._apply_channel_event_locked(record, event)
+
+    def mark_media_connected(self, call_id: str) -> None:
+        with self._lock:
+            record = self._calls.get(call_id)
+            if record is None or _is_terminal_status(record.status):
+                return
+            now_ms = _now_ms()
+            record.media_connected_at_ms = record.media_connected_at_ms or now_ms
+            self._set_status_locked(record, "media_connected")
+
+    def mark_media_disconnected(self, call_id: str) -> None:
+        with self._lock:
+            record = self._calls.get(call_id)
+            if record is None:
+                return
+            record.media_disconnected_at_ms = record.media_disconnected_at_ms or _now_ms()
+            record.updated_at_ms = _now_ms()
+
+    def request_hangup(self, call_id: str, *, cause: str = "NORMAL_CLEARING") -> dict[str, Any]:
+        _require_safe_token(cause, "cause")
+        with self._lock:
+            record = self._calls.get(call_id)
+            if record is None:
+                raise CallControlError("call not found", status_code=404)
+            self._set_status_locked(record, "hangup_requested")
+
+        self._executor.submit(self._run_hangup_worker, call_id, cause)
+        return record.to_dict()
+
+    def _build_record(self, request: CreateCallRequest) -> OutboundCallRecord:
+        outbound = self.config.outbound
+        destination = request.destination
+        endpoint = request.endpoint or _render_endpoint_template(
+            outbound.endpoint_template,
+            destination,
+        )
+        call_id = uuid.uuid4().hex
+        caller_id_name = request.caller_id_name or outbound.caller_id_name
+        caller_id_number = request.caller_id_number or outbound.caller_id_number
+        _require_safe_token(caller_id_name, "caller_id_name")
+        _require_safe_token(caller_id_number, "caller_id_number")
+        _require_safe_token(outbound.dialplan_extension, "dialplan_extension")
+        _require_safe_token(outbound.dialplan_context, "dialplan_context")
+
+        return OutboundCallRecord(
+            call_id=call_id,
+            external_call_id=request.external_call_id,
+            destination=destination,
+            endpoint=endpoint,
+            requested_endpoint=endpoint,
+            dialplan_extension=(
+                request.dialplan_extension or outbound.dialplan_extension
+            ),
+            dialplan_context=request.dialplan_context or outbound.dialplan_context,
+            caller_id_name=caller_id_name,
+            caller_id_number=caller_id_number,
+            originate_timeout_seconds=(
+                request.originate_timeout_seconds
+                or outbound.originate_timeout_seconds
+            ),
+            context=request.context,
+        )
+
+    def _run_originate_worker(self, call_id: str) -> None:
+        try:
+            asyncio.run(self._originate(call_id))
+        except Exception:
+            LOGGER.exception("outbound_call_worker_failed call_id=%s", call_id)
+            self._mark_failed(call_id, "internal outbound call worker error")
+
+    def _run_event_listener_worker(self) -> None:
+        try:
+            asyncio.run(self._event_listener_loop())
+        except Exception:
+            LOGGER.exception("outbound_call_event_listener_stopped")
+
+    async def _event_listener_loop(self) -> None:
+        while not self._event_stop.is_set():
+            client: FreeSwitchEventSocketClient | None = None
+            try:
+                client = _make_event_socket_client(self.config)
+                await client.connect()
+                await client.subscribe_channel_events()
+                LOGGER.info("outbound_call_event_listener_started")
+                while not self._event_stop.is_set():
+                    try:
+                        event = await asyncio.wait_for(
+                            client.read_channel_event(),
+                            timeout=0.5,
+                        )
+                    except TimeoutError:
+                        continue
+                    self.handle_channel_event(event)
+            except (OSError, EOFError, EventSocketError, CallControlError):
+                LOGGER.warning(
+                    "outbound_call_event_listener_reconnect",
+                    exc_info=True,
+                )
+                await _sleep_unless_stopped(self._event_stop, 1.0)
+            finally:
+                if client is not None:
+                    with contextlib.suppress(Exception):
+                        await client.close()
+
+    async def _originate(self, call_id: str) -> None:
+        with self._lock:
+            record = self._calls[call_id]
+            self._set_status_locked(record, "originating")
+            record.started_at_ms = _now_ms()
+
+        dialer = self._dialer_factory()
+        try:
+            resolved_endpoint = await dialer.resolve_endpoint(record.endpoint)
+        except CallControlError as err:
+            with self._lock:
+                record = self._calls[call_id]
+                record.error = str(err)
+                record.completed_at_ms = _now_ms()
+                self._set_status_locked(record, "failed")
+            LOGGER.info(
+                "outbound_call_endpoint_resolve_failed call_id=%s endpoint=%s error=%s",
+                call_id,
+                record.endpoint,
+                err,
+            )
+            return
+
+        with self._lock:
+            record = self._calls[call_id]
+            if resolved_endpoint != record.endpoint:
+                record.endpoint = resolved_endpoint
+            command = build_originate_command(record)
+
+        LOGGER.info("outbound_call_originate_started call_id=%s", call_id)
+        reply = await dialer.originate(command)
+        stripped = reply.strip()
+        with self._lock:
+            record = self._calls[call_id]
+            record.freeswitch_reply = stripped
+            if stripped.startswith("-ERR"):
+                record.error = stripped
+                record.hangup_cause = _extract_failure_cause(stripped)
+                record.completed_at_ms = _now_ms()
+                self._set_status_locked(record, "failed")
+            else:
+                if record.status in {"originating", "queued"}:
+                    self._set_status_locked(record, "originated")
+            record.originate_completed_at_ms = _now_ms()
+        LOGGER.info(
+            "outbound_call_originate_finished call_id=%s status=%s reply=%s",
+            call_id,
+            self._calls[call_id].status,
+            stripped,
+        )
+
+    def _run_hangup_worker(self, call_id: str, cause: str) -> None:
+        try:
+            asyncio.run(self._hangup(call_id, cause=cause))
+        except Exception:
+            LOGGER.exception("outbound_call_hangup_worker_failed call_id=%s", call_id)
+            self._mark_failed(call_id, "internal hangup worker error")
+
+    async def _hangup(self, call_id: str, *, cause: str) -> None:
+        reply = await self._dialer_factory().hangup(call_id, cause=cause)
+        stripped = reply.strip()
+        with self._lock:
+            record = self._calls.get(call_id)
+            if record is None:
+                return
+            record.freeswitch_reply = stripped
+            if stripped.startswith("-ERR"):
+                record.error = stripped
+                if "No such channel" in stripped:
+                    record.completed_at_ms = record.completed_at_ms or _now_ms()
+                self._set_status_locked(record, "hangup_failed")
+            else:
+                self._set_status_locked(record, "hangup_sent")
+
+    def _mark_failed(self, call_id: str, error: str) -> None:
+        with self._lock:
+            record = self._calls.get(call_id)
+            if record is None:
+                return
+            record.error = error
+            record.completed_at_ms = record.completed_at_ms or _now_ms()
+            self._set_status_locked(record, "failed")
+
+    def _apply_channel_event_locked(
+        self,
+        record: OutboundCallRecord,
+        event: ChannelStateEvent,
+    ) -> None:
+        now_ms = _now_ms()
+        record.last_event_name = event.name
+        record.last_event_at_ms = now_ms
+        if event.hangup_cause:
+            record.hangup_cause = event.hangup_cause
+        if event.sip_status:
+            record.sip_status = event.sip_status
+        if event.sip_reason:
+            record.sip_reason = event.sip_reason
+
+        if _is_terminal_status(record.status):
+            record.updated_at_ms = now_ms
+            return
+
+        if event.name in {"CHANNEL_PROGRESS", "CHANNEL_PROGRESS_MEDIA"}:
+            record.ringing_at_ms = record.ringing_at_ms or now_ms
+            if record.status in {"queued", "originating", "originated"}:
+                self._set_status_locked(record, "ringing")
+            return
+
+        if event.name == "CHANNEL_ANSWER":
+            record.answered_at_ms = record.answered_at_ms or now_ms
+            if record.status in {"queued", "originating", "originated", "ringing"}:
+                self._set_status_locked(record, "answered")
+            return
+
+        if event.name in {"CHANNEL_HANGUP", "CHANNEL_HANGUP_COMPLETE"}:
+            record.completed_at_ms = record.completed_at_ms or now_ms
+            self._set_status_locked(record, _terminal_status_for_cause(record))
+
+    def _set_status_locked(self, record: OutboundCallRecord, status: str) -> None:
+        record.status = status
+        record.updated_at_ms = _now_ms()
+
+    def _trim_locked(self) -> None:
+        max_recent_calls = max(1, self.config.outbound.max_recent_calls)
+        if len(self._calls) <= max_recent_calls:
+            return
+        records = sorted(self._calls.values(), key=lambda call: call.created_at_ms)
+        for record in records[: len(self._calls) - max_recent_calls]:
+            self._calls.pop(record.call_id, None)
+
+
+def parse_create_call_request(payload: dict[str, Any]) -> CreateCallRequest:
+    if not isinstance(payload, dict):
+        raise CallControlError("request body must be a JSON object")
+
+    destination = _required_str(payload, "destination")
+    _require_safe_token(destination, "destination")
+
+    endpoint = _optional_str(payload, "endpoint")
+    if endpoint is not None:
+        _require_safe_token(endpoint, "endpoint")
+
+    dialplan_extension = _optional_str(payload, "dialplan_extension")
+    if dialplan_extension is not None:
+        _require_safe_token(dialplan_extension, "dialplan_extension")
+
+    dialplan_context = _optional_str(payload, "dialplan_context")
+    if dialplan_context is not None:
+        _require_safe_token(dialplan_context, "dialplan_context")
+
+    timeout = _optional_int(payload, "originate_timeout_seconds")
+    if timeout is not None and not 1 <= timeout <= 300:
+        raise CallControlError("originate_timeout_seconds must be between 1 and 300")
+
+    context = payload.get("context", {})
+    if context is None:
+        context = {}
+    if not isinstance(context, dict):
+        raise CallControlError("context must be a JSON object")
+
+    return CreateCallRequest(
+        destination=destination,
+        external_call_id=_optional_safe_str(payload, "external_call_id"),
+        endpoint=endpoint,
+        dialplan_extension=dialplan_extension,
+        dialplan_context=dialplan_context,
+        caller_id_name=_optional_safe_str(payload, "caller_id_name"),
+        caller_id_number=_optional_safe_str(payload, "caller_id_number"),
+        originate_timeout_seconds=timeout,
+        context=context,
+    )
+
+
+def build_originate_command(record: OutboundCallRecord) -> str:
+    variables = {
+        "origination_uuid": record.call_id,
+        "origination_caller_id_name": record.caller_id_name,
+        "origination_caller_id_number": record.caller_id_number,
+        "originate_timeout": str(record.originate_timeout_seconds),
+        "hangup_after_bridge": "true",
+        "sip_realtime_gateway_call_id": record.call_id,
+    }
+    if record.external_call_id:
+        variables["sip_realtime_external_call_id"] = record.external_call_id
+
+    return (
+        f"originate {_format_originate_variables(variables)}{record.endpoint} "
+        f"{record.dialplan_extension} XML {record.dialplan_context}"
+    )
+
+
+def _make_event_socket_client(config: GatewayConfig) -> FreeSwitchEventSocketClient:
+    event_socket = config.event_socket
+    password = os.getenv(event_socket.password_env, "")
+    if not password:
+        raise CallControlError(
+            f"missing Event Socket password env: {event_socket.password_env}",
+            status_code=503,
+        )
+    return FreeSwitchEventSocketClient(
+        host=event_socket.host,
+        port=event_socket.port,
+        password=password,
+    )
+
+
+async def _sleep_unless_stopped(stop_event: threading.Event, seconds: float) -> None:
+    deadline = time.monotonic() + seconds
+    while not stop_event.is_set() and time.monotonic() < deadline:
+        await asyncio.sleep(0.1)
+
+
+def _build_call_diagnostics(record: OutboundCallRecord) -> dict[str, Any]:
+    hangup_cause = record.hangup_cause or _extract_failure_cause(record.error)
+    failure_reason = _failure_reason(record, hangup_cause)
+    failure = _failure_details(failure_reason)
+    return {
+        "phase": _phase(record.status, hangup_cause),
+        "phase_label": _phase_label(record.status, hangup_cause),
+        "failure_reason": failure_reason,
+        "failure_label": failure["label"],
+        "failure_hint": failure["hint"],
+        "sip_status_hint": failure["sip_status_hint"],
+        "elapsed_ms": _elapsed_ms(record),
+        "originate_elapsed_ms": _duration_ms(
+            record.started_at_ms,
+            record.originate_completed_at_ms,
+        ),
+        "answer_latency_ms": _duration_ms(record.started_at_ms, record.answered_at_ms),
+        "ringing_ms": _ringing_ms(record),
+        "talk_duration_ms": _talk_duration_ms(record),
+    }
+
+
+def _extract_failure_cause(value: str | None) -> str | None:
+    if not value:
+        return None
+    stripped = value.strip()
+    if stripped.startswith("-ERR "):
+        return stripped.removeprefix("-ERR ").strip() or None
+    if stripped.startswith("+OK"):
+        return None
+    return stripped or None
+
+
+def _failure_reason(record: OutboundCallRecord, cause: str | None) -> str | None:
+    if cause == "NORMAL_CLEARING" and record.status == "completed":
+        return None
+    return cause
+
+
+def _failure_details(cause: str | None) -> dict[str, str | None]:
+    if cause == "USER_BUSY":
+        return {
+            "label": "对端忙线或拒接",
+            "hint": "软电话或线路已收到 INVITE，但返回忙线/拒接；本地测试时确认 Linphone、Zoiper 或 MicroSIP 未占线，点发起后及时接听。",
+            "sip_status_hint": "486",
+        }
+    if cause == "CALL_REJECTED":
+        return {
+            "label": "对端拒接",
+            "hint": "被叫端明确拒绝本次呼叫；真实线路下应结合运营商 CDR 或 SIP trace 确认。",
+            "sip_status_hint": "603",
+        }
+    if cause == "NORMAL_TEMPORARY_FAILURE":
+        return {
+            "label": "临时失败",
+            "hint": "通常是 SIP 503 或本地 NAT/软电话 Contact 瞬时不可用；刷新软电话注册或重启客户端后重试。",
+            "sip_status_hint": "503",
+        }
+    if cause == "USER_NOT_REGISTERED":
+        return {
+            "label": "用户未注册",
+            "hint": "本地分机或真实线路目标不可达；确认分机注册、SIP trunk 路由和拨号格式。",
+            "sip_status_hint": "404",
+        }
+    if cause == "NO_ANSWER":
+        return {
+            "label": "无人接听",
+            "hint": "外呼已送达但在超时时间内未接听。",
+            "sip_status_hint": None,
+        }
+    if cause == "ORIGINATOR_CANCEL":
+        return {
+            "label": "主叫取消",
+            "hint": "外呼流程被网关或调用方取消。",
+            "sip_status_hint": None,
+        }
+    if cause == "NORMAL_CLEARING":
+        return {"label": None, "hint": None, "sip_status_hint": None}
+    if cause:
+        return {
+            "label": cause,
+            "hint": "查看 FreeSWITCH SIP trace 或运营商 CDR 确认最终 SIP 返回码。",
+            "sip_status_hint": None,
+        }
+    return {"label": None, "hint": None, "sip_status_hint": None}
+
+
+def _phase(status: str, cause: str | None) -> str:
+    if status in {"failed", "busy", "no_answer", "canceled"}:
+        if cause == "USER_BUSY":
+            return "busy"
+        if cause == "CALL_REJECTED":
+            return "busy"
+        if cause == "NORMAL_TEMPORARY_FAILURE":
+            return "temporary_failure"
+        if cause == "NO_ANSWER":
+            return "no_answer"
+        if cause == "ORIGINATOR_CANCEL":
+            return "canceled"
+        if status != "failed":
+            return status
+        return "failed"
+    if status == "queued":
+        return "queued"
+    if status == "originating":
+        return "dialing"
+    if status == "ringing":
+        return "ringing"
+    if status == "originated":
+        return "answered"
+    if status == "answered":
+        return "answered"
+    if status == "media_connected":
+        return "media_connected"
+    if status == "completed":
+        return "completed"
+    if status == "media_disconnected":
+        return "media_disconnected"
+    if status == "hangup_requested":
+        return "hangup_requested"
+    if status == "hangup_sent":
+        return "hangup_sent"
+    if status == "hangup_failed":
+        return "hangup_failed"
+    return status
+
+
+def _phase_label(status: str, cause: str | None) -> str:
+    phase = _phase(status, cause)
+    labels = {
+        "queued": "已排队",
+        "dialing": "呼叫中",
+        "ringing": "振铃中",
+        "answered": "已接通",
+        "media_connected": "AI 媒体已接入",
+        "media_disconnected": "媒体已断开",
+        "completed": "已结束",
+        "busy": "忙线/拒接",
+        "temporary_failure": "临时失败",
+        "no_answer": "无人接听",
+        "canceled": "已取消",
+        "failed": "失败",
+        "hangup_requested": "挂断中",
+        "hangup_sent": "已发送挂断",
+        "hangup_failed": "挂断失败",
+    }
+    return labels.get(phase, status)
+
+
+def _elapsed_ms(record: OutboundCallRecord) -> int | None:
+    started_at_ms = record.started_at_ms or record.created_at_ms
+    ended_at_ms = record.completed_at_ms
+    if ended_at_ms is None:
+        if record.status not in {"failed"}:
+            ended_at_ms = _now_ms()
+        else:
+            return None
+    return max(0, ended_at_ms - started_at_ms)
+
+
+def _duration_ms(started_at_ms: int | None, ended_at_ms: int | None) -> int | None:
+    if started_at_ms is None or ended_at_ms is None:
+        return None
+    return max(0, ended_at_ms - started_at_ms)
+
+
+def _ringing_ms(record: OutboundCallRecord) -> int | None:
+    if record.ringing_at_ms is None:
+        return None
+    ended_at_ms = record.answered_at_ms or record.completed_at_ms
+    if ended_at_ms is None and not _is_terminal_status(record.status):
+        ended_at_ms = _now_ms()
+    return _duration_ms(record.ringing_at_ms, ended_at_ms)
+
+
+def _talk_duration_ms(record: OutboundCallRecord) -> int | None:
+    if record.answered_at_ms is None:
+        return None
+    ended_at_ms = record.completed_at_ms
+    if ended_at_ms is None and not _is_terminal_status(record.status):
+        ended_at_ms = _now_ms()
+    return _duration_ms(record.answered_at_ms, ended_at_ms)
+
+
+def _terminal_status_for_cause(record: OutboundCallRecord) -> str:
+    cause = record.hangup_cause or _extract_failure_cause(record.error)
+    if cause in {None, "NORMAL_CLEARING"}:
+        return "completed" if record.answered_at_ms or record.media_connected_at_ms else "canceled"
+    if cause in {"USER_BUSY", "CALL_REJECTED"}:
+        return "busy"
+    if cause == "NO_ANSWER":
+        return "no_answer"
+    if cause == "ORIGINATOR_CANCEL":
+        return "canceled"
+    return "failed"
+
+
+def _is_terminal_status(status: str) -> bool:
+    return status in {
+        "completed",
+        "failed",
+        "busy",
+        "no_answer",
+        "canceled",
+        "hangup_failed",
+    }
+
+
+def _format_originate_variables(variables: dict[str, str]) -> str:
+    parts = []
+    for key, value in variables.items():
+        _require_safe_token(key, key)
+        parts.append(f"{key}={_escape_variable_value(value)}")
+    return "{" + ",".join(parts) + "}"
+
+
+def _escape_variable_value(value: str) -> str:
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace(",", "\\,")
+        .replace("{", "\\{")
+        .replace("}", "\\}")
+    )
+
+
+def _required_str(payload: dict[str, Any], name: str) -> str:
+    value = _optional_str(payload, name)
+    if value is None:
+        raise CallControlError(f"{name} is required")
+    return value
+
+
+def _optional_str(payload: dict[str, Any], name: str) -> str | None:
+    value = payload.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise CallControlError(f"{name} must be a string")
+    value = value.strip()
+    return value or None
+
+
+def _optional_safe_str(payload: dict[str, Any], name: str) -> str | None:
+    value = _optional_str(payload, name)
+    if value is not None:
+        _require_safe_token(value, name)
+    return value
+
+
+def _render_endpoint_template(template: str, destination: str) -> str:
+    return template.replace("{destination}", destination)
+
+
+def _optional_int(payload: dict[str, Any], name: str) -> int | None:
+    value = payload.get(name)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as err:
+        raise CallControlError(f"{name} must be an integer") from err
+
+
+def _require_safe_token(value: str, name: str) -> None:
+    if not SAFE_TOKEN_RE.match(value):
+        raise CallControlError(f"{name} contains unsupported characters")
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)

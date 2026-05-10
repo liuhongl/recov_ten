@@ -6,6 +6,7 @@ import json
 from app.freeswitch_event_socket import (
     EventSocketMessage,
     FreeSwitchEventSocketClient,
+    parse_channel_event,
     parse_playback_event,
 )
 
@@ -53,8 +54,35 @@ def test_parse_queue_completed_playback_event():
     assert event.is_queue_completed is True
 
 
+def test_parse_channel_hangup_complete_event():
+    event = parse_channel_event(
+        EventSocketMessage(
+            headers={"Content-Type": "text/event-plain"},
+            body=(
+                "Event-Name: CHANNEL_HANGUP_COMPLETE\n"
+                "Unique-ID: call-1\n"
+                "variable_sip_realtime_gateway_call_id: call-1\n"
+                "Hangup-Cause: NORMAL_CLEARING\n"
+                "variable_sip_term_status: 200\n"
+                "\n"
+            ),
+        )
+    )
+
+    assert event is not None
+    assert event.name == "CHANNEL_HANGUP_COMPLETE"
+    assert event.call_id == "call-1"
+    assert event.unique_id == "call-1"
+    assert event.hangup_cause == "NORMAL_CLEARING"
+    assert event.sip_status == "200"
+
+
 def test_event_socket_client_subscribes_reads_event_and_breaks():
     asyncio.run(_assert_event_socket_client_roundtrip())
+
+
+def test_event_socket_client_subscribes_channel_events():
+    asyncio.run(_assert_event_socket_client_channel_event())
 
 
 async def _assert_event_socket_client_roundtrip() -> None:
@@ -131,6 +159,76 @@ async def _assert_event_socket_client_roundtrip() -> None:
         assert event.remaining == 0
 
         assert await client.break_audio_stream("uuid-1") is True
+        await asyncio.wait_for(done.wait(), timeout=1)
+        await client.close()
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def _assert_event_socket_client_channel_event() -> None:
+    done = asyncio.Event()
+
+    async def handle_client(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        writer.write(b"Content-Type: auth/request\n\n")
+        await writer.drain()
+
+        assert await _read_command(reader) == "auth test-pass"
+        writer.write(
+            b"Content-Type: command/reply\n"
+            b"Reply-Text: +OK accepted\n\n"
+        )
+        await writer.drain()
+
+        assert (
+            await _read_command(reader)
+            == (
+                "event plain CHANNEL_CREATE CHANNEL_PROGRESS "
+                "CHANNEL_PROGRESS_MEDIA CHANNEL_ANSWER CHANNEL_HANGUP "
+                "CHANNEL_HANGUP_COMPLETE"
+            )
+        )
+        writer.write(
+            b"Content-Type: command/reply\n"
+            b"Reply-Text: +OK event listener enabled plain\n\n"
+        )
+        await writer.drain()
+
+        event_body = (
+            "Event-Name: CHANNEL_ANSWER\n"
+            "Unique-ID: call-1\n"
+            "variable_sip_realtime_gateway_call_id: call-1\n"
+            "\n"
+        ).encode("utf-8")
+        writer.write(
+            b"Content-Type: text/event-plain\n"
+            + f"Content-Length: {len(event_body)}\n\n".encode("utf-8")
+            + event_body
+        )
+        await writer.drain()
+
+        writer.close()
+        await writer.wait_closed()
+        done.set()
+
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    try:
+        port = server.sockets[0].getsockname()[1]
+        client = FreeSwitchEventSocketClient(
+            host="127.0.0.1",
+            port=port,
+            password="test-pass",
+        )
+        await client.connect()
+        await client.subscribe_channel_events()
+
+        event = await asyncio.wait_for(client.read_channel_event(), timeout=1)
+        assert event.call_id == "call-1"
+        assert event.name == "CHANNEL_ANSWER"
+
         await asyncio.wait_for(done.wait(), timeout=1)
         await client.close()
     finally:

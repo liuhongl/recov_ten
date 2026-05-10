@@ -14,6 +14,14 @@ from .config import EventSocketConfig
 LOGGER = logging.getLogger(__name__)
 
 PLAYBACK_EVENT_SUBCLASS = "mod_audio_stream::playback"
+CHANNEL_EVENT_NAMES = (
+    "CHANNEL_CREATE",
+    "CHANNEL_PROGRESS",
+    "CHANNEL_PROGRESS_MEDIA",
+    "CHANNEL_ANSWER",
+    "CHANNEL_HANGUP",
+    "CHANNEL_HANGUP_COMPLETE",
+)
 DEFAULT_HEADER_LIMIT_BYTES = 65536
 
 
@@ -40,6 +48,17 @@ class PlaybackProgressEvent:
     @property
     def is_queue_completed(self) -> bool:
         return self.event == "queue_completed" or self.remaining == 0
+
+
+@dataclass(frozen=True)
+class ChannelStateEvent:
+    name: str
+    call_id: str
+    unique_id: str | None = None
+    hangup_cause: str | None = None
+    sip_status: str | None = None
+    sip_reason: str | None = None
+    raw: dict[str, str] | None = None
 
 
 PlaybackEventHandler = Callable[
@@ -107,6 +126,14 @@ class FreeSwitchEventSocketClient:
                 f"could not subscribe FreeSWITCH playback events: {_reply_text(reply)}"
             )
 
+    async def subscribe_channel_events(self) -> None:
+        await self._send_command("event plain " + " ".join(CHANNEL_EVENT_NAMES))
+        reply = await self.read_message()
+        if not _command_ok(reply):
+            raise EventSocketError(
+                f"could not subscribe FreeSWITCH channel events: {_reply_text(reply)}"
+            )
+
     async def api(self, command: str) -> str:
         await self._send_command(f"api {command}")
         while True:
@@ -126,6 +153,13 @@ class FreeSwitchEventSocketClient:
         while True:
             message = await self.read_message()
             event = parse_playback_event(message)
+            if event is not None:
+                return event
+
+    async def read_channel_event(self) -> ChannelStateEvent:
+        while True:
+            message = await self.read_message()
+            event = parse_channel_event(message)
             if event is not None:
                 return event
 
@@ -321,6 +355,68 @@ def parse_playback_event(
         remaining=_optional_int(payload.get("remaining")),
         total_chunks=_optional_int(payload.get("total_chunks")),
         raw=payload,
+    )
+
+
+def parse_channel_event(
+    message: EventSocketMessage,
+) -> ChannelStateEvent | None:
+    outer_content_type = _get_header(message.headers, "Content-Type")
+    if outer_content_type == "text/event-plain":
+        event_headers, _event_body = parse_plain_event_body(message.body)
+    else:
+        event_headers = message.headers
+
+    event_name = _get_header(event_headers, "Event-Name")
+    if event_name not in CHANNEL_EVENT_NAMES:
+        return None
+
+    unique_id = _first_header(
+        event_headers,
+        "Unique-ID",
+        "Channel-Unique-ID",
+        "Channel-Call-UUID",
+        "Call-UUID",
+    )
+    call_id = _first_header(
+        event_headers,
+        "variable_sip_realtime_gateway_call_id",
+        "variable_origination_uuid",
+        "variable_uuid",
+        "Unique-ID",
+        "Channel-Unique-ID",
+        "Channel-Call-UUID",
+        "Call-UUID",
+    )
+    if not call_id:
+        return None
+
+    return ChannelStateEvent(
+        name=event_name,
+        call_id=call_id,
+        unique_id=unique_id,
+        hangup_cause=_first_header(
+            event_headers,
+            "Hangup-Cause",
+            "variable_hangup_cause",
+            "variable_originate_disposition",
+            "variable_proto_specific_hangup_cause",
+        ),
+        sip_status=_first_header(
+            event_headers,
+            "variable_sip_term_status",
+            "variable_sip_invite_failure_status",
+            "variable_sip_response_code",
+            "variable_sip_hangup_disposition",
+        ),
+        sip_reason=_first_header(
+            event_headers,
+            "variable_sip_term_cause",
+            "variable_sip_invite_failure_phrase",
+            "variable_sip_hangup_phrase",
+            "variable_proto_specific_hangup_cause",
+        ),
+        raw=event_headers,
     )
 
 

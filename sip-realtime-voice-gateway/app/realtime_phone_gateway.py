@@ -21,6 +21,13 @@ from .freeswitch_event_socket import (
     PlaybackProgressEvent,
 )
 from .media_contract import PhoneMediaContract
+from .playout_controller import (
+    PlayoutController,
+    PlayoutControllerConfig,
+    PlayoutDecision,
+    PlayoutPacingMode,
+    PlayoutPacingState,
+)
 from .realtime_types import (
     DEFAULT_INPUT_SAMPLE_RATE,
     DEFAULT_OUTPUT_SAMPLE_RATE,
@@ -108,6 +115,9 @@ class RealtimePhoneSessionStats:
     max_playback_queue_frames: int = 0
     max_playback_send_gap_ms: int = 0
     playback_send_gap_overruns: int = 0
+    playback_fast_send_frames: int = 0
+    playback_realtime_send_frames: int = 0
+    playback_pacing_switches: int = 0
     flushed_tail_frames: int = 0
     tail_silence_frames: int = 0
     freeswitch_playback_events: int = 0
@@ -182,6 +192,10 @@ class RealtimePhoneSessionStats:
     model_done_turns: set[int] = field(default_factory=set, repr=False)
     freeswitch_completed_turns: set[int] = field(default_factory=set, repr=False)
     jitter_prefilled_turns: set[int] = field(default_factory=set, repr=False)
+    playout_pacing_states: dict[int, PlayoutPacingState] = field(
+        default_factory=dict,
+        repr=False,
+    )
     recent_input_frames_16k: deque[bytes] = field(default_factory=deque, repr=False)
     repair_replay_frames_16k: deque[bytes] = field(default_factory=deque, repr=False)
     realtime_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
@@ -235,21 +249,19 @@ class FreeSwitchRealtimeGatewayServer:
             raise ValueError(
                 "playback.tail_silence_ms must align to frame_duration_ms"
             )
-        if config.playback.send_interval_ms <= 0:
-            raise ValueError("playback.send_interval_ms must be positive")
-        if config.playback.send_interval_ms > self.frame_duration_ms:
-            raise ValueError(
-                "playback.send_interval_ms must be less than or equal to "
-                "frame_duration_ms"
-            )
-        self.playback_send_interval_ms = config.playback.send_interval_ms
         self.playback_prefill_frames = max(
             1,
             config.playback.jitter_buffer_ms // self.frame_duration_ms,
         )
-        self.playback_fast_send_watermark_frames = max(
-            1,
-            self.playback_prefill_frames // 2,
+        self.playout_controller = PlayoutController(
+            PlayoutControllerConfig(
+                frame_duration_ms=self.frame_duration_ms,
+                fast_send_interval_ms=config.playback.send_interval_ms,
+                prefill_frames=self.playback_prefill_frames,
+            )
+        )
+        self.playback_send_interval_ms = (
+            self.playout_controller.fast_send_interval_ms
         )
         self.replay_frame_limit = max(
             1,
@@ -297,7 +309,8 @@ class FreeSwitchRealtimeGatewayServer:
             "server_vad_threshold=%s server_vad_silence_duration_ms=%s "
             "playback_jitter_buffer_ms=%s playback_tail_silence_ms=%s "
             "playback_send_interval_ms=%s playback_prefill_frames=%s "
-            "playback_fast_send_watermark_frames=%s "
+            "playback_low_watermark_frames=%s "
+            "playback_high_watermark_frames=%s "
             "event_socket_enabled=%s",
             self._address[0],
             self._address[1],
@@ -319,7 +332,8 @@ class FreeSwitchRealtimeGatewayServer:
             self.config.playback.tail_silence_ms,
             self.playback_send_interval_ms,
             self.playback_prefill_frames,
-            self.playback_fast_send_watermark_frames,
+            self.playout_controller.low_watermark_frames,
+            self.playout_controller.high_watermark_frames,
             self.config.event_socket.enabled,
         )
 
@@ -913,7 +927,8 @@ class FreeSwitchRealtimeGatewayServer:
         session.outbound_frames += 1
         session.outbound_bytes += len(item.payload)
         session.turn_last_playback_at[item.turn_id] = send_started_at
-        await asyncio.sleep(self._playback_sleep_interval_ms(session) / 1000)
+        decision = self._playback_pacing_decision(session, item.turn_id)
+        await asyncio.sleep(decision.interval_ms / 1000)
         session.playback_active = False
 
         if not self._has_playback(session):
@@ -941,15 +956,26 @@ class FreeSwitchRealtimeGatewayServer:
                     session.playback_underruns,
                 )
 
-    def _playback_sleep_interval_ms(
+    def _playback_pacing_decision(
         self,
         session: RealtimePhoneSessionStats,
-    ) -> int:
-        if self.playback_send_interval_ms >= self.frame_duration_ms:
-            return self.frame_duration_ms
-        if session.playback_queue.qsize() >= self.playback_fast_send_watermark_frames:
-            return self.playback_send_interval_ms
-        return self.frame_duration_ms
+        turn_id: int,
+    ) -> PlayoutDecision:
+        state = session.playout_pacing_states.setdefault(
+            turn_id,
+            self.playout_controller.new_state(),
+        )
+        decision = self.playout_controller.decide(
+            state,
+            queued_frames=session.playback_queue.qsize(),
+        )
+        if decision.mode == PlayoutPacingMode.FAST:
+            session.playback_fast_send_frames += 1
+        else:
+            session.playback_realtime_send_frames += 1
+        if decision.switched:
+            session.playback_pacing_switches += 1
+        return decision
 
     def _commit_played_turn(
         self,
@@ -1060,6 +1086,7 @@ class FreeSwitchRealtimeGatewayServer:
         session.model_done_turns.discard(turn_id)
         session.freeswitch_completed_turns.discard(turn_id)
         session.jitter_prefilled_turns.discard(turn_id)
+        session.playout_pacing_states.pop(turn_id, None)
         return True
 
     def _waits_for_freeswitch_playback_completion(self) -> bool:
@@ -1120,6 +1147,7 @@ class FreeSwitchRealtimeGatewayServer:
         session.model_done_turns.clear()
         session.freeswitch_completed_turns.clear()
         session.jitter_prefilled_turns.clear()
+        session.playout_pacing_states.clear()
         session.playback_active = False
         realtime_session = self._realtime_sessions.get(session.session_id)
         await asyncio.gather(
@@ -1369,7 +1397,9 @@ class FreeSwitchRealtimeGatewayServer:
             "invalid_frame_count=%s interruptions=%s dropped_playback_frames=%s "
             "dropped_stale_frames=%s playback_underruns=%s "
             "max_playback_queue_frames=%s max_playback_send_gap_ms=%s "
-            "playback_send_gap_overruns=%s flushed_tail_frames=%s "
+            "playback_send_gap_overruns=%s playback_fast_send_frames=%s "
+            "playback_realtime_send_frames=%s playback_pacing_switches=%s "
+            "flushed_tail_frames=%s "
             "tail_silence_frames=%s "
             "freeswitch_playback_events=%s freeswitch_queue_completed_events=%s "
             "freeswitch_break_requests=%s freeswitch_break_failures=%s "
@@ -1395,6 +1425,9 @@ class FreeSwitchRealtimeGatewayServer:
             session.max_playback_queue_frames,
             session.max_playback_send_gap_ms,
             session.playback_send_gap_overruns,
+            session.playback_fast_send_frames,
+            session.playback_realtime_send_frames,
+            session.playback_pacing_switches,
             session.flushed_tail_frames,
             session.tail_silence_frames,
             session.freeswitch_playback_events,

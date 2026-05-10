@@ -135,7 +135,7 @@ FREESWITCH_ESL_PASSWORD=ClueCon
 FREESWITCH_ESL_PASSWORD_ENV=FREESWITCH_ESL_PASSWORD
 ```
 
-本地卡顿排查时重点看 `playback_send_gap_overruns` 和 `max_playback_send_gap_ms`。默认播放配置为：
+本地卡顿排查时重点看 `playback_send_gap_overruns`、`max_playback_send_gap_ms`、`playback_underruns`、`playback_fast_send_frames`、`playback_realtime_send_frames` 和 `playback_pacing_switches`。默认播放配置为：
 
 ```toml
 [playback]
@@ -296,7 +296,7 @@ TTSFinished / event=359 才能作为本轮 TTS 音频完成信号。
 
 当前根因修复是两层一起成立：模型层用 `TTSFinished / 359` 判断模型输出结束，播放层用 FreeSWITCH `chunk_played remaining=0` / `queue_completed` 判断电话侧真实播放完成。只有两者都满足，且本地播放队列已清空，assistant turn 才能写入 committed history。
 
-最新卡顿分析显示，旧内容串入问题已被 P6 修复，但电话听感仍可能受下行发送抖动影响。电话侧每帧是 20ms / 320 bytes，若网关也严格 20ms 发一次，Python 事件循环偶发延迟就会让 FreeSWITCH 播放端缺少缓冲。当前配置把 `playback.send_interval_ms` 设为 `10`：本地播放队列高水位时用 10ms 间隔快发，给 `mod_audio_stream` 建立少量播放缓冲；队列低水位时回到 20ms 实时节奏，避免把模型尚未产出的后半段用静音顶掉。`queue_completed` 已接入，所以 assistant turn 是否进入 committed history 仍以 FreeSWITCH 真实播放完成为准。
+最新卡顿分析显示，旧内容串入问题已被 P6 修复，但电话听感仍可能受下行发送抖动影响。电话侧每帧是 20ms / 320 bytes，若网关也严格 20ms 发一次，Python 事件循环偶发延迟就会让 FreeSWITCH 播放端缺少缓冲。当前播放节奏由 `PlayoutController` 统一控制：本地播放队列达到高水位时用 10ms 间隔快发，给 `mod_audio_stream` 建立少量播放缓冲；队列降到低水位时回到 20ms 实时节奏，避免把模型尚未产出的后半段用静音顶掉。控制器使用迟滞水位，避免在 10ms / 20ms 之间频繁抖动。`queue_completed` 已接入，所以 assistant turn 是否进入 committed history 仍以 FreeSWITCH 真实播放完成为准。
 
 ## 数据格式目标
 

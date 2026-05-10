@@ -288,6 +288,8 @@ async def _assert_realtime_phone_gateway_does_not_emit_silence_on_lag() -> None:
 
     assert websocket.sent == [b"\x01" * 320]
     assert session.playback_underruns == 1
+    assert session.playback_realtime_send_frames == 1
+    assert session.playback_fast_send_frames == 0
     assert session.playback_queue.empty()
 
 

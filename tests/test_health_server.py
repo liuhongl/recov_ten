@@ -110,6 +110,9 @@ def test_outbound_test_page_is_served():
         assert "真实商用时替换" in body
         assert 'id="callerNumber"' in body
         assert 'value="9000"' in body
+        assert 'id="callerName"' in body
+        assert 'value="AI_Assistant"' in body
+        assert 'value="AI Agent"' not in body
         assert "POST /calls" in body
         assert 'class="workspace"' in body
         assert body.index('class="system-panel"') < body.index('class="workspace"')

@@ -24,15 +24,44 @@ class FreeSwitchConfig:
     media_port: int = 9101
     sample_rate: int = 8000
     phone_codec: str = "PCMA"
+    channels: int = 1
+    frame_duration_ms: int = 20
     echo_mode: str = "raw"
 
 
 @dataclass(frozen=True)
-class RealtimeConfig:
-    provider: str = "aliyun"
-    url: str = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
-    model: str = "qwen3.5-omni-plus-realtime"
-    voice: str = "Ethan"
+class EventSocketConfig:
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = 18021
+    password_env: str = "FREESWITCH_ESL_PASSWORD"
+
+
+@dataclass(frozen=True)
+class DoubaoS2SConfig:
+    app_id_env: str = "DOUBAO_S2S_APP_ID"
+    access_token_env: str = "DOUBAO_S2S_ACCESS_TOKEN"
+    app_key_env: str = "DOUBAO_S2S_APP_KEY"
+    resource_id: str = "volc.speech.dialog"
+    websocket_url: str = "wss://openspeech.bytedance.com/api/v3/realtime/dialogue"
+    speaker: str = "zh_female_vv_jupiter_bigtts"
+    output_sample_rate: int = 24000
+
+
+@dataclass(frozen=True)
+class ServerVadConfig:
+    type: str = "server_vad"
+    threshold: float = 0.5
+    prefix_padding_ms: int = 300
+    silence_duration_ms: int = 800
+    create_response: bool = True
+    interrupt_response: bool = True
+
+
+@dataclass(frozen=True)
+class PlaybackConfig:
+    jitter_buffer_ms: int = 240
+    tail_silence_ms: int = 300
 
 
 @dataclass(frozen=True)
@@ -58,7 +87,10 @@ class GatewayConfig:
     server: ServerConfig = ServerConfig()
     logging: LoggingConfig = LoggingConfig()
     freeswitch: FreeSwitchConfig = FreeSwitchConfig()
-    realtime: RealtimeConfig = RealtimeConfig()
+    event_socket: EventSocketConfig = EventSocketConfig()
+    doubao_s2s: DoubaoS2SConfig = DoubaoS2SConfig()
+    server_vad: ServerVadConfig = ServerVadConfig()
+    playback: PlaybackConfig = PlaybackConfig()
     vad: VadConfig = VadConfig()
     features: FeatureConfig = FeatureConfig()
 
@@ -98,6 +130,18 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
                 "phone_codec",
                 default=FreeSwitchConfig.phone_codec,
             ),
+            channels=_get_int(
+                raw,
+                "freeswitch",
+                "channels",
+                default=FreeSwitchConfig.channels,
+            ),
+            frame_duration_ms=_get_int(
+                raw,
+                "freeswitch",
+                "frame_duration_ms",
+                default=FreeSwitchConfig.frame_duration_ms,
+            ),
             echo_mode=_get(
                 raw,
                 "freeswitch",
@@ -105,16 +149,122 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
                 default=FreeSwitchConfig.echo_mode,
             ),
         ),
-        realtime=RealtimeConfig(
-            provider=_get(
+        event_socket=EventSocketConfig(
+            enabled=_get_bool(
                 raw,
-                "realtime",
-                "provider",
-                default=RealtimeConfig.provider,
+                "event_socket",
+                "enabled",
+                default=EventSocketConfig.enabled,
             ),
-            url=_get(raw, "realtime", "url", default=RealtimeConfig.url),
-            model=_get(raw, "realtime", "model", default=RealtimeConfig.model),
-            voice=_get(raw, "realtime", "voice", default=RealtimeConfig.voice),
+            host=_get(
+                raw,
+                "event_socket",
+                "host",
+                default=EventSocketConfig.host,
+            ),
+            port=_get_int(
+                raw,
+                "event_socket",
+                "port",
+                default=EventSocketConfig.port,
+            ),
+            password_env=_get(
+                raw,
+                "event_socket",
+                "password_env",
+                default=EventSocketConfig.password_env,
+            ),
+        ),
+        doubao_s2s=DoubaoS2SConfig(
+            app_id_env=_get(
+                raw,
+                "doubao_s2s",
+                "app_id_env",
+                default=DoubaoS2SConfig.app_id_env,
+            ),
+            access_token_env=_get(
+                raw,
+                "doubao_s2s",
+                "access_token_env",
+                default=DoubaoS2SConfig.access_token_env,
+            ),
+            app_key_env=_get(
+                raw,
+                "doubao_s2s",
+                "app_key_env",
+                default=DoubaoS2SConfig.app_key_env,
+            ),
+            resource_id=_get(
+                raw,
+                "doubao_s2s",
+                "resource_id",
+                default=DoubaoS2SConfig.resource_id,
+            ),
+            websocket_url=_get(
+                raw,
+                "doubao_s2s",
+                "websocket_url",
+                default=DoubaoS2SConfig.websocket_url,
+            ),
+            speaker=_get(
+                raw,
+                "doubao_s2s",
+                "speaker",
+                default=DoubaoS2SConfig.speaker,
+            ),
+            output_sample_rate=_get_int(
+                raw,
+                "doubao_s2s",
+                "output_sample_rate",
+                default=DoubaoS2SConfig.output_sample_rate,
+            ),
+        ),
+        server_vad=ServerVadConfig(
+            type=_get(raw, "server_vad", "type", default=ServerVadConfig.type),
+            threshold=_get_float(
+                raw,
+                "server_vad",
+                "threshold",
+                default=ServerVadConfig.threshold,
+            ),
+            prefix_padding_ms=_get_int(
+                raw,
+                "server_vad",
+                "prefix_padding_ms",
+                default=ServerVadConfig.prefix_padding_ms,
+            ),
+            silence_duration_ms=_get_int(
+                raw,
+                "server_vad",
+                "silence_duration_ms",
+                default=ServerVadConfig.silence_duration_ms,
+            ),
+            create_response=_get_bool(
+                raw,
+                "server_vad",
+                "create_response",
+                default=ServerVadConfig.create_response,
+            ),
+            interrupt_response=_get_bool(
+                raw,
+                "server_vad",
+                "interrupt_response",
+                default=ServerVadConfig.interrupt_response,
+            ),
+        ),
+        playback=PlaybackConfig(
+            jitter_buffer_ms=_get_int(
+                raw,
+                "playback",
+                "jitter_buffer_ms",
+                default=PlaybackConfig.jitter_buffer_ms,
+            ),
+            tail_silence_ms=_get_int(
+                raw,
+                "playback",
+                "tail_silence_ms",
+                default=PlaybackConfig.tail_silence_ms,
+            ),
         ),
         vad=VadConfig(
             speech_rms_threshold=_get_int(
@@ -181,7 +331,9 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
             ),
         ),
     )
-    return _apply_env_overrides(config)
+    config = _apply_env_overrides(config)
+    _validate_media_contract(config.freeswitch)
+    return config
 
 
 def _load_toml(path: str | Path | None) -> dict[str, Any]:
@@ -222,6 +374,20 @@ def _get_int(
         return int(value)
     except (TypeError, ValueError) as err:
         raise ValueError(f"{section}.{name} must be an integer") from err
+
+
+def _get_float(
+    raw: dict[str, Any],
+    section: str,
+    name: str,
+    *,
+    default: float,
+) -> float:
+    value = raw.get(section, {}).get(name, default)
+    try:
+        return float(value)
+    except (TypeError, ValueError) as err:
+        raise ValueError(f"{section}.{name} must be a float") from err
 
 
 def _get_bool(
@@ -270,16 +436,93 @@ def _apply_env_overrides(config: GatewayConfig) -> GatewayConfig:
                 config.freeswitch.sample_rate,
             ),
             phone_codec=os.getenv("PHONE_CODEC", config.freeswitch.phone_codec),
+            channels=_env_int("FREESWITCH_CHANNELS", config.freeswitch.channels),
+            frame_duration_ms=_env_int(
+                "FREESWITCH_FRAME_DURATION_MS",
+                config.freeswitch.frame_duration_ms,
+            ),
             echo_mode=os.getenv(
                 "FREESWITCH_ECHO_MODE",
                 config.freeswitch.echo_mode,
             ),
         ),
-        realtime=RealtimeConfig(
-            provider=os.getenv("REALTIME_MODEL_PROVIDER", config.realtime.provider),
-            url=os.getenv("ALIYUN_REALTIME_URL", config.realtime.url),
-            model=os.getenv("ALIYUN_REALTIME_MODEL", config.realtime.model),
-            voice=os.getenv("ALIYUN_REALTIME_VOICE", config.realtime.voice),
+        event_socket=EventSocketConfig(
+            enabled=_env_bool(
+                "FREESWITCH_ESL_ENABLED",
+                config.event_socket.enabled,
+            ),
+            host=os.getenv(
+                "FREESWITCH_ESL_HOST",
+                config.event_socket.host,
+            ),
+            port=_env_int(
+                "FREESWITCH_ESL_PORT",
+                config.event_socket.port,
+            ),
+            password_env=os.getenv(
+                "FREESWITCH_ESL_PASSWORD_ENV",
+                config.event_socket.password_env,
+            ),
+        ),
+        doubao_s2s=DoubaoS2SConfig(
+            app_id_env=os.getenv(
+                "DOUBAO_S2S_APP_ID_ENV",
+                config.doubao_s2s.app_id_env,
+            ),
+            access_token_env=os.getenv(
+                "DOUBAO_S2S_ACCESS_TOKEN_ENV",
+                config.doubao_s2s.access_token_env,
+            ),
+            app_key_env=os.getenv(
+                "DOUBAO_S2S_APP_KEY_ENV",
+                config.doubao_s2s.app_key_env,
+            ),
+            resource_id=os.getenv(
+                "DOUBAO_S2S_RESOURCE_ID",
+                config.doubao_s2s.resource_id,
+            ),
+            websocket_url=os.getenv(
+                "DOUBAO_S2S_WS_URL",
+                config.doubao_s2s.websocket_url,
+            ),
+            speaker=os.getenv(
+                "DOUBAO_S2S_SPEAKER",
+                config.doubao_s2s.speaker,
+            ),
+            output_sample_rate=_env_int(
+                "DOUBAO_S2S_OUTPUT_SAMPLE_RATE",
+                config.doubao_s2s.output_sample_rate,
+            ),
+        ),
+        server_vad=ServerVadConfig(
+            type=os.getenv("SERVER_VAD_TYPE", config.server_vad.type),
+            threshold=_env_float("SERVER_VAD_THRESHOLD", config.server_vad.threshold),
+            prefix_padding_ms=_env_int(
+                "SERVER_VAD_PREFIX_PADDING_MS",
+                config.server_vad.prefix_padding_ms,
+            ),
+            silence_duration_ms=_env_int(
+                "SERVER_VAD_SILENCE_DURATION_MS",
+                config.server_vad.silence_duration_ms,
+            ),
+            create_response=_env_bool(
+                "SERVER_VAD_CREATE_RESPONSE",
+                config.server_vad.create_response,
+            ),
+            interrupt_response=_env_bool(
+                "SERVER_VAD_INTERRUPT_RESPONSE",
+                config.server_vad.interrupt_response,
+            ),
+        ),
+        playback=PlaybackConfig(
+            jitter_buffer_ms=_env_int(
+                "PLAYBACK_JITTER_BUFFER_MS",
+                config.playback.jitter_buffer_ms,
+            ),
+            tail_silence_ms=_env_int(
+                "PLAYOUT_TAIL_SILENCE_MS",
+                config.playback.tail_silence_ms,
+            ),
         ),
         vad=VadConfig(
             speech_rms_threshold=_env_int(
@@ -338,8 +581,24 @@ def _env_int(name: str, default: int) -> int:
         raise ValueError(f"{name} must be an integer") from err
 
 
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError as err:
+        raise ValueError(f"{name} must be a float") from err
+
+
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
         return default
     return _parse_bool(value, name)
+
+
+def _validate_media_contract(config: FreeSwitchConfig) -> None:
+    from .media_contract import build_realtime_phone_contract
+
+    build_realtime_phone_contract(config)

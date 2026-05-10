@@ -13,6 +13,7 @@ from websockets.legacy.server import WebSocketServer, WebSocketServerProtocol, s
 
 from .audio_codec import resample_pcm_s16le_mono
 from .config import FreeSwitchConfig
+from .media_contract import PhoneMediaContract
 
 LOGGER = logging.getLogger(__name__)
 
@@ -42,15 +43,22 @@ class FreeSwitchMediaEchoServer:
         self,
         config: FreeSwitchConfig,
         *,
-        frame_duration_ms: int = 20,
+        frame_duration_ms: int | None = None,
     ) -> None:
         self.config = config
-        self.frame_duration_ms = frame_duration_ms
+        self.frame_duration_ms = (
+            frame_duration_ms
+            if frame_duration_ms is not None
+            else config.frame_duration_ms
+        )
         if config.echo_mode not in {"raw", "resample_16k_roundtrip"}:
             raise ValueError(f"unsupported freeswitch echo_mode: {config.echo_mode}")
-        self.expected_frame_bytes = (
-            config.sample_rate * frame_duration_ms // 1000 * 2
+        self.contract = PhoneMediaContract.from_config(
+            config,
+            frame_duration_ms=self.frame_duration_ms,
         )
+        self.contract.validate_realtime_phone_contract()
+        self.expected_frame_bytes = self.contract.pcm_frame_bytes
         self._server: WebSocketServer | None = None
         self._address: tuple[str, int] = (config.media_host, config.media_port)
         self.active_sessions: dict[str, MediaSessionStats] = {}
@@ -73,12 +81,16 @@ class FreeSwitchMediaEchoServer:
 
         LOGGER.info(
             "freeswitch_media_echo_started host=%s port=%s sample_rate=%s "
-            "frame_duration_ms=%s expected_frame_bytes=%s echo_mode=%s",
+            "frame_duration_ms=%s channels=%s phone_codec=%s "
+            "expected_frame_bytes=%s encoded_payload_bytes=%s echo_mode=%s",
             self._address[0],
             self._address[1],
-            self.config.sample_rate,
+            self.contract.sample_rate,
             self.frame_duration_ms,
+            self.contract.channels,
+            self.contract.codec,
             self.expected_frame_bytes,
+            self.contract.encoded_payload_bytes,
             self.config.echo_mode,
         )
 

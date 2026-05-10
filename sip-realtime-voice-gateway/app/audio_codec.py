@@ -52,6 +52,16 @@ def samples_to_pcm_s16le(samples: Iterable[int | float]) -> bytes:
     )
 
 
+def float32le_to_pcm_s16le(pcm_float32: bytes) -> bytes:
+    if len(pcm_float32) % 4 != 0:
+        raise ValueError("float32 PCM byte length must be divisible by 4")
+    if not pcm_float32:
+        return b""
+
+    samples = struct.unpack(f"<{len(pcm_float32) // 4}f", pcm_float32)
+    return samples_to_pcm_s16le(_float_sample_to_int16(sample) for sample in samples)
+
+
 def resample_pcm_s16le_mono(
     pcm: bytes,
     source_rate: int,
@@ -227,3 +237,13 @@ def _validate_positive_int(value: int, name: str) -> None:
 
 def _clamp_int16(value: int | float) -> int:
     return min(INT16_MAX, max(INT16_MIN, int(value)))
+
+
+def _float_sample_to_int16(value: float) -> int:
+    if math.isnan(value):
+        return 0
+    if value <= -1.0:
+        return INT16_MIN
+    if value >= 1.0:
+        return INT16_MAX
+    return round(value * INT16_MAX)

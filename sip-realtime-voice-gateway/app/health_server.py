@@ -60,9 +60,12 @@ class HealthServer:
                                 "server": asdict(config.server),
                                 "freeswitch": asdict(config.freeswitch),
                                 "realtime": {
-                                    "provider": config.realtime.provider,
-                                    "model": config.realtime.model,
-                                    "voice": config.realtime.voice,
+                                    "provider": "doubao_s2s",
+                                    "resource_id": config.doubao_s2s.resource_id,
+                                    "speaker": config.doubao_s2s.speaker,
+                                    "output_sample_rate": (
+                                        config.doubao_s2s.output_sample_rate
+                                    ),
                                 },
                                 "features": asdict(config.features),
                             },
@@ -91,4 +94,3 @@ class HealthServer:
                 self.wfile.write(body)
 
         return Handler
-

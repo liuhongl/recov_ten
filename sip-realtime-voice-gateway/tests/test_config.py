@@ -24,13 +24,36 @@ def test_load_config_from_toml(tmp_path):
             media_port = 9101
             sample_rate = 8000
             phone_codec = "PCMA"
+            channels = 1
+            frame_duration_ms = 20
             echo_mode = "resample_16k_roundtrip"
 
-            [realtime]
-            provider = "aliyun"
-            url = "wss://example.test/realtime"
-            model = "qwen3.5-omni-plus-realtime"
-            voice = "Cherry"
+            [event_socket]
+            enabled = true
+            host = "127.0.0.1"
+            port = 18021
+            password_env = "TEST_ESL_PASSWORD"
+
+            [doubao_s2s]
+            app_id_env = "TEST_DOUBAO_APP_ID"
+            access_token_env = "TEST_DOUBAO_ACCESS_TOKEN"
+            app_key_env = "TEST_DOUBAO_APP_KEY"
+            resource_id = "volc.speech.dialog"
+            websocket_url = "wss://example.test/doubao"
+            speaker = "zh_female_vv_jupiter_bigtts"
+            output_sample_rate = 24000
+
+            [server_vad]
+            type = "server_vad"
+            threshold = 0.7
+            prefix_padding_ms = 400
+            silence_duration_ms = 1200
+            create_response = true
+            interrupt_response = false
+
+            [playback]
+            jitter_buffer_ms = 320
+            tail_silence_ms = 280
 
             [vad]
             speech_rms_threshold = 400
@@ -56,8 +79,26 @@ def test_load_config_from_toml(tmp_path):
     assert config.server.port == 9999
     assert config.logging.level == "DEBUG"
     assert config.freeswitch.sample_rate == 8000
+    assert config.freeswitch.channels == 1
+    assert config.freeswitch.frame_duration_ms == 20
     assert config.freeswitch.echo_mode == "resample_16k_roundtrip"
-    assert config.realtime.model == "qwen3.5-omni-plus-realtime"
+    assert config.event_socket.enabled is True
+    assert config.event_socket.host == "127.0.0.1"
+    assert config.event_socket.port == 18021
+    assert config.event_socket.password_env == "TEST_ESL_PASSWORD"
+    assert config.doubao_s2s.app_id_env == "TEST_DOUBAO_APP_ID"
+    assert config.doubao_s2s.access_token_env == "TEST_DOUBAO_ACCESS_TOKEN"
+    assert config.doubao_s2s.app_key_env == "TEST_DOUBAO_APP_KEY"
+    assert config.doubao_s2s.resource_id == "volc.speech.dialog"
+    assert config.doubao_s2s.websocket_url == "wss://example.test/doubao"
+    assert config.doubao_s2s.speaker == "zh_female_vv_jupiter_bigtts"
+    assert config.doubao_s2s.output_sample_rate == 24000
+    assert config.server_vad.threshold == 0.7
+    assert config.server_vad.prefix_padding_ms == 400
+    assert config.server_vad.silence_duration_ms == 1200
+    assert config.server_vad.interrupt_response is False
+    assert config.playback.jitter_buffer_ms == 320
+    assert config.playback.tail_silence_ms == 280
     assert config.vad.speech_rms_threshold == 400
     assert config.vad.end_silence_ms == 700
     assert config.vad.barge_in_enabled is True
@@ -67,9 +108,22 @@ def test_load_config_from_toml(tmp_path):
 
 def test_environment_overrides(monkeypatch):
     monkeypatch.setenv("GATEWAY_PORT", "9200")
-    monkeypatch.setenv("FREESWITCH_SAMPLE_RATE", "16000")
+    monkeypatch.setenv("FREESWITCH_SAMPLE_RATE", "8000")
+    monkeypatch.setenv("FREESWITCH_CHANNELS", "1")
+    monkeypatch.setenv("FREESWITCH_FRAME_DURATION_MS", "20")
     monkeypatch.setenv("FREESWITCH_ECHO_MODE", "resample_16k_roundtrip")
-    monkeypatch.setenv("ALIYUN_REALTIME_MODEL", "test-model")
+    monkeypatch.setenv("FREESWITCH_ESL_ENABLED", "true")
+    monkeypatch.setenv("FREESWITCH_ESL_HOST", "127.0.0.2")
+    monkeypatch.setenv("FREESWITCH_ESL_PORT", "19021")
+    monkeypatch.setenv("FREESWITCH_ESL_PASSWORD_ENV", "LOCAL_ESL_PASSWORD")
+    monkeypatch.setenv("DOUBAO_S2S_SPEAKER", "env-speaker")
+    monkeypatch.setenv("DOUBAO_S2S_WS_URL", "wss://env.example.test/doubao")
+    monkeypatch.setenv("DOUBAO_S2S_OUTPUT_SAMPLE_RATE", "24000")
+    monkeypatch.setenv("SERVER_VAD_THRESHOLD", "0.6")
+    monkeypatch.setenv("SERVER_VAD_SILENCE_DURATION_MS", "2000")
+    monkeypatch.setenv("SERVER_VAD_INTERRUPT_RESPONSE", "false")
+    monkeypatch.setenv("PLAYBACK_JITTER_BUFFER_MS", "400")
+    monkeypatch.setenv("PLAYOUT_TAIL_SILENCE_MS", "360")
     monkeypatch.setenv("VAD_END_SILENCE_MS", "600")
     monkeypatch.setenv("VAD_BARGE_IN_ENABLED", "true")
     monkeypatch.setenv("METRICS_ENABLED", "false")
@@ -77,9 +131,22 @@ def test_environment_overrides(monkeypatch):
     config = load_config()
 
     assert config.server.port == 9200
-    assert config.freeswitch.sample_rate == 16000
+    assert config.freeswitch.sample_rate == 8000
+    assert config.freeswitch.channels == 1
+    assert config.freeswitch.frame_duration_ms == 20
     assert config.freeswitch.echo_mode == "resample_16k_roundtrip"
-    assert config.realtime.model == "test-model"
+    assert config.event_socket.enabled is True
+    assert config.event_socket.host == "127.0.0.2"
+    assert config.event_socket.port == 19021
+    assert config.event_socket.password_env == "LOCAL_ESL_PASSWORD"
+    assert config.doubao_s2s.speaker == "env-speaker"
+    assert config.doubao_s2s.websocket_url == "wss://env.example.test/doubao"
+    assert config.doubao_s2s.output_sample_rate == 24000
+    assert config.server_vad.threshold == 0.6
+    assert config.server_vad.silence_duration_ms == 2000
+    assert config.server_vad.interrupt_response is False
+    assert config.playback.jitter_buffer_ms == 400
+    assert config.playback.tail_silence_ms == 360
     assert config.vad.end_silence_ms == 600
     assert config.vad.barge_in_enabled is True
     assert config.features.metrics_enabled is False
@@ -90,3 +157,22 @@ def test_invalid_boolean_env(monkeypatch):
 
     with pytest.raises(ValueError, match="METRICS_ENABLED"):
         load_config()
+
+
+def test_rejects_non_pcma_media_contract(tmp_path):
+    config_file = tmp_path / "bad.toml"
+    config_file.write_text(
+        textwrap.dedent(
+            """
+            [freeswitch]
+            sample_rate = 16000
+            phone_codec = "PCMA"
+            channels = 1
+            frame_duration_ms = 20
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="sample_rate=8000"):
+        load_config(config_file)

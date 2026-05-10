@@ -26,6 +26,15 @@ def test_freeswitch_media_supports_resample_echo_mode():
     asyncio.run(_assert_resample_echo_roundtrip())
 
 
+def test_freeswitch_media_rejects_non_target_contract():
+    try:
+        FreeSwitchMediaEchoServer(FreeSwitchConfig(sample_rate=16000))
+    except ValueError as err:
+        assert "sample_rate=8000" in str(err)
+    else:
+        raise AssertionError("non-target media contract was not rejected")
+
+
 async def _assert_binary_echo_roundtrip() -> None:
     server = FreeSwitchMediaEchoServer(
         FreeSwitchConfig(media_host="127.0.0.1", media_port=0),

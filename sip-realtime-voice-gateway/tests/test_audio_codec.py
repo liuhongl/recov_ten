@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import math
+import struct
 
 import pytest
 
 from app.audio_codec import (
+    float32le_to_pcm_s16le,
     pcma_to_pcm_s16le,
     pcm_s16le_frame_bytes,
     pcm_s16le_rms,
@@ -97,6 +99,12 @@ def test_pcma_roundtrip_preserves_frame_shape():
     assert len(encoded) == 160
     assert len(decoded) == 320
     assert _peak_abs(decoded) > 10000
+
+
+def test_float32le_to_pcm_s16le_converts_normalized_samples():
+    pcm = float32le_to_pcm_s16le(struct.pack("<ffff", -1.0, -0.5, 0.5, 1.0))
+
+    assert pcm_s16le_to_samples(pcm) == [-32768, -16384, 16384, 32767]
 
 
 def _sine_pcm(sample_rate: int, duration_ms: int, frequency_hz: int) -> bytes:

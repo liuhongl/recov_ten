@@ -6,9 +6,9 @@ from collections.abc import Awaitable, Callable
 from websockets.legacy.client import connect
 
 from app.audio_codec import samples_to_pcm_s16le
-from app.config import FreeSwitchConfig, GatewayConfig, VadConfig
-from app.realtime_client import RealtimeTurnResult
+from app.config import FreeSwitchConfig, GatewayConfig, PlaybackConfig, VadConfig
 from app.realtime_phone_gateway import FreeSwitchRealtimeGatewayServer
+from app.realtime_types import RealtimeTurnResult
 
 
 def test_realtime_phone_gateway_plays_model_audio_back_to_client():
@@ -19,12 +19,20 @@ def test_realtime_phone_gateway_clears_playback_on_user_interrupt():
     asyncio.run(_assert_realtime_phone_gateway_interrupts_playback())
 
 
+def test_realtime_phone_gateway_replays_interrupt_audio_after_hot_restart():
+    asyncio.run(_assert_realtime_phone_gateway_replays_after_hot_restart())
+
+
+def test_realtime_phone_gateway_appends_tail_silence_after_turn_done():
+    asyncio.run(_assert_realtime_phone_gateway_appends_tail_silence())
+
+
 async def _assert_realtime_phone_gateway_roundtrip() -> None:
-    fake_session = FakeRealtimeSession(samples_to_pcm_s16le([1600] * 480))
+    fake_session = FakeRealtimeSession(samples_to_pcm_s16le([1600] * 240))
     server = FreeSwitchRealtimeGatewayServer(
-        _test_config(),
+        _test_config(tail_silence_ms=0),
         api_key="test-key",
-        realtime_session_factory=lambda on_delta: fake_session.bind(on_delta),
+        realtime_session_factory=fake_session.bind,
     )
     await server.start()
     try:
@@ -40,13 +48,14 @@ async def _assert_realtime_phone_gateway_roundtrip() -> None:
             playback = await asyncio.wait_for(ws.recv(), timeout=3)
             assert isinstance(playback, bytes)
             assert len(playback) == 320
+            await asyncio.sleep(0.05)
     finally:
         await server.stop()
 
     assert fake_session.connected is True
     assert fake_session.closed is True
     assert fake_session.appended_bytes == 1920
-    assert fake_session.commits == [1]
+    assert fake_session.speech_started_turns == [1]
     assert len(server.completed_sessions) == 1
     stats = server.completed_sessions[0]
     assert stats.turns_started == 1
@@ -54,15 +63,26 @@ async def _assert_realtime_phone_gateway_roundtrip() -> None:
     assert stats.turns_completed == 1
     assert stats.turns_failed == 0
     assert stats.outbound_frames == 1
+    assert stats.flushed_tail_frames == 1
     assert stats.output_transcripts == ["hello from model"]
+    assert stats.gateway_history_committed_turns == 1
+    assert stats.gateway_history_abandoned_turns == 0
+    assert [item.output_transcript for item in stats.committed_exchanges] == [
+        "hello from model"
+    ]
 
 
 async def _assert_realtime_phone_gateway_interrupts_playback() -> None:
-    fake_session = FakeRealtimeSession(samples_to_pcm_s16le([1600] * 480 * 20))
+    fake_session = FakeRealtimeSession(
+        samples_to_pcm_s16le([1600] * 480 * 20),
+        reconnect_delay_seconds=0.05,
+    )
+    fake_playback_control = FakePlaybackControl()
     server = FreeSwitchRealtimeGatewayServer(
-        _test_config(),
+        _test_config(tail_silence_ms=0),
         api_key="test-key",
-        realtime_session_factory=lambda on_delta: fake_session.bind(on_delta),
+        realtime_session_factory=fake_session.bind,
+        playback_control=fake_playback_control,
     )
     await server.start()
     try:
@@ -79,6 +99,9 @@ async def _assert_realtime_phone_gateway_interrupts_playback() -> None:
             assert isinstance(playback, bytes)
 
             await ws.send(_phone_frame(1200))
+            await ws.send(_phone_frame(1200))
+            await ws.send(_phone_frame(1200))
+            await ws.send(_phone_frame(1200))
             await asyncio.sleep(0.1)
     finally:
         await server.stop()
@@ -87,72 +110,219 @@ async def _assert_realtime_phone_gateway_interrupts_playback() -> None:
     assert stats.interruptions == 1
     assert stats.dropped_playback_frames > 0
     assert stats.dropped_stale_frames == 0
-    assert stats.ignored_busy_frames == 0
-    assert fake_session.cancel_calls == 0
+    assert stats.freeswitch_break_requests == 1
+    assert stats.freeswitch_break_failures == 0
+    assert stats.realtime_interrupt_requests == 1
+    assert stats.realtime_interrupt_failures == 0
+    assert stats.context_repair_requests == 1
+    assert stats.realtime_session_restarts == 1
+    assert stats.gateway_history_committed_turns == 0
+    assert stats.gateway_history_abandoned_turns == 1
+    assert stats.replayed_input_frames > 0
+    assert fake_playback_control.break_calls == ["test-interrupt-call"]
+    assert fake_session.cancel_calls == 1
+    assert fake_session.connect_calls == 2
+    assert fake_session.turn_id_starts == [0, 2]
+    assert fake_session.close_calls >= 1
+    assert any(size > 640 for size in fake_session.append_sizes)
+
+
+async def _assert_realtime_phone_gateway_replays_after_hot_restart() -> None:
+    fake_session = FakeRealtimeSession(
+        samples_to_pcm_s16le([1600] * 480 * 20),
+        restart_on_interruption=False,
+    )
+    fake_playback_control = FakePlaybackControl()
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+        realtime_session_factory=fake_session.bind,
+        playback_control=fake_playback_control,
+    )
+    await server.start()
+    try:
+        host, port = server.address
+        async with connect(
+            f"ws://{host}:{port}/media/fs/test-hot-restart-call",
+            ping_interval=None,
+        ) as ws:
+            await ws.send(_phone_frame(1200))
+            await ws.send(_phone_frame(0))
+            await ws.send(_phone_frame(0))
+
+            playback = await asyncio.wait_for(ws.recv(), timeout=3)
+            assert isinstance(playback, bytes)
+
+            await ws.send(_phone_frame(1200))
+            await ws.send(_phone_frame(1200))
+            await ws.send(_phone_frame(1200))
+            await ws.send(_phone_frame(1200))
+            await asyncio.sleep(0.1)
+    finally:
+        await server.stop()
+
+    stats = server.completed_sessions[0]
+    assert stats.interruptions == 1
+    assert stats.realtime_session_restarts == 0
+    assert stats.replayed_input_frames > 0
+    assert stats.replayed_input_bytes > 0
+    assert fake_session.interruption_calls == ["hello from model"]
+    assert fake_session.connect_calls == 1
+    assert any(size > 640 for size in fake_session.append_sizes)
+
+
+async def _assert_realtime_phone_gateway_appends_tail_silence() -> None:
+    fake_session = FakeRealtimeSession(samples_to_pcm_s16le([1600] * 240))
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=40),
+        api_key="test-key",
+        realtime_session_factory=fake_session.bind,
+    )
+    await server.start()
+    try:
+        host, port = server.address
+        async with connect(
+            f"ws://{host}:{port}/media/fs/test-tail-silence-call",
+            ping_interval=None,
+        ) as ws:
+            await ws.send(_phone_frame(1200))
+            await ws.send(_phone_frame(0))
+            await ws.send(_phone_frame(0))
+
+            playback_frames = [
+                await asyncio.wait_for(ws.recv(), timeout=3) for _ in range(3)
+            ]
+            assert all(isinstance(frame, bytes) for frame in playback_frames)
+            assert playback_frames[1:] == [b"\x00" * 320, b"\x00" * 320]
+            await asyncio.sleep(0.05)
+    finally:
+        await server.stop()
+
+    stats = server.completed_sessions[0]
+    assert stats.outbound_frames == 3
+    assert stats.flushed_tail_frames == 1
+    assert stats.tail_silence_frames == 2
+    assert stats.gateway_history_committed_turns == 1
+
+
+class FakePlaybackControl:
+    def __init__(self) -> None:
+        self.break_calls: list[str] = []
+
+    async def break_playback(self, media_uuid: str) -> bool:
+        self.break_calls.append(media_uuid)
+        return True
 
 
 class FakeRealtimeSession:
-    def __init__(self, model_audio_24k: bytes) -> None:
+    def __init__(
+        self,
+        model_audio_24k: bytes,
+        *,
+        reconnect_delay_seconds: float = 0,
+        restart_on_interruption: bool = True,
+    ) -> None:
         self.model_audio_24k = model_audio_24k
+        self.reconnect_delay_seconds = reconnect_delay_seconds
+        self.restart_on_interruption = restart_on_interruption
         self.connected = False
         self.closed = False
+        self.connect_calls = 0
+        self.close_calls = 0
         self.appended_bytes = 0
-        self.clear_calls = 0
+        self.append_sizes: list[int] = []
         self.cancel_calls = 0
-        self.commits: list[int] = []
+        self.interruption_calls: list[str | None] = []
+        self.append_calls = 0
+        self.speech_started_turns: list[int] = []
+        self.turn_id_starts: list[int] = []
+        self.instructions: list[str] = []
+        self.second_turn_announced = False
+        self.completed_first_turn = False
+        self.on_speech_started: Callable[[int], Awaitable[None]] | None = None
         self.on_delta: Callable[[int, bytes], Awaitable[None]] | None = None
+        self.on_turn_completed: Callable[[RealtimeTurnResult], Awaitable[None]] | None = None
 
-    def bind(self, on_delta: Callable[[int, bytes], Awaitable[None]]):
+    def bind(
+        self,
+        on_speech_started: Callable[[int], Awaitable[None]],
+        on_delta: Callable[[int, bytes], Awaitable[None]],
+        on_turn_completed: Callable[[RealtimeTurnResult], Awaitable[None]],
+        turn_id_start: int,
+        instructions: str,
+    ):
+        self.on_speech_started = on_speech_started
         self.on_delta = on_delta
+        self.on_turn_completed = on_turn_completed
+        self.turn_id_starts.append(turn_id_start)
+        self.instructions.append(instructions)
         return self
 
     async def connect(self) -> None:
+        self.connect_calls += 1
+        if self.connect_calls > 1 and self.reconnect_delay_seconds:
+            await asyncio.sleep(self.reconnect_delay_seconds)
         self.connected = True
+        self.closed = False
 
     async def close(self) -> None:
         self.closed = True
+        self.close_calls += 1
 
     async def append_audio(self, input_pcm_16k: bytes) -> None:
         self.appended_bytes += len(input_pcm_16k)
-
-    async def clear_input_buffer(self) -> None:
-        self.clear_calls += 1
-
-    async def commit_and_create_response(
-        self,
-        *,
-        turn_id: int,
-        input_audio_bytes: int,
-    ) -> asyncio.Future[RealtimeTurnResult]:
-        self.commits.append(turn_id)
-        future: asyncio.Future[RealtimeTurnResult] = asyncio.get_running_loop().create_future()
-
-        async def complete() -> None:
-            assert self.on_delta is not None
-            await self.on_delta(turn_id, self.model_audio_24k)
-            future.set_result(
-                RealtimeTurnResult(
-                    turn_id=turn_id,
-                    input_audio_bytes=input_audio_bytes,
-                    output_audio_bytes=len(self.model_audio_24k),
-                    input_transcript="hello",
-                    output_transcript="hello from model",
-                    event_counts={"response.audio.delta": 1, "response.done": 1},
-                    first_audio_delta_ms=10,
-                    response_done_ms=20,
-                )
-            )
-
-        asyncio.create_task(complete())
-        return future
+        self.append_sizes.append(len(input_pcm_16k))
+        self.append_calls += 1
+        if self.append_calls == 3 and not self.completed_first_turn:
+            self.completed_first_turn = True
+            asyncio.create_task(self._complete_turn(1))
+        if self.append_calls == 4 and not self.second_turn_announced:
+            self.second_turn_announced = True
+            asyncio.create_task(self._announce_speech_started(2))
 
     async def cancel_response(self) -> None:
         self.cancel_calls += 1
 
+    async def handle_playback_interruption(
+        self,
+        *,
+        interrupted_output_text: str | None = None,
+    ) -> None:
+        self.interruption_calls.append(interrupted_output_text)
+        await self.cancel_response()
 
-def _test_config() -> GatewayConfig:
+    async def _announce_speech_started(self, turn_id: int) -> None:
+        assert self.on_speech_started is not None
+        self.speech_started_turns.append(turn_id)
+        await self.on_speech_started(turn_id)
+
+    async def _complete_turn(self, turn_id: int) -> None:
+        assert self.on_delta is not None
+        assert self.on_turn_completed is not None
+        await self._announce_speech_started(turn_id)
+        await self.on_delta(turn_id, self.model_audio_24k)
+        await self.on_turn_completed(
+            RealtimeTurnResult(
+                turn_id=turn_id,
+                input_audio_bytes=self.appended_bytes,
+                output_audio_bytes=len(self.model_audio_24k),
+                input_transcript="hello",
+                output_transcript="hello from model",
+                event_counts={
+                    "input_audio_buffer.committed": 1,
+                    "response.audio.delta": 1,
+                    "response.done": 1,
+                },
+                first_audio_delta_ms=10,
+                response_done_ms=20,
+            )
+        )
+
+
+def _test_config(*, tail_silence_ms: int) -> GatewayConfig:
     return GatewayConfig(
         freeswitch=FreeSwitchConfig(media_host="127.0.0.1", media_port=0),
+        playback=PlaybackConfig(tail_silence_ms=tail_silence_ms),
         vad=VadConfig(
             speech_rms_threshold=300,
             start_speech_ms=20,

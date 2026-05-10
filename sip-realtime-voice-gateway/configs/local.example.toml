@@ -10,13 +10,36 @@ media_host = "0.0.0.0"
 media_port = 9101
 sample_rate = 8000
 phone_codec = "PCMA"
+channels = 1
+frame_duration_ms = 20
 echo_mode = "raw"
 
-[realtime]
-provider = "aliyun"
-url = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
-model = "qwen3.5-omni-plus-realtime"
-voice = "Ethan"
+[event_socket]
+enabled = false
+host = "127.0.0.1"
+port = 18021
+password_env = "FREESWITCH_ESL_PASSWORD"
+
+[doubao_s2s]
+app_id_env = "DOUBAO_S2S_APP_ID"
+access_token_env = "DOUBAO_S2S_ACCESS_TOKEN"
+app_key_env = "DOUBAO_S2S_APP_KEY"
+resource_id = "volc.speech.dialog"
+websocket_url = "wss://openspeech.bytedance.com/api/v3/realtime/dialogue"
+speaker = "zh_female_vv_jupiter_bigtts"
+output_sample_rate = 24000
+
+[server_vad]
+type = "server_vad"
+threshold = 0.5
+prefix_padding_ms = 300
+silence_duration_ms = 800
+create_response = true
+interrupt_response = true
+
+[playback]
+jitter_buffer_ms = 240
+tail_silence_ms = 300
 
 [vad]
 speech_rms_threshold = 300

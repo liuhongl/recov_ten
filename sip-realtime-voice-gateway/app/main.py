@@ -6,13 +6,19 @@ import json
 import logging
 import os
 import threading
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from .config import load_config
-from .env_loader import get_first_env, load_env_file
+from .env_loader import load_env_file
 from .freeswitch_media import FreeSwitchMediaEchoServer
 from .health_server import HealthServer
 from .logging_config import configure_logging
+from .doubao_s2s_client import (
+    DEFAULT_REALTIME_APP_KEY,
+    DoubaoS2SCredentials,
+    DoubaoS2SSessionConfig,
+)
+from .doubao_s2s_realtime import DoubaoS2SServerVadSession
 from .realtime_phone_gateway import FreeSwitchRealtimeGatewayServer
 
 LOGGER = logging.getLogger(__name__)
@@ -39,7 +45,7 @@ def main() -> int:
         "--media-mode",
         choices=("echo", "realtime"),
         default=os.getenv("GATEWAY_MEDIA_MODE", "echo"),
-        help="Media server mode. Use realtime for stage 5 phone-model loop.",
+        help="Media server mode. Use realtime for the Server VAD phone loop.",
     )
     args = parser.parse_args()
 
@@ -70,13 +76,34 @@ async def _serve(config, *, media_mode: str) -> None:
     if media_mode == "echo":
         media_server = FreeSwitchMediaEchoServer(config.freeswitch)
     elif media_mode == "realtime":
-        api_key = get_first_env(("DASHSCOPE_API_KEY", "ALIYUN_DASHSCOPE_API_KEY"))
-        if not api_key:
-            raise RuntimeError(
-                "DASHSCOPE_API_KEY or ALIYUN_DASHSCOPE_API_KEY is required "
-                "for realtime media mode"
+        credentials = _load_doubao_s2s_credentials(config)
+        session_config = DoubaoS2SSessionConfig(
+            speaker=config.doubao_s2s.speaker,
+            output_sample_rate=config.doubao_s2s.output_sample_rate,
+        )
+
+        def session_factory(
+            on_speech_started,
+            on_audio_delta,
+            on_turn_completed,
+            turn_id_start,
+            instructions,
+        ):
+            return DoubaoS2SServerVadSession(
+                credentials,
+                replace(session_config, system_prompt=instructions),
+                turn_id_start=turn_id_start,
+                on_speech_started=on_speech_started,
+                on_audio_delta=on_audio_delta,
+                on_turn_completed=on_turn_completed,
             )
-        media_server = FreeSwitchRealtimeGatewayServer(config, api_key=api_key)
+
+        media_server = FreeSwitchRealtimeGatewayServer(
+            config,
+            api_key="doubao-s2s",
+            model_output_sample_rate=config.doubao_s2s.output_sample_rate,
+            realtime_session_factory=session_factory,
+        )
     else:
         raise ValueError(f"unsupported media_mode: {media_mode}")
 
@@ -86,6 +113,30 @@ async def _serve(config, *, media_mode: str) -> None:
     finally:
         health_server.shutdown()
         health_thread.join(timeout=3)
+
+
+def _load_doubao_s2s_credentials(config) -> DoubaoS2SCredentials:
+    doubao = config.doubao_s2s
+    app_id = os.getenv(doubao.app_id_env, "")
+    access_token = os.getenv(doubao.access_token_env, "")
+    app_key = os.getenv(doubao.app_key_env) or DEFAULT_REALTIME_APP_KEY
+    missing = []
+    if not app_id:
+        missing.append(doubao.app_id_env)
+    if not access_token:
+        missing.append(doubao.access_token_env)
+    if missing:
+        raise RuntimeError(
+            "missing Doubao S2S credentials in environment: " + ", ".join(missing)
+        )
+
+    return DoubaoS2SCredentials(
+        app_id=app_id,
+        access_token=access_token,
+        app_key=app_key,
+        resource_id=doubao.resource_id,
+        websocket_url=doubao.websocket_url,
+    )
 
 
 if __name__ == "__main__":

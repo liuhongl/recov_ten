@@ -128,6 +128,21 @@ python -m app.main `
 ws://host.docker.internal:9101/media/fs/{uuid}
 ```
 
+本项目已经把本地 FreeSWITCH 测试运行时放到：
+
+```text
+freeswitch-local/
+```
+
+启动方式：
+
+```powershell
+cd sip-realtime-voice-gateway/freeswitch-local
+docker compose up -d --build
+```
+
+如果旧的历史容器 `ten_local_freeswitch` 还在占用端口，需要先停掉它；新容器名是 `sip_realtime_freeswitch`。
+
 本地 9199 拨号计划应使用 FreeSWITCH 通话 UUID 作为路径参数：
 
 ```xml
@@ -174,7 +189,7 @@ tail_silence_ms = 300
 Access Denied, go away.
 ```
 
-修改后需要重启本地 FreeSWITCH 容器。如果你的本地容器名仍是历史测试名 `ten_local_freeswitch`，重启它即可；这个容器名不代表网关依赖 TEN 框架。
+修改后需要重启本地 FreeSWITCH 容器。如果你的本地容器名仍是历史测试名 `ten_local_freeswitch`，重启它即可；这个容器名不代表网关依赖 TEN 框架。迁移后的推荐本地容器名是 `sip_realtime_freeswitch`。
 
 ## 关键工程要求
 

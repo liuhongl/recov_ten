@@ -1,4 +1,0 @@
-aiohttp
-numpy
-pydantic
-websockets~=14.0

@@ -1,2 +1,0 @@
-pydantic
-websockets~=14.0

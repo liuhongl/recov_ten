@@ -1,61 +1,30 @@
 # AI Agent Instructions
 
-This repository uses progressive disclosure documentation to help AI coding
-agents work efficiently. Documentation is structured in three levels under
-`docs/ai/`.
+## 项目边界
 
-## How to Load
+当前仓库已经切到独立 SIP 实时语音网关方向，核心代码只在
+`sip-realtime-voice-gateway/` 下。旧 TEN 框架目录不再作为本项目实现依赖，
+不要再引用 `ai_agents/`、`core/`、`packages/`、`build/`、`third_party/` 等旧目录。
 
-1. Read [docs/ai/L0_repo_card.md](docs/ai/L0_repo_card.md) to identify the repo.
-2. Load ALL 8 files in `docs/ai/L1/`. They are small — load all of them upfront.
-   This gives you setup, architecture, code map, conventions, workflows,
-   interfaces, gotchas, and security.
-3. If a task needs more detail than L1 provides, follow links to L2 deep dives
-   in `docs/ai/L1/deep_dives/`. Load only the specific L2 file you need.
+## 工作区域
 
-## Levels
+- `sip-realtime-voice-gateway/app/`：网关主逻辑，负责 FreeSWITCH 音频接入、端到端实时语音模型连接、播放控制和打断控制。
+- `sip-realtime-voice-gateway/configs/`：本地配置模板，真实密钥只放在本地 `.env` 或运行环境变量里。
+- `sip-realtime-voice-gateway/freeswitch-local/`：本地 9199 软电话验证用 FreeSWITCH Docker 运行时。
+- `sip-realtime-voice-gateway/tests/`：网关单元测试。
+- `SIP实时语音网关新项目方案.md`：新项目交接方案、业务链路和阶段计划。
+- `TEN电话接入学习笔记.md`：历史调研和电话链路知识笔记。
 
-- **L0 (Repo Card):** Identity and L1 index. Table of contents.
-- **L1 (Summaries):** Eight structured summaries. Load all at session start.
-- **L2 (Deep Dives):** Full specifications. Load only when L1 isn't detailed enough.
+## 开发约定
 
-## Git Conventions
+- 用中文沟通业务和实现结论。
+- 优先尊重事实。如果测试、日志或代码与预期不一致，以证据为准。
+- 不提交真实密钥、`.env`、运行日志、音频样本、TLS 证书或本地 IDE 文件。
+- 修改后至少运行网关相关测试；涉及 FreeSWITCH 本地运行时时，额外验证 Docker Compose 配置。
 
-### Commit messages — conventional commits
+## Git 约定
 
-- **Format:** `type: description` or `type(scope): description`
-- **Types:** `feat:` (new feature), `fix:` (bug fix), `chore:` (maintenance, version bumps), `test:` (test additions/changes), `docs:` (documentation)
-- **Scoped variant:** `feat(scope):`, `fix(scope):` — e.g. `feat(auth): add token refresh`
-- **Lowercase after prefix** — `feat: add feature`, not `feat: Add feature`
-- **Present tense** — "add feature", not "added feature"
-- **PR number appended** — `feat: add feature (#123)`
-
-### Branch names
-
-- **Format:** `type/short-description` — lowercase, hyphen-separated
-- **Types match commit types:** `feat/`, `fix/`, `chore/`, `test/`, `docs/`
-- **Examples:** `feat/token-refresh`, `fix/null-pointer`, `docs/progressive-disclosure`
-
-### General rules
-
-- **No AI tool names** — never mention claude, cursor, copilot, cody, aider, gemini, codex, chatgpt, or gpt-3/4
-- **No Co-Authored-By trailers** — omit AI attribution lines
-- **No --no-verify** — let git hooks run normally
-- **No git config changes** — do not modify user.name or user.email
-
-## Doc Commands
-
-| Command       | When to use                                   |
-| ------------- | --------------------------------------------- |
-| generate docs | no `docs/ai/` directory exists yet            |
-| update docs   | code changed since last `last_reviewed` date  |
-| test docs     | verify docs give agents the right context     |
-
-For detailed procedures, read
-[progressive-disclosure-standard.md](docs/progressive-disclosure-standard.md)
-sections 6 (generate) and 7 (bootstrap).
-
-## Working Areas
-
-- `ai_agents/` — primary area for agents, examples, server, integrations
-- `core/`, `packages/`, `build/` — framework internals
+- Commit message 使用 Conventional Commits，例如 `feat: 增加实时语音网关`、`fix: 修复播放尾音丢失`、`chore: 提取独立网关项目`。
+- 不使用 `--no-verify`。
+- 不修改仓库级或全局 `user.name` / `user.email`。
+- 不添加 AI 工具署名或 `Co-Authored-By`。

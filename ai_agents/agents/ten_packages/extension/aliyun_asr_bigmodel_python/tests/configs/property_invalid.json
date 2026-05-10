@@ -1,8 +1,0 @@
-{
-    "params": {
-        "api_key": "invalid",
-        "language_hints": [
-            "en"
-        ]
-    }
-}

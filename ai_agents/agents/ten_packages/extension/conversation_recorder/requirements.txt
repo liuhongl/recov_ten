@@ -1,4 +1,0 @@
-numpy
-scipy
-google-cloud-storage
-boto3

@@ -1,6 +1,0 @@
-{
-  global:
-    ten_*;
-  local:
-    *;
-};

@@ -1,7 +1,0 @@
-{
-    "dump": true,
-    "dump_path": "./tests/dump_output/",
-    "params": {
-        "key": "${env:ELEVENLABS_TTS_KEY}"
-    }
-}

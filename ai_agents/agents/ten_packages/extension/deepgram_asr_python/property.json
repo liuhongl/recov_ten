@@ -1,5 +1,0 @@
-{
-  "params": {
-    "key": "${env:DEEPGRAM_API_KEY|}"
-  }
-}

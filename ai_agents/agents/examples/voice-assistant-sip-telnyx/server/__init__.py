@@ -1,1 +1,0 @@
-# Telnyx server module

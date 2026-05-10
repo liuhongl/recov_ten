@@ -27,7 +27,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Probe Doubao S2S realtime voice WebSocket"
     )
-    parser.add_argument("--env-file", default="../ai_agents/.env")
+    parser.add_argument("--env-file", default=".env")
     parser.add_argument("--output-dir", default="artifacts/doubao-s2s-probe")
     parser.add_argument(
         "--text",

@@ -38,7 +38,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--env-file",
-        default="../ai_agents/.env",
+        default=".env",
         help="Optional env file used for API keys and overrides",
     )
     parser.add_argument(

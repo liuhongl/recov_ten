@@ -61,6 +61,15 @@ FreeSWITCH 电话边界
 
 ## 本地启动
 
+首次启动前先创建本项目自己的本地环境文件：
+
+```powershell
+cd sip-realtime-voice-gateway
+Copy-Item .env.example .env
+```
+
+然后把 `.env` 中的豆包凭证和本地 FreeSWITCH Event Socket 密码改为实际值。`.env` 已被本项目 `.gitignore` 忽略，不应提交。
+
 ```powershell
 cd sip-realtime-voice-gateway
 python -m app.main --config configs/local.example.toml
@@ -109,7 +118,7 @@ python -m pytest tests/test_freeswitch_event_socket.py tests/test_realtime_phone
 cd sip-realtime-voice-gateway
 python -m app.main `
   --config configs/local.example.toml `
-  --env-file ../ai_agents/.env `
+  --env-file .env `
   --media-mode realtime
 ```
 
@@ -122,8 +131,10 @@ ws://host.docker.internal:9101/media/fs/{uuid}
 本地 9199 拨号计划应使用 FreeSWITCH 通话 UUID 作为路径参数：
 
 ```xml
-<action application="set" data="ten_media_hub_call_id=${uuid}"/>
+<action application="set" data="sip_realtime_gateway_call_id=${uuid}"/>
 ```
+
+该变量名只用于本地拨号计划可读性，网关真正依赖的是媒体 WebSocket path 中的 `{uuid}`。如果现有本地拨号计划仍使用旧变量名，也不会影响网关运行。
 
 如果要开启 FreeSWITCH 播放事件和打断控制，需要同时开启 Event Socket 配置，并在本地 `.env` 中提供密码：
 
@@ -163,7 +174,7 @@ tail_silence_ms = 300
 Access Denied, go away.
 ```
 
-修改后需要重启 `ten_local_freeswitch` 容器。
+修改后需要重启本地 FreeSWITCH 容器。如果你的本地容器名仍是历史测试名 `ten_local_freeswitch`，重启它即可；这个容器名不代表网关依赖 TEN 框架。
 
 ## 关键工程要求
 
@@ -258,7 +269,7 @@ DOUBAO_S2S_OUTPUT_SAMPLE_RATE=24000
 cd sip-realtime-voice-gateway
 python -m app.main `
   --config configs/local.example.toml `
-  --env-file ../ai_agents/.env `
+  --env-file .env `
   --media-mode realtime
 ```
 
@@ -395,7 +406,7 @@ Default voice:
 zh_female_vv_jupiter_bigtts
 ```
 
-Required local `.env` values:
+Required local `.env` values. See `.env.example` for the maintained template:
 
 ```text
 DOUBAO_S2S_APP_ID=
@@ -426,7 +437,7 @@ Text probe:
 ```powershell
 cd sip-realtime-voice-gateway
 python -m app.doubao_s2s_probe `
-  --env-file ../ai_agents/.env `
+  --env-file .env `
   --output-dir artifacts/doubao-s2s-probe `
   --text "请用一句话介绍你自己。"
 ```
@@ -436,7 +447,7 @@ Audio probe with a local WAV:
 ```powershell
 cd sip-realtime-voice-gateway
 python -m app.doubao_s2s_probe `
-  --env-file ../ai_agents/.env `
+  --env-file .env `
   --output-dir artifacts/doubao-s2s-probe `
   --wav "C:\Users\Tzk00\Downloads\语音标签示例1.wav"
 ```
@@ -463,8 +474,8 @@ Last local result:
 compileall passed
 ```
 
-Status: local protocol tests and live Doubao S2S probes pass when the
-git-ignored `.env` contains valid credentials.
+Status: local protocol tests and live Doubao S2S probes pass when this
+project's git-ignored `.env` contains valid credentials.
 
 Current live status:
 

@@ -1,5 +1,8 @@
 __pycache__/
 .pytest_cache/
+.env
+.env.*
+!.env.example
 *.py[cod]
 *.log
 artifacts/

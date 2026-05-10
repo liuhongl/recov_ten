@@ -39,6 +39,7 @@ interrupt_response = true
 
 [playback]
 jitter_buffer_ms = 240
+send_interval_ms = 10
 tail_silence_ms = 300
 
 [vad]

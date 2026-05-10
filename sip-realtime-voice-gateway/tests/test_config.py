@@ -53,6 +53,7 @@ def test_load_config_from_toml(tmp_path):
 
             [playback]
             jitter_buffer_ms = 320
+            send_interval_ms = 10
             tail_silence_ms = 280
 
             [vad]
@@ -98,6 +99,7 @@ def test_load_config_from_toml(tmp_path):
     assert config.server_vad.silence_duration_ms == 1200
     assert config.server_vad.interrupt_response is False
     assert config.playback.jitter_buffer_ms == 320
+    assert config.playback.send_interval_ms == 10
     assert config.playback.tail_silence_ms == 280
     assert config.vad.speech_rms_threshold == 400
     assert config.vad.end_silence_ms == 700
@@ -123,6 +125,7 @@ def test_environment_overrides(monkeypatch):
     monkeypatch.setenv("SERVER_VAD_SILENCE_DURATION_MS", "2000")
     monkeypatch.setenv("SERVER_VAD_INTERRUPT_RESPONSE", "false")
     monkeypatch.setenv("PLAYBACK_JITTER_BUFFER_MS", "400")
+    monkeypatch.setenv("PLAYBACK_SEND_INTERVAL_MS", "10")
     monkeypatch.setenv("PLAYOUT_TAIL_SILENCE_MS", "360")
     monkeypatch.setenv("VAD_END_SILENCE_MS", "600")
     monkeypatch.setenv("VAD_BARGE_IN_ENABLED", "true")
@@ -146,6 +149,7 @@ def test_environment_overrides(monkeypatch):
     assert config.server_vad.silence_duration_ms == 2000
     assert config.server_vad.interrupt_response is False
     assert config.playback.jitter_buffer_ms == 400
+    assert config.playback.send_interval_ms == 10
     assert config.playback.tail_silence_ms == 360
     assert config.vad.end_silence_ms == 600
     assert config.vad.barge_in_enabled is True

@@ -74,20 +74,13 @@ async def _assert_event_socket_client_roundtrip() -> None:
         )
         await writer.drain()
 
-        assert await _read_command(reader) == "event plain CUSTOM"
+        assert (
+            await _read_command(reader)
+            == "event plain CUSTOM mod_audio_stream::playback"
+        )
         writer.write(
             b"Content-Type: command/reply\n"
             b"Reply-Text: +OK event listener enabled plain\n\n"
-        )
-        await writer.drain()
-
-        assert (
-            await _read_command(reader)
-            == "filter Event-Subclass mod_audio_stream::playback"
-        )
-        writer.write(
-            b"Content-Type: command/reply\n"
-            b"Reply-Text: +OK filter added\n\n"
         )
         await writer.drain()
 

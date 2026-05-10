@@ -180,6 +180,7 @@ class RealtimePhoneSessionStats:
         repr=False,
     )
     model_done_turns: set[int] = field(default_factory=set, repr=False)
+    freeswitch_completed_turns: set[int] = field(default_factory=set, repr=False)
     jitter_prefilled_turns: set[int] = field(default_factory=set, repr=False)
     recent_input_frames_16k: deque[bytes] = field(default_factory=deque, repr=False)
     repair_replay_frames_16k: deque[bytes] = field(default_factory=deque, repr=False)
@@ -234,9 +235,21 @@ class FreeSwitchRealtimeGatewayServer:
             raise ValueError(
                 "playback.tail_silence_ms must align to frame_duration_ms"
             )
+        if config.playback.send_interval_ms <= 0:
+            raise ValueError("playback.send_interval_ms must be positive")
+        if config.playback.send_interval_ms > self.frame_duration_ms:
+            raise ValueError(
+                "playback.send_interval_ms must be less than or equal to "
+                "frame_duration_ms"
+            )
+        self.playback_send_interval_ms = config.playback.send_interval_ms
         self.playback_prefill_frames = max(
             1,
             config.playback.jitter_buffer_ms // self.frame_duration_ms,
+        )
+        self.playback_fast_send_watermark_frames = max(
+            1,
+            self.playback_prefill_frames // 2,
         )
         self.replay_frame_limit = max(
             1,
@@ -283,7 +296,8 @@ class FreeSwitchRealtimeGatewayServer:
             "provider=%s model=%s voice=%s server_vad_type=%s "
             "server_vad_threshold=%s server_vad_silence_duration_ms=%s "
             "playback_jitter_buffer_ms=%s playback_tail_silence_ms=%s "
-            "playback_prefill_frames=%s "
+            "playback_send_interval_ms=%s playback_prefill_frames=%s "
+            "playback_fast_send_watermark_frames=%s "
             "event_socket_enabled=%s",
             self._address[0],
             self._address[1],
@@ -303,7 +317,9 @@ class FreeSwitchRealtimeGatewayServer:
             self.config.server_vad.silence_duration_ms,
             self.config.playback.jitter_buffer_ms,
             self.config.playback.tail_silence_ms,
+            self.playback_send_interval_ms,
             self.playback_prefill_frames,
+            self.playback_fast_send_watermark_frames,
             self.config.event_socket.enabled,
         )
 
@@ -897,24 +913,43 @@ class FreeSwitchRealtimeGatewayServer:
         session.outbound_frames += 1
         session.outbound_bytes += len(item.payload)
         session.turn_last_playback_at[item.turn_id] = send_started_at
-        await asyncio.sleep(self.frame_duration_ms / 1000)
+        await asyncio.sleep(self._playback_sleep_interval_ms(session) / 1000)
         session.playback_active = False
 
         if not self._has_playback(session):
             if item.turn_id in session.model_done_turns:
-                self._commit_played_turn(session, item.turn_id)
-                session.current_output_turn_id = None
-                session.model_done_turns.discard(item.turn_id)
-                session.jitter_prefilled_turns.discard(item.turn_id)
-            else:
-                session.playback_underruns += 1
-                await session.playback_queue.put(
-                    PlaybackFrame(
-                        item.turn_id,
-                        b"\x00" * self.expected_frame_bytes,
-                        is_underrun_silence=True,
-                    )
+                completed = self._complete_played_turn_if_ready(
+                    session,
+                    item.turn_id,
                 )
+                if not completed:
+                    LOGGER.debug(
+                        "gateway_playback_sent_waiting_for_freeswitch "
+                        "call_id=%s session_id=%s turn=%s",
+                        session.call_id,
+                        session.session_id,
+                        item.turn_id,
+                    )
+            elif session.current_output_turn_id == item.turn_id:
+                session.playback_underruns += 1
+                LOGGER.debug(
+                    "gateway_playback_waiting_for_model_audio "
+                    "call_id=%s session_id=%s turn=%s underruns=%s",
+                    session.call_id,
+                    session.session_id,
+                    item.turn_id,
+                    session.playback_underruns,
+                )
+
+    def _playback_sleep_interval_ms(
+        self,
+        session: RealtimePhoneSessionStats,
+    ) -> int:
+        if self.playback_send_interval_ms >= self.frame_duration_ms:
+            return self.frame_duration_ms
+        if session.playback_queue.qsize() >= self.playback_fast_send_watermark_frames:
+            return self.playback_send_interval_ms
+        return self.frame_duration_ms
 
     def _commit_played_turn(
         self,
@@ -1001,7 +1036,34 @@ class FreeSwitchRealtimeGatewayServer:
                         "session_id": session.session_id,
                     }
                 )
-            )
+        )
+
+    def _complete_played_turn_if_ready(
+        self,
+        session: RealtimePhoneSessionStats,
+        turn_id: int,
+    ) -> bool:
+        if session.current_output_turn_id != turn_id:
+            return False
+        if turn_id not in session.model_done_turns:
+            return False
+        if session.playback_active or not session.playback_queue.empty():
+            return False
+        if (
+            self._waits_for_freeswitch_playback_completion()
+            and turn_id not in session.freeswitch_completed_turns
+        ):
+            return False
+
+        self._commit_played_turn(session, turn_id)
+        session.current_output_turn_id = None
+        session.model_done_turns.discard(turn_id)
+        session.freeswitch_completed_turns.discard(turn_id)
+        session.jitter_prefilled_turns.discard(turn_id)
+        return True
+
+    def _waits_for_freeswitch_playback_completion(self) -> bool:
+        return self.playback_control is not None
 
     async def _handle_freeswitch_playback_event(
         self,
@@ -1020,9 +1082,12 @@ class FreeSwitchRealtimeGatewayServer:
         session.freeswitch_last_playback_remaining = event.remaining
         if event.event == "queue_completed":
             session.freeswitch_queue_completed_events += 1
+
+        if event.is_queue_completed:
             turn_id = session.current_output_turn_id
-            if turn_id is not None and turn_id in session.model_done_turns:
-                self._commit_played_turn(session, turn_id)
+            if turn_id is not None:
+                session.freeswitch_completed_turns.add(turn_id)
+                self._complete_played_turn_if_ready(session, turn_id)
 
         LOGGER.debug(
             "freeswitch_playback_event call_id=%s session_id=%s event=%s "
@@ -1053,6 +1118,7 @@ class FreeSwitchRealtimeGatewayServer:
         session.current_output_turn_id = None
         session.playback_buffers.clear()
         session.model_done_turns.clear()
+        session.freeswitch_completed_turns.clear()
         session.jitter_prefilled_turns.clear()
         session.playback_active = False
         realtime_session = self._realtime_sessions.get(session.session_id)

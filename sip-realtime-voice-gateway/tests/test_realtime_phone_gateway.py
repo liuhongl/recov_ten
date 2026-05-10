@@ -3,11 +3,17 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 
+import pytest
 from websockets.legacy.client import connect
 
 from app.audio_codec import samples_to_pcm_s16le
 from app.config import FreeSwitchConfig, GatewayConfig, PlaybackConfig, VadConfig
-from app.realtime_phone_gateway import FreeSwitchRealtimeGatewayServer
+from app.freeswitch_event_socket import PlaybackProgressEvent
+from app.realtime_phone_gateway import (
+    FreeSwitchRealtimeGatewayServer,
+    PlaybackFrame,
+    RealtimePhoneSessionStats,
+)
 from app.realtime_types import RealtimeTurnResult
 
 
@@ -25,6 +31,22 @@ def test_realtime_phone_gateway_replays_interrupt_audio_after_hot_restart():
 
 def test_realtime_phone_gateway_appends_tail_silence_after_turn_done():
     asyncio.run(_assert_realtime_phone_gateway_appends_tail_silence())
+
+
+def test_realtime_phone_gateway_commits_after_freeswitch_playback_done():
+    asyncio.run(_assert_realtime_phone_gateway_waits_for_freeswitch_completion())
+
+
+def test_realtime_phone_gateway_rejects_slow_playback_send_interval():
+    with pytest.raises(ValueError, match="playback.send_interval_ms"):
+        FreeSwitchRealtimeGatewayServer(
+            _test_config(tail_silence_ms=0, send_interval_ms=40),
+            api_key="test-key",
+        )
+
+
+def test_realtime_phone_gateway_does_not_emit_silence_when_model_audio_lags():
+    asyncio.run(_assert_realtime_phone_gateway_does_not_emit_silence_on_lag())
 
 
 async def _assert_realtime_phone_gateway_roundtrip() -> None:
@@ -205,6 +227,70 @@ async def _assert_realtime_phone_gateway_appends_tail_silence() -> None:
     assert stats.gateway_history_committed_turns == 1
 
 
+async def _assert_realtime_phone_gateway_waits_for_freeswitch_completion() -> None:
+    fake_session = FakeRealtimeSession(samples_to_pcm_s16le([1600] * 240))
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+        realtime_session_factory=fake_session.bind,
+        playback_control=FakePlaybackControl(),
+    )
+    await server.start()
+    try:
+        host, port = server.address
+        async with connect(
+            f"ws://{host}:{port}/media/fs/test-playback-complete-call",
+            ping_interval=None,
+        ) as ws:
+            await ws.send(_phone_frame(1200))
+            await ws.send(_phone_frame(0))
+            await ws.send(_phone_frame(0))
+
+            playback = await asyncio.wait_for(ws.recv(), timeout=3)
+            assert isinstance(playback, bytes)
+            await asyncio.sleep(0.05)
+
+            session = next(iter(server.active_sessions.values()))
+            assert session.gateway_history_committed_turns == 0
+
+            await server._handle_freeswitch_playback_event(
+                PlaybackProgressEvent(
+                    uuid="test-playback-complete-call",
+                    event="queue_completed",
+                    total_chunks=1,
+                )
+            )
+            assert session.gateway_history_committed_turns == 1
+    finally:
+        await server.stop()
+
+
+async def _assert_realtime_phone_gateway_does_not_emit_silence_on_lag() -> None:
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0, send_interval_ms=10),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-call",
+        session_id="test-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+    )
+    session.current_output_turn_id = 1
+    websocket = RecordingWebSocket()
+
+    await server._send_playback_frame(
+        websocket,
+        session,
+        PlaybackFrame(1, b"\x01" * 320),
+    )
+
+    assert websocket.sent == [b"\x01" * 320]
+    assert session.playback_underruns == 1
+    assert session.playback_queue.empty()
+
+
 class FakePlaybackControl:
     def __init__(self) -> None:
         self.break_calls: list[str] = []
@@ -212,6 +298,14 @@ class FakePlaybackControl:
     async def break_playback(self, media_uuid: str) -> bool:
         self.break_calls.append(media_uuid)
         return True
+
+
+class RecordingWebSocket:
+    def __init__(self) -> None:
+        self.sent: list[bytes] = []
+
+    async def send(self, payload: bytes) -> None:
+        self.sent.append(payload)
 
 
 class FakeRealtimeSession:
@@ -319,10 +413,13 @@ class FakeRealtimeSession:
         )
 
 
-def _test_config(*, tail_silence_ms: int) -> GatewayConfig:
+def _test_config(*, tail_silence_ms: int, send_interval_ms: int = 10) -> GatewayConfig:
     return GatewayConfig(
         freeswitch=FreeSwitchConfig(media_host="127.0.0.1", media_port=0),
-        playback=PlaybackConfig(tail_silence_ms=tail_silence_ms),
+        playback=PlaybackConfig(
+            send_interval_ms=send_interval_ms,
+            tail_silence_ms=tail_silence_ms,
+        ),
         vad=VadConfig(
             speech_rms_threshold=300,
             start_speech_ms=20,

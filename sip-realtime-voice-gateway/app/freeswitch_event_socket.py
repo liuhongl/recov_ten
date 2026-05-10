@@ -100,17 +100,11 @@ class FreeSwitchEventSocketClient:
             await asyncio.wait_for(writer.wait_closed(), timeout=2)
 
     async def subscribe_playback_events(self) -> None:
-        await self._send_command("event plain CUSTOM")
+        await self._send_command(f"event plain CUSTOM {PLAYBACK_EVENT_SUBCLASS}")
         reply = await self.read_message()
         if not _command_ok(reply):
             raise EventSocketError(
                 f"could not subscribe FreeSWITCH playback events: {_reply_text(reply)}"
-            )
-        await self._send_command(f"filter Event-Subclass {PLAYBACK_EVENT_SUBCLASS}")
-        reply = await self.read_message()
-        if not _command_ok(reply):
-            raise EventSocketError(
-                f"could not filter FreeSWITCH playback events: {_reply_text(reply)}"
             )
 
     async def api(self, command: str) -> str:

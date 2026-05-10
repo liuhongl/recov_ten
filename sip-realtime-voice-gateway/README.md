@@ -135,6 +135,15 @@ FREESWITCH_ESL_PASSWORD=ClueCon
 FREESWITCH_ESL_PASSWORD_ENV=FREESWITCH_ESL_PASSWORD
 ```
 
+本地卡顿排查时重点看 `playback_send_gap_overruns` 和 `max_playback_send_gap_ms`。默认播放配置为：
+
+```toml
+[playback]
+jitter_buffer_ms = 240
+send_interval_ms = 10
+tail_silence_ms = 300
+```
+
 本地 Docker 版 FreeSWITCH 还需要允许宿主机和容器本地访问 Event Socket：
 
 ```xml
@@ -212,7 +221,7 @@ uuid_audio_stream <uuid> break 播放队列清理
 
 P5 当前结论：`session.update` 属于上下文修正提示，只能缓解“下一轮续说上一轮未播完内容”，不能作为根因修复。当前实现已由网关托管 committed history：只有电话侧确认完整播放的 assistant turn 才写入会话历史，被插话打断的 pending assistant turn 会丢弃；必要时用 committed history 重建实时模型会话。
 
-当前本地 `freeswitch_playback_events` 仍可能为 0，因此提交点先采用“网关下行播放队列 drain”的近似确认。真实商用前应修通 FreeSWITCH `queue_completed` 或替换为可上报真实播放完成的 media adapter。
+P6 已修通 FreeSWITCH 真实播放完成确认：`mod_audio_stream` 的 playback 事件不能只用 `event plain CUSTOM` 再追加 `filter Event-Subclass ...` 订阅，实测需要直接订阅 `event plain CUSTOM mod_audio_stream::playback`。启用 Event Socket 时，assistant turn 不再以“网关下行队列 drain”作为最终确认，而是等待 `chunk_played remaining=0` 或 `queue_completed` 后再进入 committed history。隔离验证中 raw binary 回包可收到 `chunk_played` 和 `queue_completed`。
 
 供应商方案已收敛：阿里 Realtime 和火山硬件智能体试验线不再作为本项目运行时路径。保留的唯一实时语音后端是豆包 S2S，代码、配置、测试和文档都应围绕这条主线维护。
 
@@ -285,7 +294,9 @@ TTSFinished / event=359 才能作为本轮 TTS 音频完成信号。
 
 最新 9199 复测又暴露了另一层边界：即使 `TTSFinished / 359` 已收到，FreeSWITCH 侧仍可能在段尾没有完全 drain，表现为本轮最后几个字没有播出、下一轮开始时才被听到。当前网关会在模型 turn 完成后先 flush 残余音频帧，再按 `playback.tail_silence_ms` 追加 20ms 对齐的静音尾帧，给 `mod_audio_stream` 留出段尾播放余量。
 
-这个修正是面向根因的播放层止血，不等于最终商用播放完成确认。真实商用前仍应优先修通 FreeSWITCH `queue_completed` / `chunk_played`，或替换为能上报真实播放完成的 media adapter，再用真实播放完成事件决定 assistant turn 是否进入 committed history。
+当前根因修复是两层一起成立：模型层用 `TTSFinished / 359` 判断模型输出结束，播放层用 FreeSWITCH `chunk_played remaining=0` / `queue_completed` 判断电话侧真实播放完成。只有两者都满足，且本地播放队列已清空，assistant turn 才能写入 committed history。
+
+最新卡顿分析显示，旧内容串入问题已被 P6 修复，但电话听感仍可能受下行发送抖动影响。电话侧每帧是 20ms / 320 bytes，若网关也严格 20ms 发一次，Python 事件循环偶发延迟就会让 FreeSWITCH 播放端缺少缓冲。当前配置把 `playback.send_interval_ms` 设为 `10`：本地播放队列高水位时用 10ms 间隔快发，给 `mod_audio_stream` 建立少量播放缓冲；队列低水位时回到 20ms 实时节奏，避免把模型尚未产出的后半段用静音顶掉。`queue_completed` 已接入，所以 assistant turn 是否进入 committed history 仍以 FreeSWITCH 真实播放完成为准。
 
 ## 数据格式目标
 
@@ -348,8 +359,9 @@ P2 Playout Engine 离线验证
 P3 FreeSWITCH 播放事件闭环
 P4 实时模型会话
 P5 商用打断
-P6 真实 SIP Trunk 预上线验证
-P7 生产护栏
+P6 FreeSWITCH 真实播放完成确认
+P7 真实 SIP Trunk 预上线验证
+P8 生产护栏
 ```
 
 每个阶段都要有独立测试结果，测试通过后再进入下一阶段。

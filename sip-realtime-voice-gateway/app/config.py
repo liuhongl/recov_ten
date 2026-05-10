@@ -61,6 +61,7 @@ class ServerVadConfig:
 @dataclass(frozen=True)
 class PlaybackConfig:
     jitter_buffer_ms: int = 240
+    send_interval_ms: int = 10
     tail_silence_ms: int = 300
 
 
@@ -258,6 +259,12 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
                 "playback",
                 "jitter_buffer_ms",
                 default=PlaybackConfig.jitter_buffer_ms,
+            ),
+            send_interval_ms=_get_int(
+                raw,
+                "playback",
+                "send_interval_ms",
+                default=PlaybackConfig.send_interval_ms,
             ),
             tail_silence_ms=_get_int(
                 raw,
@@ -518,6 +525,10 @@ def _apply_env_overrides(config: GatewayConfig) -> GatewayConfig:
             jitter_buffer_ms=_env_int(
                 "PLAYBACK_JITTER_BUFFER_MS",
                 config.playback.jitter_buffer_ms,
+            ),
+            send_interval_ms=_env_int(
+                "PLAYBACK_SEND_INTERVAL_MS",
+                config.playback.send_interval_ms,
             ),
             tail_silence_ms=_env_int(
                 "PLAYOUT_TAIL_SILENCE_MS",

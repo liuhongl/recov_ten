@@ -23,7 +23,92 @@ from ten_ai_base.struct import TTSTextInput, TTSFlush
 from ..cosy_tts import (
     MESSAGE_TYPE_PCM,
     MESSAGE_TYPE_CMD_COMPLETE,
+    CosyTTSClient,
 )
+from ..config import CosyTTSConfig
+from ..extension import CosyTTSExtension
+
+
+class FakeAsyncTenEnv:
+    def log_info(self, *_args, **_kwargs):
+        pass
+
+    def log_warn(self, *_args, **_kwargs):
+        pass
+
+    def log_debug(self, *_args, **_kwargs):
+        pass
+
+    def log_error(self, *_args, **_kwargs):
+        pass
+
+
+def test_cancel_drains_queued_audio_chunks():
+    config = CosyTTSConfig(
+        params={
+            "api_key": "a_valid_api_key",
+            "model": "cosyvoice-v1",
+            "sample_rate": 16000,
+            "voice": "longxiaochun",
+        }
+    )
+    config.update_params()
+    client = CosyTTSClient(config, FakeAsyncTenEnv(), "cosy")
+    client._receive_queue.put_nowait(
+        (False, MESSAGE_TYPE_PCM, b"old audio should not be played")
+    )
+
+    client.cancel()
+
+    assert client._receive_queue.empty()
+
+
+def test_audio_processor_drops_pcm_without_active_request():
+    config = CosyTTSConfig(
+        params={
+            "api_key": "a_valid_api_key",
+            "model": "cosyvoice-v1",
+            "sample_rate": 16000,
+            "voice": "longxiaochun",
+        }
+    )
+    config.update_params()
+
+    class FakeClient:
+        def __init__(self):
+            self.queue = asyncio.Queue()
+            self.queue.put_nowait((False, MESSAGE_TYPE_PCM, b"stale audio"))
+
+        async def get_audio_data(self):
+            if self.queue.empty():
+                await asyncio.sleep(60)
+            return await self.queue.get()
+
+    async def scenario():
+        extension = CosyTTSExtension("tts")
+        extension.ten_env = FakeAsyncTenEnv()
+        extension.config = config
+        extension.client = FakeClient()
+        extension.current_request_id = None
+        extension.first_chunk = False
+        sent_audio = []
+
+        async def fake_send_tts_audio_data(audio_chunk):
+            sent_audio.append(audio_chunk)
+
+        extension.send_tts_audio_data = fake_send_tts_audio_data
+
+        task = asyncio.create_task(extension._process_audio_data())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        return sent_audio
+
+    assert asyncio.run(scenario()) == []
 
 
 # ================ test dump file functionality ================

@@ -25,12 +25,38 @@
     ]
   },
   "api": {
+    "data_in": [
+      {
+        "name": "sip_user_speech_start"
+      },
+      {
+        "name": "sip_peer_connected"
+      },
+      {
+        "name": "sip_peer_disconnected"
+      },
+      {
+        "name": "tts_audio_start"
+      },
+      {
+        "name": "tts_audio_end"
+      },
+      {
+        "name": "tts_flush_end"
+      },
+      {
+        "name": "asr_result"
+      }
+    ],
     "property": {
       "properties": {
         "llm_extension": {
           "type": "string"
         },
         "tts_extension": {
+          "type": "string"
+        },
+        "media_bridge_extension": {
           "type": "string"
         },
         "response_language": {
@@ -40,6 +66,42 @@
           "type": "float32"
         },
         "max_context_messages": {
+          "type": "int32"
+        },
+        "interrupt_on_partial": {
+          "type": "bool"
+        },
+        "interrupt_min_chars": {
+          "type": "int32"
+        },
+        "interrupt_min_duration_ms": {
+          "type": "int32"
+        },
+        "urgent_interrupt_commands": {
+          "type": "string"
+        },
+        "final_interrupt_min_chars": {
+          "type": "int32"
+        },
+        "final_interrupt_min_duration_ms": {
+          "type": "int32"
+        },
+        "final_interrupt_min_remaining_ms": {
+          "type": "int32"
+        },
+        "speech_start_interrupt_min_rms": {
+          "type": "int32"
+        },
+        "speech_start_interrupt_min_peak": {
+          "type": "int32"
+        },
+        "barge_in_candidate_ttl_ms": {
+          "type": "int32"
+        },
+        "max_spoken_chars_per_turn": {
+          "type": "int32"
+        },
+        "tts_playback_guard_ms": {
           "type": "int32"
         }
       }

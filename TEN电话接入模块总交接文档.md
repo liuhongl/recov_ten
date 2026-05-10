@@ -236,7 +236,10 @@ ai_agents/agents/ten_packages/extension/sip_trunk_dialog_controller/
 voice_assistant_sip_trunk_cn_skeleton
 voice_assistant_sip_trunk_audio_frame_test
 voice_assistant_sip_trunk_cn_ai_minimal
+voice_assistant_sip_trunk_cn_ai_aliyun_asr_tts
 ```
+
+其中 `voice_assistant_sip_trunk_cn_ai_aliyun_asr_tts` 是 6B 阶段候选 graph，已接入阿里 ASR BigModel + DeepSeek/OpenAI-compatible LLM + 阿里 Cosy TTS 的配置骨架；当前只完成配置落地和 JSON 结构校验，尚未使用真实阿里密钥跑通电话实测。
 
 当前 `sip_media_bridge` 关键配置：
 
@@ -952,7 +955,7 @@ LLM 第一段文本 -> TTS 首包: 约 0.78s
 - 用户插话打断。
 - VAD / endpointing 优化。
 - ASR interim 预触发。
-- 阿里系 ASR/LLM/TTS A/B graph。
+- 全阿里 ASR/LLM/TTS A/B graph。
 - 自动化端到端延迟打点。
 - 10 路并发压测。
 - 录音、回放、监控、告警。
@@ -961,9 +964,9 @@ LLM 第一段文本 -> TTS 首包: 约 0.78s
 
 ```text
 6B：国内低延迟模型链路 A/B 验证
-  -> 新增阿里系 ASR/LLM/TTS graph
+  -> 验证已新增的阿里 ASR + DeepSeek + Cosy TTS graph
   -> 优先选择支持 8k 电话音频的 ASR
-  -> LLM 尝试阿里千问低延迟模型
+  -> 再新增全阿里 ASR + 千问低延迟 LLM + Cosy TTS graph
   -> TTS 尝试阿里 CosyVoice / Qwen TTS 流式能力
   -> 和当前 Deepgram + DeepSeek + ElevenLabs 链路做同条件对比
   -> 输出分段延迟数据
@@ -971,7 +974,7 @@ LLM 第一段文本 -> TTS 首包: 约 0.78s
 
 6B 暂不做固定开场白、提示词缩短、回复话术优化和完整打断。原因是这些不是当前 6A 约 5 秒首响延迟的根本变量。6B 的核心目标是先判断国内流式模型链路是否能降低 ASR final、LLM 首句和 TTS 首包耗时。
 
-当前已经确认本地 FreeSWITCH 真实媒体可以穿过 `sip_media_bridge` 和最小 ASR/LLM/TTS graph，并且电话侧能听到 AI 回复。下一阶段建议先在本地 `9199` 链路上新增阿里系 A/B graph，并保留当前已验证 graph 作为 baseline，再进入真实 SIP trunk 和 Call Gateway 联调。
+当前已经确认本地 FreeSWITCH 真实媒体可以穿过 `sip_media_bridge` 和最小 ASR/LLM/TTS graph，并且电话侧能听到 AI 回复。代码里已经加入 6B 第一条候选 graph `voice_assistant_sip_trunk_cn_ai_aliyun_asr_tts`，下一步建议先在本地 `9199` 链路上用真实阿里密钥验证它，并保留当前已验证 graph 作为 baseline，再进入真实 SIP trunk 和 Call Gateway 联调。
 
 ## 9. 本次本地测试安装内容
 
@@ -1190,6 +1193,52 @@ MicroSIP Account:
 - 能拨通但 RTP 不通。
 - FreeSWITCH SDP 里返回错误地址。
 
+### 9.7 macOS + Linphone 本机复测补充
+
+2026-05-09 在 macOS 本机又做了一次 6A 复测，测试终端从 Windows
+MicroSIP 换成了 Linphone。
+
+本次 macOS 现场值：
+
+```text
+host-lan-ip: 192.168.0.100
+softphone: Linphone
+SIP account: 1000
+SIP server/domain: 192.168.0.100
+测试号码：
+  9188：FreeSWITCH tone 测试音
+  9189：FreeSWITCH echo 回声测试
+  9199：FreeSWITCH -> Media Hub -> TEN 最小 AI 电话闭环
+```
+
+本次 macOS 复测额外发现的问题：
+
+```text
+1. Linphone 输出设备一开始选到了外接显示器 / HDMI，导致实际有音频但本机听不到。
+2. Docker Desktop for macOS 会经过 VM/NAT，RTP UDP 源端口行为和 Windows 现场不完全一致。
+3. 9199 首次验证时 TEN worker 已超时退出，Media Hub 只有 FreeSWITCH 侧，没有 TEN peer。
+```
+
+已做的 macOS 本机修正：
+
+```text
+Linphone:
+  playback / ringer / media device 改为 MacBook Pro 内置扬声器
+
+TEN worker:
+  /start 使用较长 timeout，避免验证过程中 worker 自动退出
+
+RTP:
+  增加 macOS host RTP relay
+  host 16384-16484/udp -> 127.0.0.1:26384-26484 -> FreeSWITCH container 16384-16484/udp
+```
+
+注意：
+
+- RTP relay 是 macOS Docker Desktop 的本机适配，不是 TEN 核心逻辑。
+- `ai_agents/local/` 已被 git ignore，本机 FreeSWITCH 配置和 relay 脚本不应作为通用代码提交。
+- Windows 已验证链路不需要默认启用这个 macOS relay；Windows 同事复现时仍应优先按 Windows 现场的端口映射和软电话配置执行。
+
 ## 10. 本次测试结论
 
 截至 2026-05-09，本地测试结果：
@@ -1210,6 +1259,7 @@ Media Hub -> FreeSWITCH：成功
 5B 听感：有回音，无明显卡顿
 9199 -> sip_media_bridge -> ASR/LLM/TTS -> 电话侧播放：成功
 6A 听感：能听到 AI 回复，修正后无明显卡顿，但首响延迟仍偏高
+macOS + Linphone 复测：成功
 ```
 
 10 秒延迟原因：
@@ -1289,6 +1339,34 @@ AI 回复：
 ```
 
 这说明 6A 的本地最小 AI 电话闭环已通过，但该结论只覆盖本地软电话链路，不覆盖真实 SIP trunk、真实手机号外呼、Call Gateway、VAD 打断、多轮稳定性和并发。
+
+macOS + Linphone 复测补充结论：
+
+```text
+9188：已听到测试音，证明 FreeSWITCH -> 电话侧下行 RTP 可用
+9189：已听到回声，证明 电话侧 -> FreeSWITCH -> 电话侧 双向 RTP 可用
+9199：已完成最小 AI 电话闭环
+
+Media Hub:
+  ten_registered channel=fs_stage5a_local sample_rate=8000
+  fs_connected channel=fs_stage5a_local
+  media_paired channel=fs_stage5a_local
+  audio_forwarded direction=fs_to_ten bytes=320
+  audio_forwarded direction=ten_to_fs bytes=320
+
+TEN / ASR:
+  received_pcm_from_media_hub bytes=320 sample_rate=8000
+  ASR final 包含：
+    你好呀
+    今天天气不错有大风
+    好吧挂断吧
+
+TTS:
+  tts_audio_end 已出现
+  Media Hub 已出现 ten_to_fs 音频转发
+```
+
+这次 macOS 复测证明“同一套 6A 业务链路在另一台本机环境也能跑通”，但同时也说明 SIP/RTP 很依赖本机网络、Docker NAT 和软电话声卡设置。
 
 ## 11. 常用检查命令
 
@@ -1498,9 +1576,9 @@ sip_media_bridge.channel
 
 否则无法排查串线、资源残留和并发问题。
 
-### 12.6 Windows / Docker NAT 容易影响 RTP
+### 12.6 Windows / macOS Docker NAT 容易影响 RTP
 
-本次无声问题的真实原因是：
+Windows 现场无声问题的真实原因是：
 
 ```text
 FreeSWITCH 在 SDP 中返回了容器内部 RTP 地址和未映射 RTP 端口
@@ -1512,7 +1590,18 @@ FreeSWITCH 在 SDP 中返回了容器内部 RTP 地址和未映射 RTP 端口
 - 限制 RTP 端口到已映射范围。
 - 对 internal profile 启用 NAT 相关配置。
 
-后续如果换机器或网络，先检查 SDP 和 RTP 地址，不要只看 SIP 注册。
+macOS 现场无声问题还额外叠加了 Docker Desktop VM/NAT 对 UDP 源端口的影响。表现是 SIP 能注册、电话能接通，但 Linphone 不一定接受来自非预期源端口的 RTP。
+
+macOS 复测中的处理方式是：
+
+```text
+FreeSWITCH 容器 RTP 端口改为宿主机高位端口映射
+宿主机启动本地 RTP relay
+relay 监听 Linphone 期望的 16384-16484/udp
+relay 再转发到 Docker 暴露的 26384-26484/udp
+```
+
+后续如果换机器或网络，先检查 SDP、RTP 地址和实际 UDP 源端口，不要只看 SIP 注册。
 
 ## 13. 阶段 6A 当前状态
 
@@ -1539,7 +1628,7 @@ MicroSIP
 
 ```text
 状态：本地最小 AI 电话闭环已通过
-范围：仅限 MicroSIP + 本地 Docker FreeSWITCH + 本地 9199
+范围：Windows MicroSIP / macOS Linphone + 本地 Docker FreeSWITCH + 本地 9199
 不包含：真实 SIP trunk、真实手机号外呼、Call Gateway、生产体验
 ```
 
@@ -1578,12 +1667,20 @@ Call Gateway 已能自动外呼
 
 阶段 6A 已完成本地最小 AI 电话闭环。下一阶段建议不要立刻进入真实 SIP trunk，而是先做本地 6B 国内低延迟模型链路 A/B 验证，降低后续真实线路联调时的变量数量。
 
+当前代码已经加入 6B 第一条候选 graph：
+
+```text
+voice_assistant_sip_trunk_cn_ai_aliyun_asr_tts
+```
+
+该 graph 使用 `aliyun_asr_bigmodel_python` + `openai_llm2_python` + `cosy_tts_python`。它还没有真实电话验证，原因是本机 `.env` 尚未提供 `ALIYUN_ASR_BIGMODEL_API_KEY` 和 `COSY_TTS_API_KEY`。
+
 建议 6B 范围：
 
 ```text
 1. 保留当前 Deepgram + DeepSeek + ElevenLabs graph 作为 baseline。
-2. 新增阿里 ASR/TTS graph，优先验证 8k 电话 ASR 和流式 TTS。
-3. 新增全阿里 graph：阿里 ASR + 阿里千问低延迟 LLM + 阿里 TTS。
+2. 验证已新增的阿里 ASR/TTS graph，优先验证 8k 电话 ASR 和流式 TTS。
+3. 再新增全阿里 graph：阿里 ASR + 阿里千问低延迟 LLM + 阿里 TTS。
 4. LLM 可通过 openai_llm2_python 的 OpenAI-compatible base_url 切到阿里百炼。
 5. 对比每组的 ASR final、LLM 首句、TTS 首包和电话侧首响。
 ```
@@ -1607,6 +1704,7 @@ baseline:
 
 aliyun-asr-tts:
   阿里 8k ASR + DeepSeek LLM + 阿里 TTS
+  graph: voice_assistant_sip_trunk_cn_ai_aliyun_asr_tts
 
 aliyun-full:
   阿里 8k ASR + 阿里千问低延迟 LLM + 阿里 TTS
@@ -1618,6 +1716,15 @@ aliyun-full:
 OPENAI_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1
 OPENAI_API_KEY=<阿里百炼 DashScope API Key>
 OPENAI_MODEL=<千问低延迟模型，例如 qwen3.6-flash 或 qwen-plus>
+```
+
+阿里 ASR/TTS graph 需要的环境变量：
+
+```text
+ALIYUN_ASR_BIGMODEL_API_KEY=<阿里 DashScope API Key>
+COSY_TTS_API_KEY=<阿里 DashScope API Key>
+COSY_TTS_MODEL=cosyvoice-v3
+COSY_TTS_VOICE=loongluna_v2
 ```
 
 注意：电话场景优先选择低延迟、稳定中文对话模型，不优先选择深度思考或 reasoning 类模型。电话首响的核心是尽快产出第一段可播文本。
@@ -1639,5 +1746,5 @@ OPENAI_MODEL=<千问低延迟模型，例如 qwen3.6-flash 或 qwen-plus>
 真实 SIP trunk 完全未验证。
 运营商线路 codec 已确认是 PCMA，FreeSWITCH 需要将其解码成 8k PCM 后再进入 Media Hub。
 Call Gateway、ESL 外呼控制、AI 开场白、VAD 打断、并发和生产监控仍未实现。
-下一步建议先做本地 6B 国内低延迟模型链路 A/B 测试，再进入真实 SIP trunk 联调。
+下一步建议先用真实阿里密钥验证本地 6B 国内低延迟模型链路 A/B 测试，再进入真实 SIP trunk 联调。
 ```

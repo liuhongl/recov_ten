@@ -12,6 +12,7 @@ class CosyTTSConfig(BaseModel):
     model: str = ""  # Model name
     voice: str = ""  # Voice name
     sample_rate: int = 16000  # Audio sample rate
+    speech_rate: float = 1.0  # Speech speed multiplier
 
     # Debug and dump settings
     dump: bool = False
@@ -46,6 +47,7 @@ class CosyTTSConfig(BaseModel):
             "api_key",
             "model",
             "sample_rate",
+            "speech_rate",
             "voice",
         ]
 

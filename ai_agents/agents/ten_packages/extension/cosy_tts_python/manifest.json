@@ -45,6 +45,9 @@
             "sample_rate": {
               "type": "int64"
             },
+            "speech_rate": {
+              "type": "float64"
+            },
             "voice": {
               "type": "string"
             }

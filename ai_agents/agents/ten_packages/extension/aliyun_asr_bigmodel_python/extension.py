@@ -1,6 +1,7 @@
 from datetime import datetime
 import os
 import asyncio
+import json
 
 from typing_extensions import override
 from .const import (
@@ -21,6 +22,7 @@ from ten_ai_base.message import (
 from ten_runtime import (
     AsyncTenEnv,
     AudioFrame,
+    Data,
 )
 from ten_ai_base.const import (
     LOG_CATEGORY_VENDOR,
@@ -55,15 +57,11 @@ class AliyunRecognitionCallback(RecognitionCallback):
             "vendor_status_changed: on_open",
             category=LOG_CATEGORY_VENDOR,
         )
-        asyncio.run_coroutine_threadsafe(
-            self.extension.on_asr_open(), self.loop
-        )
+        asyncio.run_coroutine_threadsafe(self.extension.on_asr_open(), self.loop)
 
     def on_complete(self) -> None:
         """Callback when recognition is completed"""
-        asyncio.run_coroutine_threadsafe(
-            self.extension.on_asr_complete(), self.loop
-        )
+        asyncio.run_coroutine_threadsafe(self.extension.on_asr_complete(), self.loop)
 
     def on_error(self, result: RecognitionResult) -> None:
         """Error handling callback"""
@@ -71,16 +69,12 @@ class AliyunRecognitionCallback(RecognitionCallback):
             f"vendor_error: code: {result.status_code}, reason: {result.message}",
             category=LOG_CATEGORY_VENDOR,
         )
-        asyncio.run_coroutine_threadsafe(
-            self.extension.on_asr_error(result), self.loop
-        )
+        asyncio.run_coroutine_threadsafe(self.extension.on_asr_error(result), self.loop)
 
     def on_event(self, result: RecognitionResult) -> None:
         """Recognition result event callback"""
         self.ten_env.log_info(f"Aliyun ASR result event: {result}")
-        asyncio.run_coroutine_threadsafe(
-            self.extension.on_asr_event(result), self.loop
-        )
+        asyncio.run_coroutine_threadsafe(self.extension.on_asr_event(result), self.loop)
 
     def on_close(self) -> None:
         """Callback when connection is closed"""
@@ -88,9 +82,7 @@ class AliyunRecognitionCallback(RecognitionCallback):
             "vendor_status_changed: on_close",
             category=LOG_CATEGORY_VENDOR,
         )
-        asyncio.run_coroutine_threadsafe(
-            self.extension.on_asr_close(), self.loop
-        )
+        asyncio.run_coroutine_threadsafe(self.extension.on_asr_close(), self.loop)
 
 
 class AliyunASRBigmodelExtension(AsyncASRBaseExtension):
@@ -112,6 +104,9 @@ class AliyunASRBigmodelExtension(AsyncASRBaseExtension):
 
         # Callback instance
         self.recognition_callback: AliyunRecognitionCallback | None = None
+
+        self.peer_connected: bool = True
+        self.reconnect_enabled: bool = True
 
     @override
     async def on_deinit(self, ten_env: AsyncTenEnv) -> None:
@@ -136,9 +131,7 @@ class AliyunASRBigmodelExtension(AsyncASRBaseExtension):
         config_json, _ = await ten_env.get_property_to_json("")
 
         try:
-            temp_config = AliyunASRBigmodelConfig.model_validate_json(
-                config_json
-            )
+            temp_config = AliyunASRBigmodelConfig.model_validate_json(config_json)
 
             if temp_config.model == "":
                 temp_config.model = "paraformer-realtime-v2"
@@ -161,9 +154,7 @@ class AliyunASRBigmodelExtension(AsyncASRBaseExtension):
                 )
 
             if self.config.dump:
-                dump_file_path = os.path.join(
-                    self.config.dump_path, DUMP_FILE_NAME
-                )
+                dump_file_path = os.path.join(self.config.dump_path, DUMP_FILE_NAME)
                 self.audio_dumper = Dumper(dump_file_path)
 
         except Exception as e:
@@ -181,14 +172,20 @@ class AliyunASRBigmodelExtension(AsyncASRBaseExtension):
     async def start_connection(self) -> None:
         """Start ASR connection"""
         assert self.config is not None
+
+        if not self.peer_connected:
+            self.ten_env.log_info(
+                "Aliyun ASR start skipped because peer is disconnected"
+            )
+            return
+
+        self.reconnect_enabled = True
         self.ten_env.log_info("Starting Aliyun ASR connection")
 
         try:
             # Check API key
             if not self.config.api_key or self.config.api_key.strip() == "":
-                error_msg = (
-                    "Aliyun API key is required but not provided or is empty"
-                )
+                error_msg = "Aliyun API key is required but not provided or is empty"
                 self.ten_env.log_error(error_msg)
                 await self.send_asr_error(
                     ModuleError(
@@ -232,9 +229,7 @@ class AliyunASRBigmodelExtension(AsyncASRBaseExtension):
             self.ten_env.log_info("Aliyun ASR connection started successfully")
 
         except Exception as e:
-            self.ten_env.log_error(
-                f"Failed to start Aliyun ASR connection: {e}"
-            )
+            self.ten_env.log_error(f"Failed to start Aliyun ASR connection: {e}")
             await self.send_asr_error(
                 ModuleError(
                     module=MODULE_NAME_ASR,
@@ -292,11 +287,7 @@ class AliyunASRBigmodelExtension(AsyncASRBaseExtension):
             )
 
             sentence = result.get_sentence()
-            if (
-                isinstance(sentence, dict)
-                and "text" in sentence
-                and sentence["text"]
-            ):
+            if isinstance(sentence, dict) and "text" in sentence and sentence["text"]:
                 text = sentence["text"]
                 is_final = RecognitionResult.is_sentence_end(sentence)
 
@@ -338,9 +329,7 @@ class AliyunASRBigmodelExtension(AsyncASRBaseExtension):
                         language=self.config.normalized_language,
                     )
                 else:
-                    self.ten_env.log_error(
-                        "Cannot handle ASR result: config is None"
-                    )
+                    self.ten_env.log_error("Cannot handle ASR result: config is None")
 
         except Exception as e:
             self.ten_env.log_error(f"Error processing Aliyun ASR result: {e}")
@@ -356,11 +345,105 @@ class AliyunASRBigmodelExtension(AsyncASRBaseExtension):
 
         self.connected = False
 
+        if not self.reconnect_enabled or not self.peer_connected:
+            self.ten_env.log_info(
+                "Aliyun ASR connection closed intentionally; skip reconnect"
+            )
+            return
+
         if not self.stopped:
             self.ten_env.log_warn(
                 "Aliyun ASR connection closed unexpectedly. Reconnecting..."
             )
             await self._handle_reconnect()
+
+    @override
+    async def on_data(self, ten_env: AsyncTenEnv, data: Data) -> None:
+        if self.ten_env is None:
+            self.ten_env = ten_env
+
+        data_name = data.get_name()
+        if data_name in {"sip_peer_connected", "sip_peer_disconnected"}:
+            await self._handle_peer_event(ten_env, data_name, data)
+            return
+
+        await super().on_data(ten_env, data)
+
+    @override
+    async def on_audio_frame(
+        self, ten_env: AsyncTenEnv, audio_frame: AudioFrame
+    ) -> None:
+        if not self.peer_connected:
+            self.ten_env.log_debug(
+                "Aliyun ASR dropped audio because peer is disconnected"
+            )
+            return
+
+        await super().on_audio_frame(ten_env, audio_frame)
+
+    async def _handle_peer_event(
+        self,
+        ten_env: AsyncTenEnv,
+        data_name: str,
+        data: Data,
+    ) -> None:
+        payload, _ = data.get_property_to_json(None)
+        try:
+            event = json.loads(payload or "{}")
+        except json.JSONDecodeError:
+            event = {}
+
+        peer_role = str(event.get("peer_role", ""))
+        if peer_role and peer_role != "fs":
+            ten_env.log_info(
+                "Aliyun ASR ignored peer event: "
+                f"name={data_name}, peer_role={peer_role}"
+            )
+            return
+
+        if data_name == "sip_peer_connected":
+            self.peer_connected = True
+            self.reconnect_enabled = True
+            self._clear_call_audio_state()
+            if not self.is_connected() and not self.stopped:
+                await self.start_connection()
+        else:
+            self.peer_connected = False
+            self.reconnect_enabled = False
+            self._clear_call_audio_state()
+            await self.stop_connection()
+
+        ten_env.log_info(
+            "Aliyun ASR peer_event: "
+            f"name={data_name}, peer_connected={self.peer_connected}, "
+            f"payload={payload or '{}'}"
+        )
+
+    def _clear_call_audio_state(self) -> None:
+        while not self.buffered_frames.empty():
+            try:
+                self.buffered_frames.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        self.buffered_frames_size = 0
+
+        while not self.audio_frames_queue.empty():
+            try:
+                self.audio_frames_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        self.session_id = None
+        self.metadata = None
+        self.finalize_id = None
+        self.sent_buffer_length = 0
+        self.first_audio_time = None
+        self.ttfw_sent = False
+        self.last_finalize_time = None
+        self.last_reported_audio_duration = 0
+        self.sent_user_audio_duration_ms_before_last_reset = 0
+        self.last_finalize_timestamp = 0
+        self.audio_timeline.reset()
 
     @override
     async def finalize(self, session_id: str | None) -> None:
@@ -389,6 +472,10 @@ class AliyunASRBigmodelExtension(AsyncASRBaseExtension):
         """Process ASR recognition result"""
         assert self.config is not None
 
+        if not self.peer_connected:
+            self.ten_env.log_info("Aliyun ASR ignored result after peer disconnect")
+            return
+
         if final:
             await self._finalize_end()
 
@@ -409,9 +496,7 @@ class AliyunASRBigmodelExtension(AsyncASRBaseExtension):
             try:
                 if self.is_connected():
                     self.recognition.stop()
-                    self.ten_env.log_debug(
-                        "Aliyun ASR finalize disconnect completed"
-                    )
+                    self.ten_env.log_debug("Aliyun ASR finalize disconnect completed")
                 else:
                     self.ten_env.log_debug(
                         "Aliyun ASR finalize disconnect completed, but not connected"
@@ -427,9 +512,7 @@ class AliyunASRBigmodelExtension(AsyncASRBaseExtension):
             try:
                 mute_pkg_duration_ms = self.config.mute_pkg_duration_ms
                 silence_duration = mute_pkg_duration_ms / 1000.0
-                silence_samples = int(
-                    self.config.sample_rate * silence_duration
-                )
+                silence_samples = int(self.config.sample_rate * silence_duration)
                 silence_data = b"\x00" * (silence_samples * 2)  # 16-bit samples
                 self.audio_timeline.add_silence_audio(mute_pkg_duration_ms)
                 self.recognition.send_audio_frame(silence_data)
@@ -469,14 +552,10 @@ class AliyunASRBigmodelExtension(AsyncASRBaseExtension):
         )
 
         if success:
-            self.ten_env.log_debug(
-                "Reconnection attempt initiated successfully"
-            )
+            self.ten_env.log_debug("Reconnection attempt initiated successfully")
         else:
             info = self.reconnect_manager.get_attempts_info()
-            self.ten_env.log_debug(
-                f"Reconnection attempt failed. Status: {info}"
-            )
+            self.ten_env.log_debug(f"Reconnection attempt failed. Status: {info}")
 
     async def _finalize_end(self) -> None:
         """Handle finalization end logic"""
@@ -492,12 +571,14 @@ class AliyunASRBigmodelExtension(AsyncASRBaseExtension):
     async def stop_connection(self) -> None:
         """Stop ASR connection"""
         try:
-            if self.recognition:
-                self.recognition.stop()
-                self.recognition = None
-
-            self.recognition_callback = None
+            recognition = self.recognition
             self.connected = False
+            self.recognition = None
+            self.recognition_callback = None
+
+            if recognition:
+                recognition.stop()
+
             self.ten_env.log_info("Aliyun ASR connection stopped")
 
         except Exception as e:
@@ -522,9 +603,7 @@ class AliyunASRBigmodelExtension(AsyncASRBaseExtension):
         return self.config.sample_rate
 
     @override
-    async def send_audio(
-        self, frame: AudioFrame, session_id: str | None
-    ) -> bool:
+    async def send_audio(self, frame: AudioFrame, session_id: str | None) -> bool:
         """Send audio data"""
         assert self.config is not None
 
@@ -561,7 +640,5 @@ class AliyunASRBigmodelExtension(AsyncASRBaseExtension):
         except Exception as e:
             self.ten_env.log_error(f"Error sending audio to Aliyun ASR: {e}")
             frame.unlock_buf(buf)
-            self.ten_env.log_error(
-                "Failed to process audio frame, returning False"
-            )
+            self.ten_env.log_error("Failed to process audio frame, returning False")
             return False

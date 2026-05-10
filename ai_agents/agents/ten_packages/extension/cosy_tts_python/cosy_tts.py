@@ -192,6 +192,7 @@ class CosyTTSClient:
             callback=self._callback,
             format=self._get_audio_format(),
             model=self.config.model,
+            speech_rate=self.config.speech_rate,
             voice=self.config.voice,
         )
 
@@ -213,6 +214,28 @@ class CosyTTSClient:
 
             # Clean up synthesizer
             self.synthesizer = None
+
+        self._drain_receive_queue()
+
+    def _drain_receive_queue(self) -> None:
+        drained_count = 0
+        drained_bytes = 0
+        while True:
+            try:
+                _done, message_type, data = self._receive_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+            drained_count += 1
+            if message_type == MESSAGE_TYPE_PCM and isinstance(data, bytes):
+                drained_bytes += len(data)
+            self._receive_queue.task_done()
+
+        if drained_count:
+            self.ten_env.log_info(
+                "Drained queued TTS data after cancellation: "
+                f"items={drained_count}, audio_bytes={drained_bytes}"
+            )
 
     def complete(self) -> None:
         """

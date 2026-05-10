@@ -328,6 +328,13 @@ class CosyTTSExtension(AsyncTTS2BaseExtension):
                             and len(audio_chunk) > 0
                             and isinstance(audio_chunk, bytes)
                         ):
+                            if self.current_request_id is None:
+                                self.ten_env.log_info(
+                                    "Dropped TTS audio chunk without active "
+                                    "request_id after cancellation"
+                                )
+                                continue
+
                             # Add recv audio chunks to metrics
                             self.metrics_add_recv_audio_chunks(audio_chunk)
                             self.chunk_count += 1

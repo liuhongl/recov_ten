@@ -110,6 +110,40 @@
     },
     {
       "type": "extension",
+      "name": "aliyun_asr_bigmodel_python",
+      "version": "0.2.5",
+      "hash": "d5659201fc4ea8568b094b06fb486ade2c81ad732af58f7fa1fc1fe51659c127",
+      "dependencies": [
+        {
+          "type": "system",
+          "name": "ten_runtime_python"
+        },
+        {
+          "type": "system",
+          "name": "ten_ai_base"
+        }
+      ],
+      "path": "../../../ten_packages/extension/aliyun_asr_bigmodel_python"
+    },
+    {
+      "type": "extension",
+      "name": "cosy_tts_python",
+      "version": "0.4.0",
+      "hash": "eaff006ccecab4af9b96589eace754b1f693641b8eb146efb9466b03b8b9b6e5",
+      "dependencies": [
+        {
+          "type": "system",
+          "name": "ten_runtime_python"
+        },
+        {
+          "type": "system",
+          "name": "ten_ai_base"
+        }
+      ],
+      "path": "../../../ten_packages/extension/cosy_tts_python"
+    },
+    {
+      "type": "extension",
       "name": "sip_trunk_dialog_controller",
       "version": "0.1.0",
       "hash": "3032176c3a48384a6e4c7a3e468d1da870092f7c1259ffea67b579df2a90c609",

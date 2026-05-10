@@ -143,4 +143,5 @@ ai_agents/.idea
 ai_agents/*.log
 ai_agents/*.pcm
 ai_agents/*.pem
+tmp_audio_debug/
 /.trae

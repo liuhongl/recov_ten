@@ -29,6 +29,12 @@
       "path": "../../../ten_packages/extension/elevenlabs_tts2_python"
     },
     {
+      "path": "../../../ten_packages/extension/aliyun_asr_bigmodel_python"
+    },
+    {
+      "path": "../../../ten_packages/extension/cosy_tts_python"
+    },
+    {
       "path": "../../../ten_packages/extension/sip_trunk_dialog_controller"
     }
   ],

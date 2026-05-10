@@ -31,13 +31,63 @@
         "sample_rate": {
           "type": "int32"
         },
+        "output_gain": {
+          "type": "float32"
+        },
+        "output_peak_limit": {
+          "type": "int32"
+        },
+        "dump": {
+          "type": "bool"
+        },
+        "dump_path": {
+          "type": "string"
+        },
         "heartbeat_interval_seconds": {
           "type": "int32"
         },
         "registration_timeout_seconds": {
           "type": "int32"
+        },
+        "speech_start_detection_enabled": {
+          "type": "bool"
+        },
+        "speech_start_min_rms": {
+          "type": "int32"
+        },
+        "speech_start_min_peak": {
+          "type": "int32"
+        },
+        "speech_start_min_frames": {
+          "type": "int32"
+        },
+        "speech_start_rearm_silence_frames": {
+          "type": "int32"
+        },
+        "speech_start_cooldown_ms": {
+          "type": "int32"
+        },
+        "outgoing_silence_trim_enabled": {
+          "type": "bool"
+        },
+        "outgoing_silence_rms_threshold": {
+          "type": "int32"
+        },
+        "outgoing_silence_max_hold_ms": {
+          "type": "int32"
         }
       }
-    }
+    },
+    "data_out": [
+      {
+        "name": "sip_user_speech_start"
+      },
+      {
+        "name": "sip_peer_connected"
+      },
+      {
+        "name": "sip_peer_disconnected"
+      }
+    ]
   }
 }

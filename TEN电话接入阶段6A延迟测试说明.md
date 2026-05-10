@@ -73,6 +73,14 @@ ten_local_freeswitch
 MicroSIP
 ```
 
+补充说明：
+
+```text
+2026-05-09 后续又在 macOS + Linphone 上完成了一次 6A 复测。
+原 Windows + MicroSIP 延迟样本仍作为 baseline。
+macOS 复测用于确认换软电话和换宿主机后，6A 最小 AI 链路仍可打通。
+```
+
 电话拨号：
 
 ```text
@@ -134,6 +142,52 @@ MicroSIP.ini:
 ```
 
 这个修正只影响本地测试环境，不属于 TEN 核心代码逻辑。
+
+### 5.1 macOS + Linphone 复测发现的问题
+
+macOS 复测时使用：
+
+```text
+host-lan-ip: 192.168.0.100
+softphone: Linphone
+SIP account: 1000
+测试号码:
+  9188 tone
+  9189 echo
+  9199 最小 AI 电话闭环
+```
+
+复测过程中发现：
+
+```text
+1. Linphone 播放设备曾指向外接显示器 / HDMI，导致下行有音频但用户听不到。
+2. Docker Desktop for macOS 的 UDP/NAT 行为会改变 RTP 源端口，Linphone 可能丢弃非预期 RTP。
+3. 首次 9199 验证时 TEN worker 已超时退出，Media Hub 出现 no_peer。
+```
+
+对应修正：
+
+```text
+1. Linphone playback / ringer / media device 改为 MacBook Pro 内置扬声器。
+2. 增加 macOS 本机 RTP relay：
+   host 16384-16484/udp -> 127.0.0.1:26384-26484 -> FreeSWITCH container 16384-16484/udp
+3. 重新用较长 timeout 启动 TEN worker。
+```
+
+修正后验证结果：
+
+```text
+9188：能听到测试音
+9189：能听到回声
+9199：ASR 识别出用户实际说话内容，并有 TTS 回传
+
+ASR final 样例：
+  你好呀
+  今天天气不错有大风
+  好吧挂断吧
+```
+
+这个 macOS 修正只影响本机测试环境，不属于 TEN 核心代码逻辑，也不要求 Windows 复现时默认使用 RTP relay。
 
 ## 6. 本次测试样本
 

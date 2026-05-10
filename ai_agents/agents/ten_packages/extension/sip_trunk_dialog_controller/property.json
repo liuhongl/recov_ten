@@ -3,5 +3,12 @@
   "tts_extension": "tts",
   "response_language": "zh-CN",
   "temperature": 0.7,
-  "max_context_messages": 10
+  "max_context_messages": 10,
+  "urgent_interrupt_commands": "停,停止,停一下,先停,暂停,等一下,等等,等会,先等一下,别说了,不要说了,不用说了,别讲了,不要讲了,打住,stop",
+  "final_interrupt_min_chars": 3,
+  "final_interrupt_min_duration_ms": 1200,
+  "final_interrupt_min_remaining_ms": 700,
+  "speech_start_interrupt_min_rms": 1200,
+  "speech_start_interrupt_min_peak": 4000,
+  "barge_in_candidate_ttl_ms": 1600
 }

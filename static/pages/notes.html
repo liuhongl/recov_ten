@@ -986,3 +986,233 @@ turns_failed=0</code></pre>
 3. 只有真实 completed 的 assistant turn 才能进入 committed history。
 4. interrupted / abandoned 的 turn 不能污染模型上下文。
 5. 保留 500ms jitter buffer 作为当前本地体验基线，后续再根据播放事件和 send gap 指标调参。</code></pre>
+<h3>14.12 当前独立 SIP 实时语音网关答疑整理</h3>
+<p>当前文档里说的“网关”，指的是本仓库的 <code>sip-realtime-voice-gateway</code> 服务，也就是 <code>python -m app.main</code> 启动的 Python 进程。它不是 FreeSWITCH、不是豆包 S2S、也不是业务系统，而是夹在电话系统和实时语音模型中间的控制与媒体适配服务。</p>
+<p>它有两面：</p>
+<pre><code>HTTP 控制面
+  负责接收业务系统外呼请求、查状态、挂断电话。
+
+实时媒体网关
+  负责接电话音频、连豆包 S2S、做格式转换、播放控制、打断控制和会话状态管理。</code></pre>
+<h4>14.12.1 当前主链路怎么理解</h4>
+<pre><code>业务系统
+  -&gt; sip-realtime-voice-gateway HTTP 控制面
+  -&gt; FreeSWITCH / SIP Trunk
+  -&gt; 电话用户
+  -&gt; FreeSWITCH 9199 媒体链路
+  -&gt; sip-realtime-voice-gateway 实时媒体网关
+  -&gt; 豆包 S2S 端到端实时语音模型
+  -&gt; 电话用户</code></pre>
+<p>第一性原理上，这条链路分为“呼叫控制”和“通话内容”两件事。业务系统真正要表达的是“给某个用户打一通电话，并拿到结果”；它不应该关心 FreeSWITCH originate 命令怎么拼、SIP endpoint 怎么解析、9199 拨号计划怎么写、Event Socket 怎么订阅事件、媒体 WebSocket 怎么接。</p>
+<pre><code>HTTP 控制面
+  管“叫谁、现在什么状态、是否挂断”。
+
+9199 媒体链路 + 实时媒体网关
+  管“电话接通后，用户和 AI 怎么实时说话”。</code></pre>
+<p><code>FreeSWITCH 9199 媒体链路</code> 是电话侧的媒体入口。电话接通后进入 <code>9199</code> 拨号计划，FreeSWITCH 负责 SIP、RTP、PCMA 协商、通话 channel 生命周期，并把音频通过媒体 WebSocket 接到网关。</p>
+<p><code>sip-realtime-voice-gateway 实时媒体网关</code> 是 AI 侧的媒体适配层。它接收 FreeSWITCH 送来的电话音频，按 <code>PCMA / 8k / mono / 20ms</code> 的电话媒体契约处理，转成豆包 S2S 需要的实时音频格式，再把模型返回的音频转回电话可播放格式。</p>
+<h4>14.12.2 POST /calls 发起外呼</h4>
+<pre><code>POST /calls
+Content-Type: application/json
+
+{
+  "destination": "1000",
+  "external_call_id": "local-test-001",
+  "caller_id_number": "9000",
+  "context": {
+    "scene": "local-outbound-test"
+  }
+}</code></pre>
+<p>这个接口是业务系统给网关的外呼控制指令，不是真正的音频通话。网关收到后，会校验请求、生成内部 <code>call_id</code>、记录业务上下文，然后通过 FreeSWITCH Event Socket 发起 originate。</p>
+<pre><code>destination
+  被叫号码。本地测试通常是 MicroSIP 分机 1000；真实线路通常是手机号或运营商要求的号码格式。
+
+external_call_id
+  业务系统自己的通话 ID，可选。网关内部仍会生成自己的 call_id。
+
+caller_id_number
+  主叫号码。本地默认 9000，避免 1000 呼叫 1000 的自呼叫歧义。
+
+endpoint
+  可选，覆盖默认呼叫目标。真实 SIP trunk 可能会用 sofia/gateway/&lt;trunk-name&gt;/{destination}。
+
+context
+  业务上下文 JSON。当前主要保存和透传，后续可注入 AI prompt。
+
+originate_timeout_seconds
+  外呼超时时间，默认 30 秒。</code></pre>
+<p>本地默认会把 <code>destination=1000</code> 解析成 <code>sofia_contact:*/1000</code>，让 FreeSWITCH 查找当前注册的 1000 分机 Contact；真实商用线路会改成 SIP Trunk endpoint。</p>
+<h4>14.12.3 GET /calls 查询外呼状态</h4>
+<p><code>GET /calls</code> 返回最近一批外呼记录，<code>GET /calls/{call_id}</code> 返回某一通电话的详细状态。业务系统最先应该看这些字段：</p>
+<pre><code>call_id
+external_call_id
+status
+phase
+failure_reason
+hangup_cause
+sip_status
+elapsed_ms
+talk_duration_ms</code></pre>
+<p>字段可以分成几类：</p>
+<pre><code>身份字段
+  call_id、external_call_id、destination、context
+
+路由字段
+  endpoint、requested_endpoint、dialplan_extension、dialplan_context、caller_id_name、caller_id_number
+
+状态字段
+  status、phase、phase_label
+
+时间字段
+  created_at_ms、started_at_ms、ringing_at_ms、answered_at_ms、media_connected_at_ms、completed_at_ms
+
+耗时字段
+  elapsed_ms、originate_elapsed_ms、answer_latency_ms、ringing_ms、talk_duration_ms
+
+FreeSWITCH 诊断字段
+  freeswitch_reply、last_event_name、hangup_cause、sip_status、sip_reason
+
+失败解释字段
+  error、failure_reason、failure_label、failure_hint、sip_status_hint</code></pre>
+<p>正常结束时通常是：</p>
+<pre><code>status=completed
+phase=completed
+hangup_cause=NORMAL_CLEARING
+failure_reason=null</code></pre>
+<p>临时失败时可能是：</p>
+<pre><code>status=failed
+phase=temporary_failure
+hangup_cause=NORMAL_TEMPORARY_FAILURE
+sip_status=503
+failure_reason=NORMAL_TEMPORARY_FAILURE</code></pre>
+<p>这里的重点是：业务状态不是 HTTP 请求返回时猜出来的，而是网关持续消费 FreeSWITCH channel 事件、挂断原因和 SIP 状态码后映射出来的。</p>
+<h4>14.12.4 Event Socket 是什么</h4>
+<p>Event Socket 是 FreeSWITCH 提供的控制和事件接口。它不是 SIP，也不是 RTP 音频流，而是 FreeSWITCH 暴露给外部系统的“远程控制台 + 事件订阅通道”。</p>
+<p>在当前项目里，它主要做三件事：</p>
+<pre><code>1. 让网关命令 FreeSWITCH 发起外呼。
+2. 让网关监听 FreeSWITCH 的通话状态事件。
+3. 用户插话时，让网关命令 FreeSWITCH 停止旧音频播放。</code></pre>
+<p>和其他层的关系：</p>
+<pre><code>HTTP 控制面
+  业务系统调用网关。
+
+Event Socket
+  网关控制 FreeSWITCH，并接收 FreeSWITCH 事件。
+
+SIP / SIP Trunk
+  FreeSWITCH 和电话网络之间建立、接通、挂断电话。
+
+RTP / 媒体 WebSocket
+  真正传输声音。</code></pre>
+<h4>14.12.5 CHANNEL_* 事件从哪里来</h4>
+<p><code>CHANNEL_PROGRESS</code>、<code>CHANNEL_ANSWER</code>、<code>CHANNEL_HANGUP</code>、<code>CHANNEL_HANGUP_COMPLETE</code> 都是 FreeSWITCH 自己产生的 channel 生命周期事件。它们不是业务系统传进来的，也不是网关编出来的。</p>
+<pre><code>一通电话在 FreeSWITCH 里会变成一个 channel。
+channel 从创建、呼叫中、接通、挂断，到最终清理。
+每发生一个关键状态变化，FreeSWITCH 就发布一个 CHANNEL_* 事件。
+网关通过 Event Socket 订阅并消费这些事件。</code></pre>
+<p>外呼状态机当前接入了这些事件：</p>
+<pre><code>CHANNEL_PROGRESS / CHANNEL_PROGRESS_MEDIA -&gt; ringing
+CHANNEL_ANSWER                            -&gt; answered
+媒体 WebSocket 连接                        -&gt; media_connected
+CHANNEL_HANGUP / CHANNEL_HANGUP_COMPLETE  -&gt; completed / busy / no_answer / failed</code></pre>
+<p>更具体地说：</p>
+<pre><code>CHANNEL_PROGRESS
+  通常来自 SIP 180 Ringing 或 183 Session Progress，表示呼叫有进展或正在响铃。
+
+CHANNEL_ANSWER
+  通常来自对端接听后的 SIP 200 OK，表示电话 channel 已接通。
+
+CHANNEL_HANGUP
+  表示通话进入挂断流程。原因可能是用户挂断、忙线、无人接听、线路失败或系统主动取消。
+
+CHANNEL_HANGUP_COMPLETE
+  表示 FreeSWITCH 已完成这条 channel 的挂断清理。</code></pre>
+<p><code>answered</code> 和 <code>media_connected</code> 必须分开。<code>answered</code> 只代表电话接通；<code>media_connected</code> 才代表 9199 媒体 WebSocket 已经连到实时媒体网关，电话音频真正进入 AI 处理链路。</p>
+<h4>14.12.6 Playout Engine、jitter、播放闭环和打断</h4>
+<p>豆包 S2S 的音频输出不是电话可以直接稳定播放的帧流。模型是一边生成一边吐音频片段；电话播放则要求按固定媒体时钟持续输出，例如 <code>8k / mono / 20ms / 320 bytes</code>。</p>
+<pre><code>模型音频 delta
+  -&gt; float32 转 int16
+  -&gt; 重采样到 8k
+  -&gt; 切成 20ms / 320 bytes 电话帧
+  -&gt; 放入 Playout Engine
+  -&gt; 按稳定节奏发给 FreeSWITCH</code></pre>
+<p>几个关键概念：</p>
+<pre><code>Playout Engine
+  播放节拍器。它把模型输出整理成稳定电话下行帧，不能模型来得快就狂发、来得慢就停住。
+
+Jitter / prefill
+  先攒一点音频再开播，降低模型输出抖动和网络抖动导致的断续。代价是增加少量延迟。
+
+FreeSWITCH playback 事件闭环
+  网关发出音频不等于电话用户已经听完。需要等待 chunk_played / queue_completed，确认 FreeSWITCH 侧真正播完。
+
+本地播放队列清理
+  用户插话时，网关要清掉自己还没发出去的旧 assistant 音频。
+
+uuid_audio_stream &lt;uuid&gt; break
+  用户插话时，FreeSWITCH 侧也可能已经缓存旧音频，所以还要通过 Event Socket 命令 FreeSWITCH 停止旧播放。
+
+committed history
+  只有确认完整播放给用户听到的 assistant turn 才能写入历史。被打断的半句话不能污染下一轮模型上下文。
+
+尾部静音和播放完成确认
+  用来给播放链路 drain 时间，避免最后几个字被吞，或上一轮尾字串到下一轮开头。</code></pre>
+<p>这几件事的共同目标是：</p>
+<pre><code>AI 说话稳定、不抖、不抢话；
+用户插话时能立即停旧声音；
+没完整播放的 AI 回复不进入模型历史；
+每一轮语音边界干净，不吞尾字，也不串到下一轮。</code></pre>
+<h4>14.12.7 macOS Docker Desktop 本机软电话 RTP relay 根因记录</h4>
+<p>本次故障现象：</p>
+<pre><code>Linphone 注册成功。
+拨 9197 可以听到持续哔声。
+拨 9196 没有回声。
+拨 9199 接通后没有 AI 声音。</code></pre>
+<p>第一性原理判断：</p>
+<pre><code>9197 有声
+  -&gt; FreeSWITCH 到软电话的下行 RTP 正常。
+
+9196 无回声
+  -&gt; 软电话到 FreeSWITCH 的上行 RTP 异常。
+
+9199 无 AI 声音
+  -&gt; 不是优先怀疑豆包，而是先确认电话上行音频是否进入 FreeSWITCH / 网关。</code></pre>
+<p>FreeSWITCH 统计证据：</p>
+<pre><code>故障时：
+  rtp_audio_in_packet_count = 0
+  rtp_audio_in_media_bytes = 0
+  rtp_audio_in_skip_packet_count 在涨
+
+恢复 TEN 方案里的 relay 结构后：
+  rtp_audio_in_packet_count = 212
+  rtp_audio_in_media_bytes = 36464</code></pre>
+<p>最终确认根因：</p>
+<pre><code>当前独立项目缺少 TEN 本地方案里的 rtp_host_relay.py 媒体转发层，
+并且 Docker RTP 端口映射方式不匹配。
+
+Linphone 发到 SDP 广告端口的 RTP，
+没有以 FreeSWITCH 可接受的方式进入容器，
+所以 FreeSWITCH 跳过这些上行 RTP 包。</code></pre>
+<p>当前可通结构：</p>
+<pre><code>Linphone / 本地软电话
+  -&gt; SIP: 192.168.0.100:5060
+  -&gt; RTP: 192.168.0.100:16384-16484
+
+宿主机 rtp_host_relay.py
+  -&gt; 监听 16384-16484
+  -&gt; 转发到 127.0.0.1:26384-26484
+
+Docker Desktop
+  -&gt; 26384-26484 映射到容器 16384-16484
+
+FreeSWITCH
+  -&gt; 9196 echo
+  -&gt; 或 9199 mod_audio_stream
+  -&gt; sip-realtime-voice-gateway
+  -&gt; 豆包 S2S</code></pre>
+<p>以后排查同类问题时，顺序必须是：</p>
+<pre><code>1. 先拨 9197 验证下行。
+2. 再拨 9196 验证上行。
+3. 9196 正常后才测 9199。
+4. 如果 9197 有声但 9196 无声，优先检查 rtp_host_relay.py 和 Docker RTP 映射。
+5. 不要先怀疑豆包、ASR、LLM、TTS、麦克风或 HTTP 控制面。</code></pre>

@@ -17,6 +17,10 @@
 11. [[notes/11-agent-collaboration|AI / Agent 协作规则]]
 12. [[notes/12-sip-provider-profile|sip-provider 真实线路 Profile]]
 
+## 外部项目文档
+
+- [真实 SIP Trunk 单路预验证清单](../real-sip-trunk-preflight.md)
+
 ## 一句话理解
 
 当前项目的本质是：

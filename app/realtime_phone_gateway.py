@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from websockets.exceptions import ConnectionClosed
 from websockets.legacy.server import WebSocketServer, WebSocketServerProtocol, serve
 
-from .audio_codec import pcm_s16le_frame_bytes, resample_pcm_s16le_mono
+from .audio_codec import pcm_s16le_frame_bytes, pcm_s16le_rms, resample_pcm_s16le_mono
 from .config import GatewayConfig
 from .freeswitch_event_socket import (
     FreeSwitchPlaybackController,
@@ -130,6 +130,9 @@ class RealtimePhoneSessionStats:
     expected_frame_bytes: int
     inbound_frames: int = 0
     inbound_bytes: int = 0
+    inbound_rms_max: int = 0
+    inbound_rms_last: int = 0
+    inbound_rms_over_threshold_frames: int = 0
     outbound_frames: int = 0
     outbound_bytes: int = 0
     invalid_frame_count: int = 0
@@ -614,6 +617,11 @@ class FreeSwitchRealtimeGatewayServer:
 
         session.inbound_frames += 1
         session.inbound_bytes += len(payload)
+        rms = pcm_s16le_rms(payload)
+        session.inbound_rms_last = rms
+        session.inbound_rms_max = max(session.inbound_rms_max, rms)
+        if rms >= self.config.vad.speech_rms_threshold:
+            session.inbound_rms_over_threshold_frames += 1
 
         if len(payload) != self.expected_frame_bytes:
             session.invalid_frame_count += 1
@@ -627,6 +635,25 @@ class FreeSwitchRealtimeGatewayServer:
                 session.inbound_frames,
             )
             return
+
+        if (
+            session.inbound_frames <= 10
+            or session.inbound_frames % 50 == 0
+            or rms >= self.config.vad.speech_rms_threshold
+        ):
+            LOGGER.info(
+                "freeswitch_realtime_input_level call_id=%s session_id=%s "
+                "frame=%s rms=%s rms_max=%s over_threshold_frames=%s "
+                "threshold=%s bytes=%s",
+                session.call_id,
+                session.session_id,
+                session.inbound_frames,
+                rms,
+                session.inbound_rms_max,
+                session.inbound_rms_over_threshold_frames,
+                self.config.vad.speech_rms_threshold,
+                len(payload),
+            )
 
         frame_16k = resample_pcm_s16le_mono(
             payload,

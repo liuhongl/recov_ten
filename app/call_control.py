@@ -559,7 +559,12 @@ async def _sleep_unless_stopped(stop_event: threading.Event, seconds: float) -> 
 
 
 def _build_call_diagnostics(record: OutboundCallRecord) -> dict[str, Any]:
-    hangup_cause = record.hangup_cause or _extract_failure_cause(record.error)
+    raw_cause = (
+        record.hangup_cause
+        or _extract_failure_cause(record.error)
+        or _failure_cause_from_sip_status(record.sip_status)
+    )
+    hangup_cause = _normalize_failure_cause(record, raw_cause)
     failure_reason = _failure_reason(record, hangup_cause)
     failure = _failure_details(failure_reason)
     return {
@@ -591,6 +596,23 @@ def _extract_failure_cause(value: str | None) -> str | None:
     return stripped or None
 
 
+def _failure_cause_from_sip_status(sip_status: str | None) -> str | None:
+    if sip_status in {"408", "480"}:
+        return "NO_ANSWER"
+    if sip_status == "508":
+        return "SIP_508"
+    return None
+
+
+def _normalize_failure_cause(
+    record: OutboundCallRecord,
+    cause: str | None,
+) -> str | None:
+    if record.sip_status in {"408", "480"}:
+        return "NO_ANSWER"
+    return cause
+
+
 def _failure_reason(record: OutboundCallRecord, cause: str | None) -> str | None:
     if cause == "NORMAL_CLEARING" and record.status == "completed":
         return None
@@ -615,6 +637,12 @@ def _failure_details(cause: str | None) -> dict[str, str | None]:
             "label": "临时失败",
             "hint": "通常是 SIP 503 或本地 NAT/软电话 Contact 瞬时不可用；刷新软电话注册或重启客户端后重试。",
             "sip_status_hint": "503",
+        }
+    if cause in {"NORMAL_UNSPECIFIED", "SIP_508"}:
+        return {
+            "label": "线路或上游未明原因失败",
+            "hint": "真实 sip-provider 日志中该原因可能伴随 SIP 508 或 Q.850 cause=31；优先检查供应商 SBC、线路路由、公网 NAT/RTP 和运营商 CDR。",
+            "sip_status_hint": "508",
         }
     if cause == "USER_NOT_REGISTERED":
         return {
@@ -653,6 +681,8 @@ def _phase(status: str, cause: str | None) -> str:
             return "busy"
         if cause == "NORMAL_TEMPORARY_FAILURE":
             return "temporary_failure"
+        if cause in {"NORMAL_UNSPECIFIED", "SIP_508"}:
+            return "trunk_or_upstream_failure"
         if cause == "NO_ANSWER":
             return "no_answer"
         if cause == "ORIGINATOR_CANCEL":
@@ -697,6 +727,7 @@ def _phase_label(status: str, cause: str | None) -> str:
         "completed": "已结束",
         "busy": "忙线/拒接",
         "temporary_failure": "临时失败",
+        "trunk_or_upstream_failure": "线路或上游失败",
         "no_answer": "无人接听",
         "canceled": "已取消",
         "failed": "失败",

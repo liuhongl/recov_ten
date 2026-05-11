@@ -67,6 +67,89 @@ def test_call_record_exposes_busy_diagnostics():
     assert payload["elapsed_ms"] == 5600
 
 
+def test_call_record_maps_sip_provider_508_upstream_failure():
+    record = OutboundCallRecord(
+        call_id="call-1",
+        destination="15800967789",
+        endpoint="sofia/gateway/sip-provider/15800967789",
+        requested_endpoint="sofia/gateway/sip-provider/15800967789",
+        dialplan_extension="9199",
+        dialplan_context="default",
+        caller_id_name="037123124810",
+        caller_id_number="037123124810",
+        originate_timeout_seconds=30,
+        status="failed",
+        created_at_ms=1000,
+        started_at_ms=1200,
+        completed_at_ms=6800,
+        hangup_cause="NORMAL_UNSPECIFIED",
+        sip_status="508",
+        sip_reason="31",
+    )
+
+    payload = record.to_dict()
+
+    assert payload["phase"] == "trunk_or_upstream_failure"
+    assert payload["phase_label"] == "线路或上游失败"
+    assert payload["failure_reason"] == "NORMAL_UNSPECIFIED"
+    assert payload["failure_label"] == "线路或上游未明原因失败"
+    assert payload["sip_status_hint"] == "508"
+
+
+def test_call_record_maps_sip_provider_508_without_hangup_cause():
+    record = OutboundCallRecord(
+        call_id="call-1",
+        destination="15800967789",
+        endpoint="sofia/gateway/sip-provider/15800967789",
+        requested_endpoint="sofia/gateway/sip-provider/15800967789",
+        dialplan_extension="9199",
+        dialplan_context="default",
+        caller_id_name="037123124810",
+        caller_id_number="037123124810",
+        originate_timeout_seconds=30,
+        status="failed",
+        created_at_ms=1000,
+        started_at_ms=1200,
+        completed_at_ms=6800,
+        sip_status="508",
+    )
+
+    payload = record.to_dict()
+
+    assert payload["phase"] == "trunk_or_upstream_failure"
+    assert payload["failure_reason"] == "SIP_508"
+    assert payload["failure_label"] == "线路或上游未明原因失败"
+
+
+def test_call_record_maps_sip_408_timer_expire_to_no_answer():
+    record = OutboundCallRecord(
+        call_id="call-1",
+        destination="19900000000",
+        endpoint="sofia/gateway/sip-provider-sandbox/19900000000",
+        requested_endpoint="sofia/gateway/sip-provider-sandbox/19900000000",
+        dialplan_extension="9199",
+        dialplan_context="default",
+        caller_id_name="037123124810",
+        caller_id_number="037123124810",
+        originate_timeout_seconds=8,
+        status="failed",
+        created_at_ms=1000,
+        started_at_ms=1200,
+        ringing_at_ms=1300,
+        completed_at_ms=6800,
+        hangup_cause="RECOVERY_ON_TIMER_EXPIRE",
+        sip_status="408",
+        sip_reason="102",
+    )
+
+    payload = record.to_dict()
+
+    assert payload["phase"] == "no_answer"
+    assert payload["phase_label"] == "无人接听"
+    assert payload["failure_reason"] == "NO_ANSWER"
+    assert payload["failure_label"] == "无人接听"
+
+
 def test_call_record_does_not_treat_success_reply_as_failure():
     record = OutboundCallRecord(
         call_id="call-1",

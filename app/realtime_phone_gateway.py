@@ -40,7 +40,18 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_PHONE_INSTRUCTIONS = (
     "You are a Chinese phone customer service assistant. "
     "Reply in short, natural spoken Chinese. "
-    "Keep each reply within two short sentences."
+    "Keep each reply within two short sentences. "
+    "Only answer the user's latest clearly understood utterance. "
+    "If the latest utterance is unclear or too short after an interruption, "
+    "ask the user to repeat instead of answering from conversation history. "
+    "Do not report the current time unless the latest utterance explicitly asks for it."
+)
+LATEST_UTTERANCE_GUARD = (
+    "以下历史只用于保持上下文，不能当作本轮用户的新问题。"
+    "本轮回复必须以用户最新一句清晰语音为准。"
+    "如果打断后的最新语音不清楚、太短或只是停顿，请让用户再说一遍。"
+    "不要因为历史里问过时间、日期或其他问题，就在本轮继续回答这些旧问题；"
+    "除非用户最新一句明确询问时间，否则不要主动报时。"
 )
 DEFAULT_REPLAY_AUDIO_MS = 800
 MAX_COMMITTED_HISTORY_EXCHANGES = 6
@@ -533,13 +544,14 @@ class FreeSwitchRealtimeGatewayServer:
             instructions = session.prompt_snapshot.instructions
 
         if not session.committed_exchanges:
-            return instructions
+            return "\n".join([instructions, "", LATEST_UTTERANCE_GUARD])
 
         lines = [
             instructions,
             "",
-            "以下是电话用户已经完整听到的历史对话，只能用于保持上下文。",
-            "不要补说、续说或复述未出现在这段历史里的旧回复。",
+            LATEST_UTTERANCE_GUARD,
+            "",
+            "电话用户已经完整听到的历史对话：",
         ]
         remaining_chars = MAX_COMMITTED_HISTORY_CHARS
         for exchange in session.committed_exchanges[

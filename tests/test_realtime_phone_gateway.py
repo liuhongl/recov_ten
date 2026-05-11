@@ -10,6 +10,7 @@ from app.audio_codec import samples_to_pcm_s16le
 from app.config import FreeSwitchConfig, GatewayConfig, PlaybackConfig, VadConfig
 from app.freeswitch_event_socket import PlaybackProgressEvent
 from app.realtime_phone_gateway import (
+    ConversationExchange,
     FreeSwitchRealtimeGatewayServer,
     PlaybackFrame,
     RealtimePhoneSessionStats,
@@ -47,6 +48,34 @@ def test_realtime_phone_gateway_rejects_slow_playback_send_interval():
 
 def test_realtime_phone_gateway_does_not_emit_silence_when_model_audio_lags():
     asyncio.run(_assert_realtime_phone_gateway_does_not_emit_silence_on_lag())
+
+
+def test_realtime_instructions_do_not_reuse_historical_time_question():
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-call",
+        session_id="test-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+    )
+    session.committed_exchanges.append(
+        ConversationExchange(
+            turn_id=1,
+            input_transcript="现在几点？",
+            output_transcript="现在是下午三点。",
+        )
+    )
+
+    instructions = server._instructions_for_realtime_session(session)
+
+    assert "现在几点？" in instructions
+    assert "不能当作本轮用户的新问题" in instructions
+    assert "除非用户最新一句明确询问时间，否则不要主动报时" in instructions
+    assert "如果打断后的最新语音不清楚" in instructions
 
 
 async def _assert_realtime_phone_gateway_roundtrip() -> None:

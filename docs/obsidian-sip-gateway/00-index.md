@@ -20,6 +20,7 @@
 ## 外部项目文档
 
 - [真实 SIP Trunk 单路预验证清单](../real-sip-trunk-preflight.md)
+- [公网服务器 sip-provider 单路验证 Runbook](../public-server-sip-provider-runbook.md)
 
 ## 一句话理解
 

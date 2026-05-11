@@ -6,6 +6,8 @@ __pycache__/
 *.py[cod]
 *.log
 artifacts/
+freeswitch-local/conf/tls/
+uv.lock
 *.pcm
 *.wav
 *.jsonl

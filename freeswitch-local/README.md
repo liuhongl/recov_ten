@@ -131,6 +131,19 @@ The sandbox validates the main local contract: original domestic number format,
 provider status outcomes. It does not fully reproduce public-network NAT,
 provider SBC private behavior, or real carrier routing.
 
+## Real sip-provider Template
+
+The real trunk template is intentionally not auto-loaded:
+
+```text
+conf/sip_profiles/external/sip-provider.xml.template
+```
+
+FreeSWITCH includes `external/*.xml`, so keep the template suffix on local Mac
+and Docker runs. Only copy it to `sip-provider.xml` on a SIP/RTP reachable
+server after confirming public `external_sip_ip`, `external_rtp_ip`, firewall
+rules, and provider IP allowlisting.
+
 ## 9199 Path
 
 The local dialplan maps `9199` to:

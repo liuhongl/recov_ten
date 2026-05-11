@@ -28,6 +28,29 @@
 
 ## 2. 发起前检查
 
+### 2.0 当前本机预检结论
+
+当前 Mac + Docker 本地环境用于软电话和 `sip-provider-sandbox` 验证，不适合作为真实运营商 SIP trunk 的最终验证环境：
+
+```text
+真实 sip-provider gateway：当前未启用
+本机 external_sip_ip：192.168.0.100
+本机 external_rtp_ip：192.168.0.100
+预期公网 SIP/RTP：81.68.166.109 或等价公网映射
+```
+
+因此真实线路单通验证建议放到具备公网 SIP/RTP 可达性的服务器上执行。本仓库提供了不自动加载的 gateway 模板：
+
+```text
+freeswitch-local/conf/sip_profiles/external/sip-provider.xml.template
+```
+
+在真实服务器启用时，先确认公网 IP、白名单、防火墙和 RTP 端口范围，再复制为：
+
+```text
+freeswitch-local/conf/sip_profiles/external/sip-provider.xml
+```
+
 ### 2.1 FreeSWITCH gateway
 
 确认真实 gateway 存在且为 `NOREG / UP`：

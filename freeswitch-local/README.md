@@ -25,7 +25,7 @@ mod_audio_stream/IMPORTANT.md
 ## Start
 
 Stop any older local FreeSWITCH container that already uses ports `5060`,
-`5080`, `18021`, or `16384-16484`, then run:
+`5080`, `18021`, or `26384-26484`, then run:
 
 ```powershell
 cd freeswitch-local
@@ -37,6 +37,55 @@ The container name is:
 ```text
 sip_realtime_freeswitch
 ```
+
+For the local macOS softphone workflow, prefer the project helper:
+
+```bash
+scripts/dev-local.sh start
+scripts/dev-local.sh check
+```
+
+It starts/checks the FreeSWITCH container, the host RTP relay, and the realtime
+gateway health endpoint.
+
+## macOS Docker Desktop RTP Relay
+
+On macOS Docker Desktop, local softphones such as Linphone do not send RTP
+directly to the FreeSWITCH container. The working local structure is:
+
+```text
+Softphone RTP 16384-16484
+  -> host rtp_host_relay.py
+  -> host 26384-26484
+  -> Docker port mapping
+  -> FreeSWITCH container 16384-16484
+```
+
+This mirrors the old TEN local runtime that was proven to work. Without the
+relay, SIP registration and calls can succeed while FreeSWITCH skips inbound
+RTP packets and records silence.
+
+Start the relay on the host if it is not already running:
+
+```bash
+python3 freeswitch-local/scripts/rtp_host_relay.py
+```
+
+Expected listener:
+
+```text
+0.0.0.0:16384-16484 -> 127.0.0.1:26384-26484
+```
+
+Docker Compose must publish the alternate host RTP range:
+
+```yaml
+ports:
+  - "26384-26484:16384-16484/udp"
+```
+
+Keep FreeSWITCH SDP advertising the host LAN IP and the normal RTP range
+`16384-16484`; the relay owns that normal range on the host.
 
 ## 9199 Path
 

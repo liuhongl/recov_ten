@@ -130,7 +130,7 @@
         This defines your local network, by default we detect your local network
         and create this localnet.auto ACL for this.
     -->
-    <param name="local-network-acl" value="nat.auto"/>
+    <param name="local-network-acl" value="ten_force_external_sdp"/>
     <!--<param name="apply-register-acl" value="domains"/>-->
     <!--<param name="dtmf-type" value="info"/>-->
 
@@ -179,7 +179,7 @@
     <!-- Can be 'true' or 'contact' -->
     <!--<param name="multiple-registrations" value="contact"/>-->
     <!--set to 'greedy' if you want your codec list to take precedence -->
-    <param name="inbound-codec-negotiation" value="generous"/>
+    <param name="inbound-codec-negotiation" value="greedy"/>
     <!-- if you want to send any special bind params of your own -->
     <!--<param name="bind-params" value="transport=udp"/>-->
     <!--<param name="unregister-on-options-fail" value="true"/>-->
@@ -436,4 +436,3 @@
     <!--<param name="auto-invite-100" value="false"/>-->
   </settings>
 </profile>
-

@@ -13,7 +13,7 @@ services:
       - "5080:5080/tcp"
       - "5080:5080/udp"
       - "18021:8021/tcp"
-      - "16384-16484:16384-16484/udp"
+      - "26384-26484:16384-16484/udp"
     volumes:
       - ./conf:/etc/freeswitch
       - ./scripts:/usr/share/freeswitch/scripts

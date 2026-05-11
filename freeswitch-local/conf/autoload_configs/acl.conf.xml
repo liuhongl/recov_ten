@@ -21,6 +21,9 @@
       <node type="allow" cidr="192.168.0.0/16"/>
     </list>
 
+    <list name="ten_force_external_sdp" default="deny">
+    </list>
+
     <!--
 	This will traverse the directory adding all users
 	with the cidr= tag to this ACL, when this ACL matches

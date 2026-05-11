@@ -65,6 +65,45 @@ SRTP：未配置
 8. 将 508 与 Q.850 cause=31 归类为上游或 trunk 侧失败。
 ```
 
+## 当前已落地的沙箱
+
+第一版采用 FreeSWITCH-only 方式模拟 `sip-provider`：
+
+```text
+external profile
+  -> gateway sip-provider-sandbox
+  -> sip-provider-sandbox profile，监听 UDP 5089
+  -> sip_provider_sandbox dialplan context
+```
+
+核心文件：
+
+```text
+freeswitch-local/conf/sip_profiles/external/sip-provider-sandbox.xml
+freeswitch-local/conf/sip_profiles/sip-provider-sandbox.xml
+freeswitch-local/conf/dialplan/sip_provider_sandbox.xml
+```
+
+验证命令：
+
+```bash
+docker exec sip_realtime_freeswitch fs_cli -x "sofia status gateway sip-provider-sandbox"
+docker exec sip_realtime_freeswitch fs_cli -x "sofia status profile sip-provider-sandbox"
+```
+
+期望看到：
+
+```text
+Gateway：sip-provider-sandbox
+State：NOREG
+Status：UP
+From：sip:037123124810@47.94.86.132
+Profile codec：PCMA,PCMU
+DTMF：RFC2833 / 101
+```
+
+`/outbound-test` 页面已经增加 `sip-provider 沙箱` 场景下拉，可以直接选择正常接通、183 后接通、408 超时、486 忙线、603 拒接、508 上游失败、503 线路不可用、号码格式错误和 caller_id 未授权。
+
 ## 仍需真实线路验证
 
 ```text

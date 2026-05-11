@@ -293,7 +293,27 @@ X-FS-Support
 
 ## 9. 沙箱第一版测试场景
 
-建议先用固定号码或场景参数驱动：
+当前第一版已采用 FreeSWITCH-only 沙箱：本地 `external` profile 通过 `sip-provider-sandbox` gateway 发起 SIP INVITE 到同一个 FreeSWITCH 容器内的 `sip-provider-sandbox` profile，后者监听 UDP `5089`，使用 `sip_provider_sandbox` dialplan context 模拟供应商响应。
+
+配置文件：
+
+```text
+freeswitch-local/conf/sip_profiles/external/sip-provider-sandbox.xml
+freeswitch-local/conf/sip_profiles/sip-provider-sandbox.xml
+freeswitch-local/conf/dialplan/sip_provider_sandbox.xml
+```
+
+Gateway 形态：
+
+```text
+Name：sip-provider-sandbox
+State：NOREG
+Status：UP
+From：sip:037123124810@47.94.86.132
+Proxy：sip:<container-local-ip>:5089
+```
+
+沙箱使用固定号码驱动：
 
 ```text
 15800967789 -> 正常接通，100 -> 180 -> 200
@@ -308,6 +328,23 @@ X-FS-Support
 1000 -> 404 或 484 号码格式错误
 caller_id 非 037123124810 -> 403 Forbidden
 ```
+
+HTTP 外呼时可显式传入 endpoint：
+
+```json
+{
+  "destination": "19900000003",
+  "endpoint": "sofia/gateway/sip-provider-sandbox/19900000003",
+  "caller_id_number": "037123124810",
+  "caller_id_name": "037123124810",
+  "originate_timeout_seconds": 8,
+  "context": {
+    "scene": "sip-provider-sandbox-upstream-508"
+  }
+}
+```
+
+也可以通过 `/outbound-test` 页面选择 `sip-provider 沙箱` 场景，页面会自动填写号码、主叫和 endpoint。
 
 每个场景应验证：
 

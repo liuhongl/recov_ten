@@ -40,7 +40,8 @@
       }
 
       button,
-      input {
+      input,
+      select {
         font: inherit;
       }
 
@@ -344,7 +345,8 @@
         grid-column: 1 / -1;
       }
 
-      input {
+      input,
+      select {
         width: 100%;
         min-height: 38px;
         border: 1px solid var(--line);
@@ -354,7 +356,8 @@
         color: var(--text);
       }
 
-      input:focus {
+      input:focus,
+      select:focus {
         outline: 3px solid rgba(29, 78, 216, 0.12);
         border-color: #84a4f8;
       }
@@ -570,6 +573,21 @@
             </div>
             <form id="callForm">
               <div class="form-grid">
+                <label class="wide">
+                  测试场景
+                  <select id="scenarioPreset" name="scenario_preset">
+                    <option value="local-1000">本地软电话 1000</option>
+                    <option value="sandbox-answer">sip-provider 沙箱：正常接通</option>
+                    <option value="sandbox-progress-answer">sip-provider 沙箱：183 后接通</option>
+                    <option value="sandbox-timeout">sip-provider 沙箱：408 超时</option>
+                    <option value="sandbox-busy">sip-provider 沙箱：486 忙线</option>
+                    <option value="sandbox-decline">sip-provider 沙箱：603 拒接</option>
+                    <option value="sandbox-upstream-508">sip-provider 沙箱：508 上游失败</option>
+                    <option value="sandbox-trunk-unavailable">sip-provider 沙箱：503 线路不可用</option>
+                    <option value="sandbox-invalid-plus86">sip-provider 沙箱：+86 格式错误</option>
+                    <option value="sandbox-forbidden-caller">sip-provider 沙箱：caller_id 未授权</option>
+                  </select>
+                </label>
                 <label>
                   被叫号码
                   <input id="destination" name="destination" value="1000" autocomplete="tel" required />
@@ -593,6 +611,10 @@
                 <label>
                   <span class="field-label">Dialplan Context（拨号上下文）</span>
                   <input id="dialplanContext" name="dialplan_context" value="default" />
+                </label>
+                <label class="wide">
+                  <span class="field-label">Endpoint Override（可选）</span>
+                  <input id="endpoint" name="endpoint" placeholder="留空则使用当前配置 endpoint_template" />
                 </label>
                 <label class="wide">
                   <span class="field-label">业务标记（日志标记，不影响拨号）</span>
@@ -641,8 +663,100 @@
       const hangupButton = document.getElementById("hangupButton");
       const refreshButton = document.getElementById("refreshButton");
       const callForm = document.getElementById("callForm");
+      const scenarioPreset = document.getElementById("scenarioPreset");
+      const destinationInput = document.getElementById("destination");
+      const callerNumberInput = document.getElementById("callerNumber");
+      const callerNameInput = document.getElementById("callerName");
+      const timeoutInput = document.getElementById("timeoutSeconds");
+      const dialplanExtensionInput = document.getElementById("dialplanExtension");
+      const dialplanContextInput = document.getElementById("dialplanContext");
+      const endpointInput = document.getElementById("endpoint");
+      const metadataSceneInput = document.getElementById("metadataScene");
 
       let currentCallId = null;
+
+      const scenarioPresets = {
+        "local-1000": {
+          destination: "1000",
+          caller: "9000",
+          callerName: "AI_Assistant",
+          endpoint: "",
+          timeout: "30",
+          scene: "local-outbound-test",
+        },
+        "sandbox-answer": {
+          destination: "15800967789",
+          caller: "037123124810",
+          callerName: "037123124810",
+          endpoint: "sofia/gateway/sip-provider-sandbox/15800967789",
+          timeout: "30",
+          scene: "sip-provider-sandbox-answer",
+        },
+        "sandbox-progress-answer": {
+          destination: "18518968743",
+          caller: "037123124810",
+          callerName: "037123124810",
+          endpoint: "sofia/gateway/sip-provider-sandbox/18518968743",
+          timeout: "30",
+          scene: "sip-provider-sandbox-progress-answer",
+        },
+        "sandbox-timeout": {
+          destination: "19900000000",
+          caller: "037123124810",
+          callerName: "037123124810",
+          endpoint: "sofia/gateway/sip-provider-sandbox/19900000000",
+          timeout: "8",
+          scene: "sip-provider-sandbox-timeout",
+        },
+        "sandbox-busy": {
+          destination: "19900000001",
+          caller: "037123124810",
+          callerName: "037123124810",
+          endpoint: "sofia/gateway/sip-provider-sandbox/19900000001",
+          timeout: "30",
+          scene: "sip-provider-sandbox-busy",
+        },
+        "sandbox-decline": {
+          destination: "19900000002",
+          caller: "037123124810",
+          callerName: "037123124810",
+          endpoint: "sofia/gateway/sip-provider-sandbox/19900000002",
+          timeout: "30",
+          scene: "sip-provider-sandbox-decline",
+        },
+        "sandbox-upstream-508": {
+          destination: "19900000003",
+          caller: "037123124810",
+          callerName: "037123124810",
+          endpoint: "sofia/gateway/sip-provider-sandbox/19900000003",
+          timeout: "30",
+          scene: "sip-provider-sandbox-upstream-508",
+        },
+        "sandbox-trunk-unavailable": {
+          destination: "19900000004",
+          caller: "037123124810",
+          callerName: "037123124810",
+          endpoint: "sofia/gateway/sip-provider-sandbox/19900000004",
+          timeout: "30",
+          scene: "sip-provider-sandbox-trunk-unavailable",
+        },
+        "sandbox-invalid-plus86": {
+          destination: "+8615800967789",
+          caller: "037123124810",
+          callerName: "037123124810",
+          endpoint: "sofia/gateway/sip-provider-sandbox/+8615800967789",
+          timeout: "30",
+          scene: "sip-provider-sandbox-invalid-plus86",
+        },
+        "sandbox-forbidden-caller": {
+          destination: "15800967789",
+          caller: "037100000000",
+          callerName: "037100000000",
+          endpoint: "sofia/gateway/sip-provider-sandbox/15800967789",
+          timeout: "30",
+          scene: "sip-provider-sandbox-forbidden-caller",
+        },
+      };
 
       function setResult(payload) {
         resultOutput.textContent =
@@ -773,11 +887,27 @@
         }
 
         if (payload.metadata_scene) {
-          payload.metadata = { scene: payload.metadata_scene };
+          payload.context = { scene: payload.metadata_scene };
           delete payload.metadata_scene;
         }
+        delete payload.scenario_preset;
         return payload;
       }
+
+      function applyScenarioPreset() {
+        const preset = scenarioPresets[scenarioPreset.value];
+        if (!preset) return;
+        destinationInput.value = preset.destination;
+        callerNumberInput.value = preset.caller;
+        callerNameInput.value = preset.callerName;
+        timeoutInput.value = preset.timeout;
+        dialplanExtensionInput.value = "9199";
+        dialplanContextInput.value = "default";
+        endpointInput.value = preset.endpoint;
+        metadataSceneInput.value = preset.scene;
+      }
+
+      scenarioPreset.addEventListener("change", applyScenarioPreset);
 
       callForm.addEventListener("submit", async (event) => {
         event.preventDefault();
@@ -826,6 +956,7 @@
       });
 
       Promise.all([refreshReady(), refreshCalls()]);
+      applyScenarioPreset();
       window.setInterval(refreshCalls, 2500);
     </script>
   </body>

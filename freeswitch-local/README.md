@@ -87,6 +87,50 @@ ports:
 Keep FreeSWITCH SDP advertising the host LAN IP and the normal RTP range
 `16384-16484`; the relay owns that normal range on the host.
 
+## sip-provider Sandbox
+
+The local runtime includes a first-pass `sip-provider` trunk sandbox. It is a
+FreeSWITCH-only simulation of the real IP-allowlisted trunk shape:
+
+```text
+external profile
+  -> gateway sip-provider-sandbox
+  -> sip-provider-sandbox profile on UDP 5089
+  -> sip_provider_sandbox dialplan context
+```
+
+The sandbox gateway should look like:
+
+```text
+State  NOREG
+Status UP
+From   sip:037123124810@47.94.86.132
+```
+
+Check it with:
+
+```bash
+docker exec sip_realtime_freeswitch fs_cli -x "sofia status gateway sip-provider-sandbox"
+docker exec sip_realtime_freeswitch fs_cli -x "sofia status profile sip-provider-sandbox"
+```
+
+Use these endpoint overrides from `/outbound-test` or `POST /calls`:
+
+```text
+sofia/gateway/sip-provider-sandbox/15800967789  -> answer
+sofia/gateway/sip-provider-sandbox/18518968743  -> 183 then answer
+sofia/gateway/sip-provider-sandbox/19900000000  -> 408 timeout
+sofia/gateway/sip-provider-sandbox/19900000001  -> 486 busy
+sofia/gateway/sip-provider-sandbox/19900000002  -> 603 decline
+sofia/gateway/sip-provider-sandbox/19900000003  -> 508 upstream failure
+sofia/gateway/sip-provider-sandbox/19900000004  -> 503 trunk unavailable
+```
+
+The sandbox validates the main local contract: original domestic number format,
+`From` caller ID `037123124810`, PCMA/PCMU, `ptime=20`, RFC2833 DTMF, and common
+provider status outcomes. It does not fully reproduce public-network NAT,
+provider SBC private behavior, or real carrier routing.
+
 ## 9199 Path
 
 The local dialplan maps `9199` to:

@@ -1,0 +1,15 @@
+<include>
+  <gateway name="sip-provider-sandbox">
+    <param name="username" value="037123124810"/>
+    <param name="extension" value="037123124810"/>
+    <param name="proxy" value="$${local_ip_v4}:5089"/>
+    <param name="realm" value="47.94.86.132"/>
+    <param name="from-user" value="037123124810"/>
+    <param name="from-domain" value="47.94.86.132"/>
+    <param name="register" value="false"/>
+    <param name="register-transport" value="udp"/>
+    <param name="caller-id-in-from" value="true"/>
+    <param name="retry-seconds" value="30"/>
+    <param name="codec-prefs" value="PCMA,PCMU"/>
+  </gateway>
+</include>

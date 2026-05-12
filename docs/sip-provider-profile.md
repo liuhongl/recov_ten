@@ -38,7 +38,7 @@ From domain：47.94.86.132
 传输协议：UDP
 认证方式：无 username/password
 Password：no
-本地公网 SIP：81.68.166.109:19000
+本地公网 SIP：111.229.146.182:19000
 本地内网地址：10.0.12.7
 供应商 User-Agent：uincall_sbc
 FreeSWITCH User-Agent：FreeSWITCH-mod_sofia/1.10.12
@@ -72,7 +72,7 @@ SIP 响应从 47.94.86.132:5089 返回。
 ```text
 格式：国内号码原始格式
 手机号示例：15800967789 / 18518968743
-固话/显号示例：037123124810
+固话/显号示例：037123124845
 不加：+86
 不加：86
 不加：0 / 9 出局前缀
@@ -109,11 +109,11 @@ Request-URI：sip:{callee}@47.94.86.132:5089
 已知信息：
 
 ```text
-当前 caller_id：037123124810
-From URI：sip:037123124810@47.94.86.132
+当前 caller_id：037123124845
+From URI：sip:037123124845@47.94.86.132
 caller-id-in-from：true
-effective_caller_id_number：037123124810
-effective_caller_id_name：037123124810
+effective_caller_id_number：037123124845
+effective_caller_id_name：037123124845
 From display name：可能为 Anonymous
 ```
 
@@ -183,7 +183,7 @@ FreeSWITCH 到实时媒体网关 Bridge 内部是 L16 PCM / 8000 Hz。
 供应商 RTP IP：47.94.86.132
 已见供应商 RTP 端口：20900、22110
 SDP c= 地址：IN IP4 47.94.86.132
-本地公网 SIP：81.68.166.109:19000
+本地公网 SIP：111.229.146.182:19000
 本地内网收包：10.0.12.7
 Strict RTP learned remote：47.94.86.132:20900
 NAT/rport：确认存在
@@ -309,7 +309,7 @@ Gateway 形态：
 Name：sip-provider-sandbox
 State：NOREG
 Status：UP
-From：sip:037123124810@47.94.86.132
+From：sip:037123124845@47.94.86.132
 Proxy：sip:<container-local-ip>:5089
 ```
 
@@ -326,7 +326,7 @@ Proxy：sip:<container-local-ip>:5089
 +8615800967789 -> 484 号码格式错误
 8615800967789 -> 484 号码格式错误
 1000 -> 404 或 484 号码格式错误
-caller_id 非 037123124810 -> 403 Forbidden
+caller_id 非 037123124845 -> 403 Forbidden
 ```
 
 HTTP 外呼时可显式传入 endpoint：
@@ -335,8 +335,8 @@ HTTP 外呼时可显式传入 endpoint：
 {
   "destination": "19900000003",
   "endpoint": "sofia/gateway/sip-provider-sandbox/19900000003",
-  "caller_id_number": "037123124810",
-  "caller_id_name": "037123124810",
+  "caller_id_number": "037123124845",
+  "caller_id_name": "037123124845",
   "originate_timeout_seconds": 8,
   "context": {
     "scene": "sip-provider-sandbox-upstream-508"
@@ -357,13 +357,33 @@ HTTP 外呼时可显式传入 endpoint：
 6. 接通后 9199 -> 实时媒体网关 -> 豆包 S2S 是否正常。
 ```
 
+## 9.1 真实线路成功样本
+
+2026-05-12，公网服务器 `111.229.146.182` 已完成真实线路接通验证：
+
+```text
+主叫：037123124845
+被叫：18518968743
+Call-ID：a5edb3c9-c883-123f-adaf-ceee8053b903
+SIP proxy：47.94.86.132:5089
+供应商 User-Agent：uincall_sbc
+供应商 SDP：c=IN IP4 47.94.86.132
+供应商 RTP：47.94.86.132:29092
+Codec：PCMA/8000
+ptime：20ms
+最终阶段：media_connected
+电话侧确认：可通话
+```
+
+该样本证明当前服务器、主叫号码、SIP/SDP、PCMA/8000、ptime=20 和接通后的媒体网关链路已经具备真实通话能力。
+
 ## 10. 仍需补充的信息
 
 这些不阻塞第一版沙箱，但会影响逼真度：
 
 ```text
 1. 供应商完整 RTP 端口范围。
-2. 成功呼叫的脱敏 SIP trace：INVITE / 100 / 183 / 200 / ACK / BYE。
+2. 更多成功呼叫的脱敏 SIP trace：INVITE / 100 / 183 / 200 / ACK / BYE。
 3. 失败呼叫的脱敏 SIP trace：408 / 508 / 403 / 486 / 603。
 4. codec 不匹配时真实返回 400、488、503 还是 508。
 5. 508 响应里是否稳定携带 Reason / Q.850 / 私有 header。

@@ -2,7 +2,7 @@
 <include>
   <context name="sip_provider_sandbox">
     <extension name="sip-provider-sandbox-forbidden-caller">
-      <condition field="caller_id_number" expression="^(?!037123124810$).+">
+      <condition field="caller_id_number" expression="^(?!037123124845$).+">
         <action application="respond" data="403"/>
         <action application="hangup" data="CALL_REJECTED"/>
       </condition>
@@ -77,7 +77,7 @@
     </extension>
 
     <extension name="sip-provider-sandbox-answer">
-      <condition field="destination_number" expression="^(15800967789|\d{11}|037123124810)$">
+      <condition field="destination_number" expression="^(15800967789|\d{11}|037123124845)$">
         <action application="ring_ready"/>
         <action application="sleep" data="500"/>
         <action application="answer"/>

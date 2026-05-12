@@ -36,7 +36,7 @@
 真实 sip-provider gateway：当前未启用
 本机 external_sip_ip：192.168.0.100
 本机 external_rtp_ip：192.168.0.100
-预期公网 SIP/RTP：81.68.166.109 或等价公网映射
+预期公网 SIP/RTP：111.229.146.182 或等价公网映射
 ```
 
 因此真实线路单通验证建议放到具备公网 SIP/RTP 可达性的服务器上执行。本仓库提供了不自动加载的 gateway 模板：
@@ -66,7 +66,7 @@ Name：sip-provider
 State：NOREG
 Status：UP
 Proxy：47.94.86.132:5089
-From：sip:037123124810@47.94.86.132
+From：sip:037123124845@47.94.86.132
 Password：no
 ```
 
@@ -81,7 +81,7 @@ Password：no
 不加：+86
 不加：86
 不加：0 / 9 出局前缀
-caller_id_number：037123124810
+caller_id_number：037123124845
 ```
 
 `caller_id_number` 必须是供应商允许或已报备显号。caller_id 错误时，真实线路可能返回 `403 Forbidden`，也可能返回供应商私有失败码。
@@ -110,8 +110,8 @@ SRTP：关闭
 真实线路最容易失败的是 RTP，而不是 HTTP 控制面。发起前确认：
 
 ```text
-FreeSWITCH external_sip_ip 指向 81.68.166.109 或等价公网映射
-FreeSWITCH external_rtp_ip 指向 81.68.166.109 或等价公网映射
+FreeSWITCH external_sip_ip 指向 111.229.146.182 或等价公网映射
+FreeSWITCH external_rtp_ip 指向 111.229.146.182 或等价公网映射
 服务器安全组 / 防火墙放通 SIP UDP 19000
 服务器安全组 / 防火墙放通 FreeSWITCH RTP 端口范围
 供应商白名单包含当前公网 IP
@@ -136,8 +136,8 @@ scripts/dev-local.sh check
 
 ```text
 endpoint = sofia/gateway/sip-provider/{真实被叫号码}
-caller_id_number = 037123124810
-caller_id_name = 037123124810
+caller_id_number = 037123124845
+caller_id_name = 037123124845
 originate_timeout_seconds = 30
 ```
 
@@ -147,8 +147,8 @@ originate_timeout_seconds = 30
 {
   "destination": "15800967789",
   "external_call_id": "real-sip-single-001",
-  "caller_id_number": "037123124810",
-  "caller_id_name": "037123124810",
+  "caller_id_number": "037123124845",
+  "caller_id_name": "037123124845",
   "endpoint": "sofia/gateway/sip-provider/15800967789",
   "originate_timeout_seconds": 30,
   "context": {
@@ -198,6 +198,25 @@ last_event_name
 ```
 
 如果只接通但单向无声，不算通过。真实电话链路的本质是 SIP 信令和 RTP 媒体都成立，只有一个成立不够。
+
+### 4.1 当前成功样本
+
+2026-05-12，公网服务器 `111.229.146.182` 已完成真实线路接通验证：
+
+```text
+主叫：037123124845
+被叫：18518968743
+Call-ID：a5edb3c9-c883-123f-adaf-ceee8053b903
+SIP proxy：47.94.86.132:5089
+供应商 User-Agent：uincall_sbc
+供应商 RTP：47.94.86.132:29092
+Codec：PCMA/8000
+ptime：20ms
+最终阶段：media_connected
+电话侧确认：可通话
+```
+
+该样本说明当前服务器、SIP trunk、主叫号码、PCMA/8000、ptime=20 和媒体接入链路已经具备真实通话能力。
 
 ## 5. 失败归因速查
 

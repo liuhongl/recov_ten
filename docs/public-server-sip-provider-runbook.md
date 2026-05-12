@@ -19,7 +19,7 @@
 服务器必须满足：
 
 ```text
-公网 IP：81.68.166.109，或供应商已加入白名单的等价公网 IP
+公网 IP：111.229.146.182，或供应商已加入白名单的等价公网 IP
 系统：能运行 Docker / Docker Compose
 代码：当前仓库分支 codex/feat/sip-provider-sandbox
 密钥：服务器本地 .env 已配置豆包 S2S 等真实运行参数
@@ -50,7 +50,7 @@ RTP：服务器安全组和系统防火墙放通 FreeSWITCH RTP 端口范围
 26384-26484/udp -> 容器 16384-16484
 ```
 
-真实线路建议单独确认 `external` profile 的 SIP 端口是否要改为 `19000`。如果供应商白名单里记录的是 `81.68.166.109:19000`，则 FreeSWITCH `external_sip_port` 和 Docker 端口映射也要一致。
+真实线路建议单独确认 `external` profile 的 SIP 端口是否要改为 `19000`。如果供应商白名单里记录的是 `111.229.146.182:19000`，则 FreeSWITCH `external_sip_port` 和 Docker 端口映射也要一致。
 
 ## 3. 获取代码
 
@@ -78,8 +78,8 @@ freeswitch-local/conf/vars.xml
 将本地 LAN 地址改为公网服务器地址：
 
 ```xml
-<X-PRE-PROCESS cmd="set" data="external_rtp_ip=81.68.166.109"/>
-<X-PRE-PROCESS cmd="set" data="external_sip_ip=81.68.166.109"/>
+<X-PRE-PROCESS cmd="set" data="external_rtp_ip=111.229.146.182"/>
+<X-PRE-PROCESS cmd="set" data="external_sip_ip=111.229.146.182"/>
 ```
 
 如果真实线路要求本地 SIP 端口为 `19000`，还需要确认：
@@ -111,7 +111,7 @@ cp freeswitch-local/conf/sip_profiles/external/sip-provider.xml.template \
 gateway name：sip-provider
 proxy：47.94.86.132:5089
 realm：47.94.86.132
-from-user：037123124810
+from-user：037123124845
 from-domain：47.94.86.132
 register：false
 caller-id-in-from：true
@@ -153,7 +153,7 @@ docker exec sip_realtime_freeswitch fs_cli -x "sofia status gateway sip-provider
 Name     sip-provider
 State    NOREG
 Status   UP
-From     <sip:037123124810@47.94.86.132>
+From     <sip:037123124845@47.94.86.132>
 Proxy    sip:47.94.86.132:5089
 ```
 
@@ -166,8 +166,8 @@ docker exec sip_realtime_freeswitch fs_cli -x "sofia status profile external"
 重点确认：
 
 ```text
-Ext-SIP-IP   81.68.166.109
-Ext-RTP-IP   81.68.166.109
+Ext-SIP-IP   111.229.146.182
+Ext-RTP-IP   111.229.146.182
 CODECS OUT   PCMA
 TEL-EVENT    101
 ```
@@ -182,8 +182,8 @@ curl -sS http://127.0.0.1:9100/calls \
   -d '{
     "destination": "15800967789",
     "external_call_id": "real-sip-single-001",
-    "caller_id_number": "037123124810",
-    "caller_id_name": "037123124810",
+    "caller_id_number": "037123124845",
+    "caller_id_name": "037123124845",
     "endpoint": "sofia/gateway/sip-provider/15800967789",
     "originate_timeout_seconds": 30,
     "context": {
@@ -235,6 +235,27 @@ AI 是否听到用户
 ```
 
 只接通但单向无声不算通过，因为 SIP 信令成立不等于 RTP 双向成立。
+
+## 10.1 当前成功基线
+
+2026-05-12 已在公网服务器完成一通真实线路接通验证：
+
+```text
+公网服务器：111.229.146.182
+SIP proxy：47.94.86.132:5089
+本地 SIP：111.229.146.182:19000/udp
+主叫号码：037123124845
+被叫号码：18518968743
+Call-ID：a5edb3c9-c883-123f-adaf-ceee8053b903
+供应商 User-Agent：uincall_sbc
+供应商 SDP：47.94.86.132:29092
+Codec：PCMA/8000
+ptime：20ms
+网关状态：media_connected
+结果：电话侧确认可通话
+```
+
+该样本是后续排查的基线。若之后同样配置下没有供应商回包，优先对照供应商入口日志、IP 白名单和线路状态，而不是先改媒体网关。
 
 ## 11. 失败时先收集证据
 

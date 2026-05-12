@@ -16,7 +16,7 @@ Gateway 状态：NOREG / UP
 SIP proxy：47.94.86.132:5089
 传输协议：UDP
 认证方式：无 username/password
-本地公网 SIP：81.68.166.109:19000
+本地公网 SIP：111.229.146.182:19000
 当前是 NAT/rport 场景
 ```
 
@@ -32,8 +32,8 @@ Request-URI：sip:{callee}@47.94.86.132:5089
 caller_id 规则：
 
 ```text
-当前 caller_id：037123124810
-From URI：sip:037123124810@47.94.86.132
+当前 caller_id：037123124845
+From URI：sip:037123124845@47.94.86.132
 caller-id-in-from：true
 caller_id 必须使用线路允许或报备的显号
 ```
@@ -97,7 +97,7 @@ docker exec sip_realtime_freeswitch fs_cli -x "sofia status profile sip-provider
 Gateway：sip-provider-sandbox
 State：NOREG
 Status：UP
-From：sip:037123124810@47.94.86.132
+From：sip:037123124845@47.94.86.132
 Profile codec：PCMA,PCMU
 DTMF：RFC2833 / 101
 ```

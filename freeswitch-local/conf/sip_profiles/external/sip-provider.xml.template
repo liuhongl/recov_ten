@@ -8,11 +8,11 @@
     and external_rtp_ip point to the server public address.
   -->
   <gateway name="sip-provider">
-    <param name="username" value="037123124810"/>
-    <param name="extension" value="037123124810"/>
+    <param name="username" value="037123124845"/>
+    <param name="extension" value="037123124845"/>
     <param name="proxy" value="47.94.86.132:5089"/>
     <param name="realm" value="47.94.86.132"/>
-    <param name="from-user" value="037123124810"/>
+    <param name="from-user" value="037123124845"/>
     <param name="from-domain" value="47.94.86.132"/>
     <param name="password" value=""/>
     <param name="register" value="false"/>

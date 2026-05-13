@@ -1765,7 +1765,13 @@ class FreeSwitchRealtimeGatewayServer:
         playback_done_at: float | None = None,
     ) -> dict[str, int | None]:
         speech_started_at = session.turn_speech_started_at.get(turn_id)
-        local_last_voice_at = session.turn_local_last_voice_at.get(turn_id)
+        local_last_voice_at = _valid_local_last_voice_at(
+            session.turn_local_last_voice_at.get(turn_id),
+            speech_started_at=speech_started_at,
+            asr_ended_ms=session.turn_asr_ended_ms.get(turn_id),
+            first_model_audio_at=session.turn_first_model_audio_at.get(turn_id),
+            first_playback_at=session.turn_first_playback_at.get(turn_id),
+        )
         speech_to_first_model_audio_ms = _elapsed_ms(
             speech_started_at,
             session.turn_first_model_audio_at.get(turn_id),
@@ -1926,3 +1932,31 @@ def _elapsed_from_relative_ms(
     if anchor_at is None or relative_ms is None or start_at is None:
         return None
     return max(0, _elapsed_ms(start_at, anchor_at + (relative_ms / 1000)) or 0)
+
+
+def _valid_local_last_voice_at(
+    local_last_voice_at: float | None,
+    *,
+    speech_started_at: float | None,
+    asr_ended_ms: int | None,
+    first_model_audio_at: float | None,
+    first_playback_at: float | None,
+) -> float | None:
+    if local_last_voice_at is None:
+        return None
+    boundary_times = [
+        boundary
+        for boundary in (
+            (
+                speech_started_at + (asr_ended_ms / 1000)
+                if speech_started_at is not None and asr_ended_ms is not None
+                else None
+            ),
+            first_model_audio_at,
+            first_playback_at,
+        )
+        if boundary is not None
+    ]
+    if boundary_times and local_last_voice_at > min(boundary_times):
+        return None
+    return local_last_voice_at

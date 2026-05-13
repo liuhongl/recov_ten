@@ -143,6 +143,36 @@ def test_realtime_phone_gateway_call_result_includes_turn_latency_metrics():
     ]
 
 
+def test_realtime_phone_gateway_ignores_invalid_local_last_voice_latency():
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-call",
+        session_id="test-session",
+        connected_at=100.0,
+        last_seen_at=100.0,
+        expected_frame_bytes=320,
+    )
+    session.turn_speech_started_at[1] = 101.0
+    session.turn_asr_ended_ms[1] = 1200
+    session.turn_first_model_audio_at[1] = 102.3
+    session.turn_first_playback_at[1] = 102.4
+    session.turn_local_last_voice_at[1] = 102.8
+
+    latency = server._build_turn_latency_summary(
+        session,
+        1,
+        playback_done_at=103.0,
+    )
+
+    assert latency["local_last_voice_to_asr_end_ms"] is None
+    assert latency["local_last_voice_to_first_model_audio_ms"] is None
+    assert latency["local_last_voice_to_first_playback_ms"] is None
+    assert latency["local_last_voice_to_playback_done_ms"] is None
+
+
 def test_realtime_phone_gateway_tracks_local_last_voice_for_active_turn():
     server = FreeSwitchRealtimeGatewayServer(
         _test_config(tail_silence_ms=0),

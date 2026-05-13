@@ -14,7 +14,11 @@ from dataclasses import dataclass, field
 from websockets.exceptions import ConnectionClosed
 from websockets.legacy.server import WebSocketServer, WebSocketServerProtocol, serve
 
-from .audio_codec import pcm_s16le_frame_bytes, resample_pcm_s16le_mono
+from .audio_codec import (
+    pcm_s16le_frame_bytes,
+    pcm_s16le_rms,
+    resample_pcm_s16le_mono,
+)
 from .config import GatewayConfig
 from .freeswitch_event_socket import (
     FreeSwitchPlaybackController,
@@ -54,6 +58,7 @@ LATEST_UTTERANCE_GUARD = (
     "除非用户最新一句明确询问时间，否则不要主动报时。"
 )
 DEFAULT_REPLAY_AUDIO_MS = 800
+LOCAL_VOICE_SPEECH_START_LOOKBACK_MS = 1000
 MAX_COMMITTED_HISTORY_EXCHANGES = 6
 MAX_COMMITTED_HISTORY_CHARS = 1400
 
@@ -160,6 +165,12 @@ class RealtimePhoneSessionStats:
     streamed_input_bytes: int = 0
     first_audio_at: float | None = None
     first_playback_at: float | None = None
+    local_audio_rms_sum: int = 0
+    local_audio_rms_max: int = 0
+    local_voice_frames: int = 0
+    local_first_voice_at: float | None = None
+    local_last_voice_at: float | None = None
+    local_last_voice_rms: int | None = None
     playback_last_send_at: float | None = None
     playback_last_send_turn_id: int | None = None
     disconnected_at: float | None = None
@@ -178,6 +189,10 @@ class RealtimePhoneSessionStats:
     current_capture_turn_id: int | None = None
     current_output_turn_id: int | None = None
     turn_speech_started_at: dict[int, float] = field(
+        default_factory=dict,
+        repr=False,
+    )
+    turn_local_last_voice_at: dict[int, float] = field(
         default_factory=dict,
         repr=False,
     )
@@ -203,6 +218,14 @@ class RealtimePhoneSessionStats:
         repr=False,
     )
     turn_asr_ended_ms: dict[int, int | None] = field(
+        default_factory=dict,
+        repr=False,
+    )
+    turn_response_done_ms: dict[int, int | None] = field(
+        default_factory=dict,
+        repr=False,
+    )
+    turn_latency_summaries: dict[int, dict[str, int | None]] = field(
         default_factory=dict,
         repr=False,
     )
@@ -628,6 +651,8 @@ class FreeSwitchRealtimeGatewayServer:
             )
             return
 
+        self._track_local_voice_frame(session, payload, now=time.monotonic())
+
         frame_16k = resample_pcm_s16le_mono(
             payload,
             self.config.freeswitch.sample_rate,
@@ -687,15 +712,25 @@ class FreeSwitchRealtimeGatewayServer:
 
         session.turns_started += 1
         session.current_capture_turn_id = turn_id
-        session.turn_speech_started_at[turn_id] = time.monotonic()
+        started_at = time.monotonic()
+        session.turn_speech_started_at[turn_id] = started_at
+        if (
+            session.local_last_voice_at is not None
+            and _elapsed_ms(session.local_last_voice_at, started_at)
+            <= LOCAL_VOICE_SPEECH_START_LOOKBACK_MS
+        ):
+            session.turn_local_last_voice_at[turn_id] = session.local_last_voice_at
         LOGGER.info(
             "realtime_phone_server_vad_speech_started call_id=%s session_id=%s "
-            "turn=%s threshold=%s silence_duration_ms=%s",
+            "turn=%s threshold=%s silence_duration_ms=%s "
+            "local_last_voice_age_ms=%s local_last_voice_rms=%s",
             session.call_id,
             session.session_id,
             turn_id,
             self.config.server_vad.threshold,
             self.config.server_vad.silence_duration_ms,
+            _elapsed_ms(session.local_last_voice_at, started_at),
+            session.local_last_voice_rms,
         )
 
     async def _run_interruption_repair(
@@ -719,6 +754,35 @@ class FreeSwitchRealtimeGatewayServer:
             if session.interruption_repair_active:
                 session.interruption_repair_active = False
 
+    def _track_local_voice_frame(
+        self,
+        session: RealtimePhoneSessionStats,
+        payload: bytes,
+        *,
+        now: float,
+    ) -> None:
+        rms = pcm_s16le_rms(payload)
+        session.local_audio_rms_sum += rms
+        session.local_audio_rms_max = max(session.local_audio_rms_max, rms)
+        if rms < self.config.vad.speech_rms_threshold:
+            return
+        session.local_voice_frames += 1
+        if session.local_first_voice_at is None:
+            session.local_first_voice_at = now
+            LOGGER.info(
+                "realtime_phone_local_voice_detected call_id=%s session_id=%s "
+                "frame=%s rms=%s threshold=%s",
+                session.call_id,
+                session.session_id,
+                session.inbound_frames,
+                rms,
+                self.config.vad.speech_rms_threshold,
+            )
+        session.local_last_voice_at = now
+        session.local_last_voice_rms = rms
+        if session.current_capture_turn_id is not None:
+            session.turn_local_last_voice_at[session.current_capture_turn_id] = now
+
     async def _finalize_server_vad_turn(
         self,
         session: RealtimePhoneSessionStats,
@@ -732,6 +796,7 @@ class FreeSwitchRealtimeGatewayServer:
             result.first_audio_delta_ms
         )
         session.turn_asr_ended_ms[turn_id] = result.asr_ended_ms
+        session.turn_response_done_ms[turn_id] = result.response_done_ms
         flushed_frame_count = 0
         tail_silence_frame_count = 0
 
@@ -994,24 +1059,40 @@ class FreeSwitchRealtimeGatewayServer:
             )
         if item.turn_id not in session.turn_first_playback_at:
             session.turn_first_playback_at[item.turn_id] = send_started_at
+            speech_to_first_playback_ms = _elapsed_ms(
+                session.turn_speech_started_at.get(item.turn_id),
+                send_started_at,
+            )
             LOGGER.info(
                 "realtime_phone_turn_first_playback call_id=%s session_id=%s "
                 "turn=%s since_speech_started_ms=%s "
                 "since_first_model_audio_ms=%s asr_ended_ms=%s "
-                "model_first_audio_delta_ms=%s prefill_frames=%s",
+                "model_first_audio_delta_ms=%s "
+                "asr_end_to_first_model_audio_ms=%s "
+                "asr_end_to_first_playback_ms=%s "
+                "local_last_voice_to_first_playback_ms=%s prefill_frames=%s",
                 session.call_id,
                 session.session_id,
                 item.turn_id,
-                _elapsed_ms(
-                    session.turn_speech_started_at.get(item.turn_id),
-                    send_started_at,
-                ),
+                speech_to_first_playback_ms,
                 _elapsed_ms(
                     session.turn_first_model_audio_at.get(item.turn_id),
                     send_started_at,
                 ),
                 session.turn_asr_ended_ms.get(item.turn_id),
                 session.turn_model_first_audio_delta_ms.get(item.turn_id),
+                _subtract_ms(
+                    session.turn_model_first_audio_delta_ms.get(item.turn_id),
+                    session.turn_asr_ended_ms.get(item.turn_id),
+                ),
+                _subtract_ms(
+                    speech_to_first_playback_ms,
+                    session.turn_asr_ended_ms.get(item.turn_id),
+                ),
+                _elapsed_ms(
+                    session.turn_local_last_voice_at.get(item.turn_id),
+                    send_started_at,
+                ),
                 self.playback_prefill_frames,
             )
 
@@ -1082,6 +1163,12 @@ class FreeSwitchRealtimeGatewayServer:
         session.committed_exchanges.append(exchange)
         session.gateway_history_committed_turns += 1
         completed_at = time.monotonic()
+        latency = self._build_turn_latency_summary(
+            session,
+            turn_id,
+            playback_done_at=completed_at,
+        )
+        session.turn_latency_summaries[turn_id] = latency
         LOGGER.info(
             "gateway_conversation_turn_committed call_id=%s session_id=%s "
             "turn=%s committed_history_turns=%s input_transcript=%s "
@@ -1098,6 +1185,35 @@ class FreeSwitchRealtimeGatewayServer:
             _elapsed_ms(session.turn_model_done_at.get(turn_id), completed_at),
             _elapsed_ms(session.turn_first_playback_at.get(turn_id), completed_at),
             session.turn_max_playback_send_gap_ms.get(turn_id, 0),
+        )
+        LOGGER.info(
+            "realtime_phone_turn_latency call_id=%s session_id=%s turn=%s "
+            "speech_started_to_asr_end_ms=%s "
+            "speech_started_to_first_model_audio_ms=%s "
+            "speech_started_to_first_playback_ms=%s "
+            "asr_end_to_first_model_audio_ms=%s "
+            "asr_end_to_first_playback_ms=%s "
+            "local_last_voice_to_asr_end_ms=%s "
+            "local_last_voice_to_first_model_audio_ms=%s "
+            "local_last_voice_to_first_playback_ms=%s "
+            "local_last_voice_to_playback_done_ms=%s "
+            "first_model_audio_to_first_playback_ms=%s "
+            "response_done_ms=%s playback_done_ms=%s",
+            session.call_id,
+            session.session_id,
+            turn_id,
+            latency["speech_started_to_asr_end_ms"],
+            latency["speech_started_to_first_model_audio_ms"],
+            latency["speech_started_to_first_playback_ms"],
+            latency["asr_end_to_first_model_audio_ms"],
+            latency["asr_end_to_first_playback_ms"],
+            latency["local_last_voice_to_asr_end_ms"],
+            latency["local_last_voice_to_first_model_audio_ms"],
+            latency["local_last_voice_to_first_playback_ms"],
+            latency["local_last_voice_to_playback_done_ms"],
+            latency["first_model_audio_to_first_playback_ms"],
+            latency["response_done_ms"],
+            latency["playback_done_ms"],
         )
 
     def _abandon_pending_turn(
@@ -1499,6 +1615,8 @@ class FreeSwitchRealtimeGatewayServer:
             "gateway_history_committed_turns=%s "
             "gateway_history_abandoned_turns=%s replayed_input_frames=%s "
             "replayed_input_bytes=%s "
+            "local_audio_rms_avg=%s local_audio_rms_max=%s "
+            "local_voice_frames=%s local_last_voice_rms=%s "
             "turns_started=%s turns_committed=%s turns_completed=%s "
             "turns_failed=%s duration_ms=%s",
             session.call_id,
@@ -1533,6 +1651,10 @@ class FreeSwitchRealtimeGatewayServer:
             session.gateway_history_abandoned_turns,
             session.replayed_input_frames,
             session.replayed_input_bytes,
+            _average_int(session.local_audio_rms_sum, session.inbound_frames),
+            session.local_audio_rms_max,
+            session.local_voice_frames,
+            session.local_last_voice_rms,
             session.turns_started,
             session.turns_committed,
             session.turns_completed,
@@ -1617,11 +1739,83 @@ class FreeSwitchRealtimeGatewayServer:
                 ),
                 "replayed_input_frames": session.replayed_input_frames,
                 "replayed_input_bytes": session.replayed_input_bytes,
+                "local_audio_rms_avg": _average_int(
+                    session.local_audio_rms_sum,
+                    session.inbound_frames,
+                ),
+                "local_audio_rms_max": session.local_audio_rms_max,
+                "local_voice_frames": session.local_voice_frames,
+                "local_last_voice_rms": session.local_last_voice_rms,
                 "turns_started": session.turns_started,
                 "turns_committed": session.turns_committed,
                 "turns_completed": session.turns_completed,
                 "turns_failed": session.turns_failed,
+                "turn_latencies": [
+                    session.turn_latency_summaries[turn_id]
+                    for turn_id in sorted(session.turn_latency_summaries)
+                ],
             },
+        }
+
+    def _build_turn_latency_summary(
+        self,
+        session: RealtimePhoneSessionStats,
+        turn_id: int,
+        *,
+        playback_done_at: float | None = None,
+    ) -> dict[str, int | None]:
+        speech_started_at = session.turn_speech_started_at.get(turn_id)
+        local_last_voice_at = session.turn_local_last_voice_at.get(turn_id)
+        speech_to_first_model_audio_ms = _elapsed_ms(
+            speech_started_at,
+            session.turn_first_model_audio_at.get(turn_id),
+        )
+        speech_to_first_playback_ms = _elapsed_ms(
+            speech_started_at,
+            session.turn_first_playback_at.get(turn_id),
+        )
+        local_last_voice_to_asr_end_ms = _elapsed_from_relative_ms(
+            speech_started_at,
+            session.turn_asr_ended_ms.get(turn_id),
+            local_last_voice_at,
+        )
+        return {
+            "turn_id": turn_id,
+            "speech_started_to_asr_end_ms": session.turn_asr_ended_ms.get(turn_id),
+            "speech_started_to_first_model_audio_ms": (
+                speech_to_first_model_audio_ms
+            ),
+            "speech_started_to_first_playback_ms": speech_to_first_playback_ms,
+            "local_last_voice_to_asr_end_ms": local_last_voice_to_asr_end_ms,
+            "local_last_voice_to_first_model_audio_ms": _elapsed_ms(
+                local_last_voice_at,
+                session.turn_first_model_audio_at.get(turn_id),
+            ),
+            "local_last_voice_to_first_playback_ms": _elapsed_ms(
+                local_last_voice_at,
+                session.turn_first_playback_at.get(turn_id),
+            ),
+            "local_last_voice_to_playback_done_ms": _elapsed_ms(
+                local_last_voice_at,
+                playback_done_at,
+            ),
+            "asr_end_to_first_model_audio_ms": _subtract_ms(
+                session.turn_model_first_audio_delta_ms.get(turn_id),
+                session.turn_asr_ended_ms.get(turn_id),
+            ),
+            "asr_end_to_first_playback_ms": _subtract_ms(
+                speech_to_first_playback_ms,
+                session.turn_asr_ended_ms.get(turn_id),
+            ),
+            "first_model_audio_to_first_playback_ms": _elapsed_ms(
+                session.turn_first_model_audio_at.get(turn_id),
+                session.turn_first_playback_at.get(turn_id),
+            ),
+            "response_done_ms": session.turn_response_done_ms.get(turn_id),
+            "playback_done_ms": _elapsed_ms(
+                speech_started_at,
+                playback_done_at,
+            ),
         }
 
     def _session_is_busy(self, session: RealtimePhoneSessionStats) -> bool:
@@ -1710,3 +1904,25 @@ def _elapsed_ms(start: float | None, end: float | None = None) -> int | None:
     if end is None:
         end = time.monotonic()
     return int((end - start) * 1000)
+
+
+def _subtract_ms(value: int | None, baseline: int | None) -> int | None:
+    if value is None or baseline is None:
+        return None
+    return max(0, value - baseline)
+
+
+def _average_int(total: int, count: int) -> int | None:
+    if count <= 0:
+        return None
+    return total // count
+
+
+def _elapsed_from_relative_ms(
+    anchor_at: float | None,
+    relative_ms: int | None,
+    start_at: float | None,
+) -> int | None:
+    if anchor_at is None or relative_ms is None or start_at is None:
+        return None
+    return max(0, _elapsed_ms(start_at, anchor_at + (relative_ms / 1000)) or 0)

@@ -78,6 +78,93 @@ def test_realtime_instructions_do_not_reuse_historical_time_question():
     assert "如果打断后的最新语音不清楚" in instructions
 
 
+def test_realtime_phone_gateway_call_result_includes_turn_latency_metrics():
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-call",
+        session_id="test-session",
+        connected_at=100.0,
+        last_seen_at=100.0,
+        expected_frame_bytes=320,
+    )
+    session.disconnected_at = 110.0
+    session.turn_speech_started_at[1] = 101.0
+    session.turn_local_last_voice_at[1] = 101.25
+    session.turn_first_model_audio_at[1] = 102.0
+    session.turn_first_playback_at[1] = 102.25
+    session.turn_model_done_at[1] = 102.5
+    session.turn_asr_ended_ms[1] = 750
+    session.turn_model_first_audio_delta_ms[1] = 1000
+    session.turn_response_done_ms[1] = 1500
+    latency = server._build_turn_latency_summary(
+        session,
+        1,
+        playback_done_at=103.25,
+    )
+    session.turn_latency_summaries[1] = latency
+
+    assert latency == {
+        "turn_id": 1,
+        "speech_started_to_asr_end_ms": 750,
+        "speech_started_to_first_model_audio_ms": 1000,
+        "speech_started_to_first_playback_ms": 1250,
+        "local_last_voice_to_asr_end_ms": 500,
+        "local_last_voice_to_first_model_audio_ms": 750,
+        "local_last_voice_to_first_playback_ms": 1000,
+        "local_last_voice_to_playback_done_ms": 2000,
+        "asr_end_to_first_model_audio_ms": 250,
+        "asr_end_to_first_playback_ms": 500,
+        "first_model_audio_to_first_playback_ms": 250,
+        "response_done_ms": 1500,
+        "playback_done_ms": 2250,
+    }
+
+    payload = server._build_call_result_payload(session)
+
+    assert payload["metrics"]["turn_latencies"] == [
+        {
+            "turn_id": 1,
+            "speech_started_to_asr_end_ms": 750,
+            "speech_started_to_first_model_audio_ms": 1000,
+            "speech_started_to_first_playback_ms": 1250,
+            "local_last_voice_to_asr_end_ms": 500,
+            "local_last_voice_to_first_model_audio_ms": 750,
+            "local_last_voice_to_first_playback_ms": 1000,
+            "local_last_voice_to_playback_done_ms": 2000,
+            "asr_end_to_first_model_audio_ms": 250,
+            "asr_end_to_first_playback_ms": 500,
+            "first_model_audio_to_first_playback_ms": 250,
+            "response_done_ms": 1500,
+            "playback_done_ms": 2250,
+        }
+    ]
+
+
+def test_realtime_phone_gateway_tracks_local_last_voice_for_active_turn():
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-call",
+        session_id="test-session",
+        connected_at=100.0,
+        last_seen_at=100.0,
+        expected_frame_bytes=320,
+    )
+    session.current_capture_turn_id = 3
+    fake_session = FakeRealtimeSession(samples_to_pcm_s16le([1600] * 240))
+    server._realtime_sessions[session.session_id] = fake_session
+
+    asyncio.run(server._handle_audio_frame(session, _phone_frame(1200)))
+
+    assert session.local_last_voice_at is not None
+    assert session.turn_local_last_voice_at[3] == session.local_last_voice_at
+
+
 async def _assert_realtime_phone_gateway_roundtrip() -> None:
     fake_session = FakeRealtimeSession(samples_to_pcm_s16le([1600] * 240))
     server = FreeSwitchRealtimeGatewayServer(

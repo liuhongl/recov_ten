@@ -13,6 +13,13 @@ from app.call_control import (
 )
 from app.config import EventSocketConfig, GatewayConfig, OutboundCallConfig
 from app.freeswitch_event_socket import ChannelStateEvent
+from app.opening import (
+    OpeningAudio,
+    OpeningAudioStore,
+    OpeningGenerationFailed,
+    OpeningGenerationTimeout,
+)
+from app.audio_codec import samples_to_pcm_s16le
 
 
 def test_build_originate_command_uses_local_dialplan():
@@ -259,6 +266,149 @@ def test_outbound_manager_originates_in_background():
         assert final_call["freeswitch_reply"] == "+OK call accepted"
         assert commands
         assert "user/1000 9199 XML default" in commands[0]
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_generates_opening_before_originating():
+    events: list[str] = []
+    commands: list[str] = []
+    store = OpeningAudioStore()
+
+    class FakeOpeningGenerator:
+        def generate(self, opening):
+            events.append(f"generate:{opening.voice}:{opening.opening_text_hash}")
+            return OpeningAudio(
+                pcm16=samples_to_pcm_s16le([1200] * 480),
+                sample_rate=24000,
+                generation_ms=1200,
+            )
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return endpoint
+
+        async def originate(self, command: str) -> str:
+            events.append("originate")
+            commands.append(command)
+            return "+OK call accepted"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    config = GatewayConfig(
+        event_socket=EventSocketConfig(enabled=True),
+        outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+    )
+    manager = OutboundCallManager(
+        config,
+        dialer_factory=lambda: FakeDialer(),
+        opening_generator=FakeOpeningGenerator(),
+        opening_store=store,
+    )
+
+    try:
+        call = manager.create_call(
+            {
+                "destination": "1000",
+                "caller_id_number": "9000",
+                "opening": {
+                    "voice": "female",
+                    "business": {
+                        "owner_name": "测试业主",
+                        "arrears_amount": "12.34",
+                    },
+                },
+            }
+        )
+
+        assert call["status"] == "queued"
+        assert call["opening"]["status"] == "ready"
+        assert call["opening"]["voice"] == "female"
+        assert call["opening"]["audio_sample_rate"] == 24000
+        assert call["opening"]["generation_ms"] == 1200
+        assert "opening_text" not in call["opening"]
+        assert call["context"] == {}
+        final_call = _wait_for_status(manager, call["call_id"], "originated")
+        assert final_call["opening"]["call_started_after_opening_ready"] is True
+        assert store.pop(call["call_id"]) is not None
+        assert events[0].startswith("generate:female:")
+        assert events[-1] == "originate"
+        assert commands
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_does_not_originate_when_opening_generation_fails():
+    commands: list[str] = []
+
+    class FakeOpeningGenerator:
+        def generate(self, opening):
+            raise OpeningGenerationFailed("opening_generation_failed")
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return endpoint
+
+        async def originate(self, command: str) -> str:
+            commands.append(command)
+            return "+OK call accepted"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(event_socket=EventSocketConfig(enabled=True)),
+        dialer_factory=lambda: FakeDialer(),
+        opening_generator=FakeOpeningGenerator(),
+        opening_store=OpeningAudioStore(),
+    )
+
+    try:
+        with pytest.raises(CallControlError, match="opening_generation_failed") as err:
+            manager.create_call(
+                {
+                    "destination": "1000",
+                    "opening": {
+                        "business": {
+                            "owner_name": "测试业主",
+                            "arrears_amount": "12.34",
+                        },
+                    },
+                }
+            )
+        assert err.value.status_code == 502
+        assert commands == []
+        assert manager.list_calls() == []
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_maps_opening_generation_timeout_to_504():
+    class FakeOpeningGenerator:
+        def generate(self, opening):
+            raise OpeningGenerationTimeout("opening_generation_timeout")
+
+    manager = OutboundCallManager(
+        GatewayConfig(event_socket=EventSocketConfig(enabled=True)),
+        opening_generator=FakeOpeningGenerator(),
+        opening_store=OpeningAudioStore(),
+    )
+
+    try:
+        with pytest.raises(CallControlError, match="opening_generation_timeout") as err:
+            manager.create_call(
+                {
+                    "destination": "1000",
+                    "opening": {
+                        "business": {
+                            "owner_name": "测试业主",
+                            "arrears_amount": "12.34",
+                        },
+                    },
+                }
+            )
+        assert err.value.status_code == 504
     finally:
         manager.shutdown()
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import time
 import uuid
@@ -31,6 +32,16 @@ from .doubao_s2s_client import (
 from .realtime_types import RealtimeTurnResult
 
 LOGGER = logging.getLogger(__name__)
+POST_CONTEXT_SEED_DIAGNOSTIC_WINDOW_MS = 15000
+LATE_CONTEXT_SEED_SUPPRESSION_WINDOW_MS = 15000
+PROVIDER_RESPONSE_EVENTS = {
+    EVENT_TTS_STARTED,
+    EVENT_CHAT_RESPONSE,
+    EVENT_CHAT_ENDED,
+    EVENT_TTS_SEGMENT_END,
+    EVENT_TTS_AUDIO_DATA,
+    EVENT_TTS_FINISHED,
+}
 
 
 @dataclass
@@ -87,7 +98,25 @@ class DoubaoS2SServerVadSession:
         self._session_restart_lock = asyncio.Lock()
         self._pending_session_started: asyncio.Future[None] | None = None
         self._pending_session_finished: asyncio.Future[None] | None = None
+        self._pending_context_seed_finished: asyncio.Future[None] | None = None
         self._hot_restart_in_progress = False
+        self._context_seed_in_progress = False
+        self._context_seed_seq = 0
+        self._context_seed_id: str | None = None
+        self._context_seed_source: str | None = None
+        self._context_seed_text_hash: str | None = None
+        self._context_seed_started_at: float | None = None
+        self._last_context_seed_id: str | None = None
+        self._last_context_seed_source: str | None = None
+        self._last_context_seed_text_hash: str | None = None
+        self._last_context_seed_outcome: str | None = None
+        self._last_context_seed_finished_at: float | None = None
+        self._late_context_seed_suppression_active = False
+        self._late_context_seed_suppression_started_at: float | None = None
+        self._late_context_seed_suppression_id: str | None = None
+        self._late_context_seed_suppression_source: str | None = None
+        self._late_context_seed_suppression_text_hash: str | None = None
+        self._late_context_seed_suppression_outcome: str | None = None
 
     async def connect(self) -> None:
         session = DoubaoS2SRealtimeSession(self.credentials, self.config)
@@ -136,7 +165,6 @@ class DoubaoS2SServerVadSession:
         *,
         interrupted_output_text: str | None = None,
     ) -> None:
-        del interrupted_output_text
         async with self._session_restart_lock:
             session = self._require_session()
             self._invalidate_active_response()
@@ -155,6 +183,11 @@ class DoubaoS2SServerVadSession:
                 self._pending_session_started = start_future
                 await session.send_start_session()
                 await asyncio.wait_for(start_future, timeout=5)
+                if interrupted_output_text:
+                    await self._seed_assistant_context_locked(
+                        interrupted_output_text,
+                        source="interruption_repair",
+                    )
             finally:
                 self._hot_restart_in_progress = False
                 self._pending_session_finished = None
@@ -162,6 +195,127 @@ class DoubaoS2SServerVadSession:
 
         LOGGER.info(
             "doubao_s2s_hot_session_restarted elapsed_ms=%s",
+            int((time.monotonic() - started_at) * 1000),
+        )
+
+    async def seed_assistant_context(
+        self,
+        text: str,
+        *,
+        source: str = "external",
+    ) -> None:
+        text = text.strip()
+        if not text:
+            return
+        async with self._session_restart_lock:
+            await self._seed_assistant_context_locked(text, source=source)
+
+    async def _seed_assistant_context_locked(
+        self,
+        text: str,
+        *,
+        source: str,
+    ) -> None:
+        session = self._require_session()
+        self._context_seed_seq += 1
+        seed_id = f"seed-{self._context_seed_seq}"
+        text_hash = _text_hash(text)
+        self._context_seed_in_progress = True
+        started_at = time.monotonic()
+        seed_future = self._new_future()
+        self._pending_context_seed_finished = seed_future
+        self._context_seed_id = seed_id
+        self._context_seed_source = source
+        self._context_seed_text_hash = text_hash
+        self._context_seed_started_at = started_at
+        outcome = "unknown"
+        LOGGER.info(
+            "doubao_s2s_context_seed_started seed_id=%s source=%s "
+            "text_hash=%s text_chars=%s session_id=%s",
+            seed_id,
+            source,
+            text_hash,
+            len(text),
+            session.session_id,
+        )
+        try:
+            await session.say_hello(text)
+            await asyncio.wait_for(seed_future, timeout=8)
+            outcome = "completed"
+        except asyncio.TimeoutError:
+            outcome = "timeout"
+            LOGGER.warning(
+                "doubao_s2s_context_seed_failed seed_id=%s source=%s "
+                "outcome=%s elapsed_ms=%s pending_done=%s "
+                "pending_cancelled=%s session_id=%s",
+                seed_id,
+                source,
+                outcome,
+                int((time.monotonic() - started_at) * 1000),
+                seed_future.done(),
+                seed_future.cancelled(),
+                session.session_id,
+            )
+            raise
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            LOGGER.warning(
+                "doubao_s2s_context_seed_failed seed_id=%s source=%s "
+                "outcome=%s elapsed_ms=%s pending_done=%s "
+                "pending_cancelled=%s session_id=%s",
+                seed_id,
+                source,
+                outcome,
+                int((time.monotonic() - started_at) * 1000),
+                seed_future.done(),
+                seed_future.cancelled(),
+                session.session_id,
+            )
+            raise
+        except Exception:
+            outcome = "error"
+            LOGGER.warning(
+                "doubao_s2s_context_seed_failed seed_id=%s source=%s "
+                "outcome=%s elapsed_ms=%s pending_done=%s "
+                "pending_cancelled=%s session_id=%s",
+                seed_id,
+                source,
+                outcome,
+                int((time.monotonic() - started_at) * 1000),
+                seed_future.done(),
+                seed_future.cancelled(),
+                session.session_id,
+                exc_info=True,
+            )
+            raise
+        finally:
+            finished_at = time.monotonic()
+            self._last_context_seed_id = seed_id
+            self._last_context_seed_source = source
+            self._last_context_seed_text_hash = text_hash
+            self._last_context_seed_outcome = outcome
+            self._last_context_seed_finished_at = finished_at
+            if outcome == "completed":
+                self._clear_late_context_seed_suppression()
+            else:
+                self._late_context_seed_suppression_active = True
+                self._late_context_seed_suppression_started_at = finished_at
+                self._late_context_seed_suppression_id = seed_id
+                self._late_context_seed_suppression_source = source
+                self._late_context_seed_suppression_text_hash = text_hash
+                self._late_context_seed_suppression_outcome = outcome
+            self._context_seed_in_progress = False
+            self._pending_context_seed_finished = None
+            self._context_seed_id = None
+            self._context_seed_source = None
+            self._context_seed_text_hash = None
+            self._context_seed_started_at = None
+        LOGGER.info(
+            "doubao_s2s_assistant_context_seeded seed_id=%s source=%s "
+            "text_hash=%s elapsed_ms=%s",
+            seed_id,
+            source,
+            text_hash,
             int((time.monotonic() - started_at) * 1000),
         )
 
@@ -184,6 +338,14 @@ class DoubaoS2SServerVadSession:
 
                 if event.event == EVENT_SESSION_FINISHED:
                     await self._handle_session_finished(event)
+                    continue
+
+                if self._context_seed_in_progress:
+                    self._handle_context_seed_event(event)
+                    continue
+
+                self._log_post_context_seed_event(event)
+                if self._suppress_late_context_seed_event(event):
                     continue
 
                 if event.event in {EVENT_ASR_INFO, EVENT_ASR_RESPONSE}:
@@ -302,6 +464,120 @@ class DoubaoS2SServerVadSession:
         await self._handle_response_done(event)
         self._complete_future(self._pending_session_finished)
 
+    def _handle_context_seed_event(self, event: DoubaoS2SEvent) -> None:
+        LOGGER.info(
+            "doubao_s2s_context_seed_event seed_id=%s source=%s "
+            "text_hash=%s event=%s audio_bytes=%s text_chars=%s "
+            "is_final=%s session_id=%s",
+            self._context_seed_id,
+            self._context_seed_source,
+            self._context_seed_text_hash,
+            event.event,
+            len(event.audio),
+            len(event.text or ""),
+            event.is_final,
+            event.session_id,
+        )
+        if event.event == EVENT_TTS_FINISHED:
+            self._complete_future(self._pending_context_seed_finished)
+
+    def _log_post_context_seed_event(self, event: DoubaoS2SEvent) -> None:
+        if event.event not in PROVIDER_RESPONSE_EVENTS and not event.audio:
+            return
+        age_ms = _elapsed_ms(self._last_context_seed_finished_at)
+        if (
+            age_ms is None
+            or age_ms > POST_CONTEXT_SEED_DIAGNOSTIC_WINDOW_MS
+        ):
+            return
+
+        log = LOGGER.warning
+        if self._last_context_seed_outcome == "completed":
+            log = LOGGER.info
+        log(
+            "doubao_s2s_post_context_seed_event seed_id=%s source=%s "
+            "text_hash=%s seed_outcome=%s age_ms=%s event=%s "
+            "audio_bytes=%s text_chars=%s active_input_turn=%s "
+            "active_response_turn=%s awaiting_turns=%s hot_restart=%s "
+            "session_id=%s",
+            self._last_context_seed_id,
+            self._last_context_seed_source,
+            self._last_context_seed_text_hash,
+            self._last_context_seed_outcome,
+            age_ms,
+            event.event,
+            len(event.audio),
+            len(event.text or ""),
+            self._active_input_turn_id,
+            self._active_response_turn_id,
+            list(self._awaiting_response_turn_ids),
+            self._hot_restart_in_progress,
+            event.session_id,
+        )
+
+    def _suppress_late_context_seed_event(self, event: DoubaoS2SEvent) -> bool:
+        if not self._late_context_seed_suppression_active:
+            return False
+
+        age_ms = _elapsed_ms(self._late_context_seed_suppression_started_at)
+        if (
+            age_ms is not None
+            and age_ms > LATE_CONTEXT_SEED_SUPPRESSION_WINDOW_MS
+        ):
+            LOGGER.warning(
+                "doubao_s2s_late_context_seed_suppression_expired "
+                "seed_id=%s source=%s text_hash=%s outcome=%s age_ms=%s "
+                "event=%s audio_bytes=%s text_chars=%s session_id=%s",
+                self._late_context_seed_suppression_id,
+                self._late_context_seed_suppression_source,
+                self._late_context_seed_suppression_text_hash,
+                self._late_context_seed_suppression_outcome,
+                age_ms,
+                event.event,
+                len(event.audio),
+                len(event.text or ""),
+                event.session_id,
+            )
+            self._clear_late_context_seed_suppression()
+            return False
+
+        if event.event in {EVENT_ASR_INFO, EVENT_ASR_RESPONSE, EVENT_ASR_ENDED}:
+            LOGGER.info(
+                "doubao_s2s_late_context_seed_suppression_released_by_asr "
+                "seed_id=%s source=%s text_hash=%s outcome=%s age_ms=%s "
+                "event=%s session_id=%s",
+                self._late_context_seed_suppression_id,
+                self._late_context_seed_suppression_source,
+                self._late_context_seed_suppression_text_hash,
+                self._late_context_seed_suppression_outcome,
+                age_ms,
+                event.event,
+                event.session_id,
+            )
+            self._clear_late_context_seed_suppression()
+            return False
+
+        if event.event not in PROVIDER_RESPONSE_EVENTS and not event.audio:
+            return False
+
+        LOGGER.warning(
+            "doubao_s2s_late_context_seed_event_suppressed seed_id=%s "
+            "source=%s text_hash=%s outcome=%s age_ms=%s event=%s "
+            "audio_bytes=%s text_chars=%s session_id=%s",
+            self._late_context_seed_suppression_id,
+            self._late_context_seed_suppression_source,
+            self._late_context_seed_suppression_text_hash,
+            self._late_context_seed_suppression_outcome,
+            age_ms,
+            event.event,
+            len(event.audio),
+            len(event.text or ""),
+            event.session_id,
+        )
+        if event.event == EVENT_TTS_FINISHED:
+            self._clear_late_context_seed_suppression()
+        return True
+
     async def _complete_active_response_on_idle(self) -> None:
         state = self._state_for_response_event()
         if state is None or state.output_audio_bytes <= 0:
@@ -359,6 +635,18 @@ class DoubaoS2SServerVadSession:
                 started_at=time.monotonic(),
                 event_counts=Counter(),
             )
+            LOGGER.warning(
+                "doubao_s2s_response_turn_without_input_started turn_id=%s "
+                "post_seed_id=%s post_seed_source=%s post_seed_outcome=%s "
+                "post_seed_age_ms=%s active_input_turn=%s awaiting_turns=%s",
+                turn_id,
+                self._last_context_seed_id,
+                self._last_context_seed_source,
+                self._last_context_seed_outcome,
+                _elapsed_ms(self._last_context_seed_finished_at),
+                self._active_input_turn_id,
+                list(self._awaiting_response_turn_ids),
+            )
 
         self._active_response_turn_id = turn_id
         return self._turns[turn_id]
@@ -392,6 +680,14 @@ class DoubaoS2SServerVadSession:
         self._active_input_turn_id = None
         self._active_response_turn_id = None
 
+    def _clear_late_context_seed_suppression(self) -> None:
+        self._late_context_seed_suppression_active = False
+        self._late_context_seed_suppression_started_at = None
+        self._late_context_seed_suppression_id = None
+        self._late_context_seed_suppression_source = None
+        self._late_context_seed_suppression_text_hash = None
+        self._late_context_seed_suppression_outcome = None
+
     @staticmethod
     def _new_future() -> asyncio.Future[None]:
         return asyncio.get_running_loop().create_future()
@@ -405,3 +701,13 @@ class DoubaoS2SServerVadSession:
         if self._session is None:
             raise RuntimeError("Doubao S2S realtime session is not connected")
         return self._session
+
+
+def _text_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _elapsed_ms(start: float | None) -> int | None:
+    if start is None:
+        return None
+    return int((time.monotonic() - start) * 1000)

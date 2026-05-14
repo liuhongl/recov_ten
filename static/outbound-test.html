@@ -356,6 +356,20 @@
         color: var(--text);
       }
 
+      input[type="checkbox"] {
+        width: 18px;
+        min-height: 18px;
+        padding: 0;
+      }
+
+      .check-field {
+        display: flex;
+        min-height: 38px;
+        align-items: center;
+        gap: 10px;
+        color: var(--text);
+      }
+
       input:focus,
       select:focus {
         outline: 3px solid rgba(29, 78, 216, 0.12);
@@ -620,6 +634,25 @@
                   <span class="field-label">业务标记（日志标记，不影响拨号）</span>
                   <input id="metadataScene" name="metadata_scene" value="local-outbound-test" />
                 </label>
+                <label class="wide check-field">
+                  <input id="openingEnabled" name="opening_enabled" type="checkbox" />
+                  <span>启用个性化开场白</span>
+                </label>
+                <label>
+                  开场白音色
+                  <select id="openingVoice" name="opening_voice">
+                    <option value="female">女声</option>
+                    <option value="male">男声</option>
+                  </select>
+                </label>
+                <label>
+                  业主姓名
+                  <input id="ownerName" name="owner_name" value="测试业主" />
+                </label>
+                <label>
+                  待缴金额
+                  <input id="arrearsAmount" name="arrears_amount" value="12.34" inputmode="decimal" />
+                </label>
               </div>
               <div class="form-actions">
                 <button id="submitButton" class="primary-action" type="submit">发起呼叫</button>
@@ -672,6 +705,10 @@
       const dialplanContextInput = document.getElementById("dialplanContext");
       const endpointInput = document.getElementById("endpoint");
       const metadataSceneInput = document.getElementById("metadataScene");
+      const openingEnabledInput = document.getElementById("openingEnabled");
+      const openingVoiceInput = document.getElementById("openingVoice");
+      const ownerNameInput = document.getElementById("ownerName");
+      const arrearsAmountInput = document.getElementById("arrearsAmount");
 
       let currentCallId = null;
 
@@ -843,6 +880,7 @@
                   <th>号码</th>
                   <th>阶段</th>
                   <th>耗时</th>
+                  <th>开场白</th>
                   <th>诊断</th>
                 </tr>
               </thead>
@@ -857,6 +895,7 @@
                           callLabel(call)
                         )}</span></td>
                         <td>${escapeHtml(call.elapsed_ms ?? "-")} ms</td>
+                        <td>${escapeHtml(openingLabel(call))}</td>
                         <td>${escapeHtml(
                           call.failure_label ||
                             call.sip_status_hint ||
@@ -890,8 +929,28 @@
           payload.context = { scene: payload.metadata_scene };
           delete payload.metadata_scene;
         }
+        if (payload.opening_enabled) {
+          payload.opening = {
+            voice: payload.opening_voice || "female",
+            business: {
+              owner_name: payload.owner_name || "",
+              arrears_amount: payload.arrears_amount || "",
+            },
+          };
+        }
+        delete payload.opening_enabled;
+        delete payload.opening_voice;
+        delete payload.owner_name;
+        delete payload.arrears_amount;
         delete payload.scenario_preset;
         return payload;
+      }
+
+      function openingLabel(call) {
+        const opening = call.opening;
+        if (!opening) return "-";
+        const hash = opening.opening_text_hash ? opening.opening_text_hash.slice(0, 8) : "-";
+        return `${opening.status || "ready"} · ${opening.voice || "-"} · ${hash}`;
       }
 
       function applyScenarioPreset() {
@@ -905,6 +964,10 @@
         dialplanContextInput.value = "default";
         endpointInput.value = preset.endpoint;
         metadataSceneInput.value = preset.scene;
+        openingEnabledInput.checked = false;
+        openingVoiceInput.value = "female";
+        ownerNameInput.value = "测试业主";
+        arrearsAmountInput.value = "12.34";
       }
 
       scenarioPreset.addEventListener("change", applyScenarioPreset);

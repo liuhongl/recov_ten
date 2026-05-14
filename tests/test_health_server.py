@@ -122,6 +122,12 @@ def test_outbound_test_page_is_served():
         assert "Dialplan Extension（接通后入口）" in body
         assert "Dialplan Context（拨号上下文）" in body
         assert "业务标记（日志标记，不影响拨号）" in body
+        assert 'id="openingEnabled"' in body
+        assert 'id="openingVoice"' in body
+        assert 'id="ownerName"' in body
+        assert 'id="arrearsAmount"' in body
+        assert 'payload.opening = {' in body
+        assert 'delete payload.opening_enabled' in body
         assert "ready 表示页面接口可用" not in body
         assert "外呼测试" in body
         assert "交接文档" in body

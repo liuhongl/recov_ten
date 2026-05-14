@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import struct
 
@@ -20,6 +21,7 @@ from app.doubao_s2s_client import (
     EVENT_SESSION_STARTED,
     EVENT_START_CONNECTION,
     EVENT_START_SESSION,
+    EVENT_SAY_HELLO,
     EVENT_TASK_AUDIO,
     EVENT_TTS_AUDIO_DATA,
     EVENT_TTS_FINISHED,
@@ -42,6 +44,14 @@ def test_doubao_s2s_server_vad_session_streams_audio_turn():
 
 def test_doubao_s2s_hot_restarts_session_on_interruption():
     asyncio.run(_assert_hot_restart_drops_stale_audio())
+
+
+def test_doubao_s2s_seed_assistant_context_suppresses_audio_callbacks():
+    asyncio.run(_assert_seed_assistant_context_suppresses_audio_callbacks())
+
+
+def test_doubao_s2s_cancelled_context_seed_suppresses_late_audio_callbacks():
+    asyncio.run(_assert_cancelled_context_seed_suppresses_late_audio_callbacks())
 
 
 async def _assert_server_vad_session_streams_audio_turn() -> None:
@@ -167,6 +177,7 @@ async def _assert_hot_restart_drops_stale_audio() -> None:
     captured = {"events": [], "session_ids": []}
     initial_audio = _float32_audio(0.25)
     late_old_audio = _float32_audio(0.75)
+    seed_audio = _float32_audio(0.5)
     new_audio = _float32_audio(-0.25)
     first_audio = asyncio.Event()
     second_completed = asyncio.Event()
@@ -248,6 +259,30 @@ async def _assert_hot_restart_drops_stale_audio() -> None:
                         session_id=frame.session_id,
                     )
                 )
+                continue
+
+            if frame.event == EVENT_SAY_HELLO:
+                await websocket.send(
+                    _server_json_frame(
+                        EVENT_TTS_STARTED,
+                        {},
+                        session_id=frame.session_id,
+                    )
+                )
+                await websocket.send(
+                    _server_audio_frame(
+                        EVENT_TTS_AUDIO_DATA,
+                        seed_audio,
+                        session_id=frame.session_id,
+                    )
+                )
+                await websocket.send(
+                    _server_json_frame(
+                        EVENT_TTS_FINISHED,
+                        {"content": "seed done"},
+                        session_id=frame.session_id,
+                    )
+                )
 
     async def on_speech_started(turn_id: int) -> None:
         return None
@@ -293,6 +328,7 @@ async def _assert_hot_restart_drops_stale_audio() -> None:
         EVENT_TASK_AUDIO,
         EVENT_FINISH_SESSION,
         EVENT_START_SESSION,
+        EVENT_SAY_HELLO,
         EVENT_TASK_AUDIO,
     ]
     assert len(captured["session_ids"]) == 2
@@ -304,12 +340,220 @@ async def _assert_hot_restart_drops_stale_audio() -> None:
     assert float32le_to_pcm_s16le(late_old_audio) not in [
         audio for _, audio in audio_deltas
     ]
+    assert float32le_to_pcm_s16le(seed_audio) not in [
+        audio for _, audio in audio_deltas
+    ]
     assert [result.status for result in turn_results] == [
         "cancelled",
         "completed",
     ]
     assert turn_results[0].turn_id == 1
     assert turn_results[1].turn_id == 2
+
+
+async def _assert_seed_assistant_context_suppresses_audio_callbacks() -> None:
+    captured = {"events": []}
+    seed_audio = _float32_audio(0.25, -0.25)
+    audio_deltas: list[tuple[int, bytes]] = []
+    turn_results: list[RealtimeTurnResult] = []
+    speech_started_turns: list[int] = []
+
+    async def handler(websocket):
+        frame = parse_frame(await websocket.recv())
+        captured["events"].append(frame.event)
+        assert frame.event == EVENT_START_CONNECTION
+        await websocket.send(
+            _server_json_frame(
+                EVENT_CONNECTION_STARTED,
+                {"ok": True},
+                connect_id="conn-server",
+            )
+        )
+
+        frame = parse_frame(await websocket.recv())
+        captured["events"].append(frame.event)
+        assert frame.event == EVENT_START_SESSION
+        await websocket.send(
+            _server_json_frame(
+                EVENT_SESSION_STARTED,
+                {"ok": True},
+                session_id=frame.session_id,
+            )
+        )
+
+        async for raw_message in websocket:
+            frame = parse_frame(raw_message)
+            captured["events"].append(frame.event)
+            if frame.event != EVENT_SAY_HELLO:
+                continue
+            assert frame.payload_json == {
+                "content": "seed opening",
+                "session_id": frame.session_id,
+            }
+            await websocket.send(
+                _server_json_frame(
+                    EVENT_TTS_STARTED,
+                    {},
+                    session_id=frame.session_id,
+                )
+            )
+            await websocket.send(
+                _server_audio_frame(
+                    EVENT_TTS_AUDIO_DATA,
+                    seed_audio,
+                    session_id=frame.session_id,
+                )
+            )
+            await websocket.send(
+                _server_json_frame(
+                    EVENT_TTS_FINISHED,
+                    {"content": "seed done"},
+                    session_id=frame.session_id,
+                )
+            )
+            break
+
+    async def on_speech_started(turn_id: int) -> None:
+        speech_started_turns.append(turn_id)
+
+    async def on_audio_delta(turn_id: int, audio: bytes) -> None:
+        audio_deltas.append((turn_id, audio))
+
+    async def on_turn_completed(result: RealtimeTurnResult) -> None:
+        turn_results.append(result)
+
+    server = await serve(handler, "127.0.0.1", 0)
+    try:
+        port = server.sockets[0].getsockname()[1]
+        session = DoubaoS2SServerVadSession(
+            _credentials(websocket_url=f"ws://127.0.0.1:{port}/dialogue"),
+            DoubaoS2SSessionConfig(),
+            on_speech_started=on_speech_started,
+            on_audio_delta=on_audio_delta,
+            on_turn_completed=on_turn_completed,
+        )
+        await session.connect()
+        await session.seed_assistant_context("seed opening")
+        await session.close()
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert captured["events"] == [
+        EVENT_START_CONNECTION,
+        EVENT_START_SESSION,
+        EVENT_SAY_HELLO,
+    ]
+    assert speech_started_turns == []
+    assert audio_deltas == []
+    assert turn_results == []
+
+
+async def _assert_cancelled_context_seed_suppresses_late_audio_callbacks() -> None:
+    captured = {"events": []}
+    seed_audio = _float32_audio(0.25, -0.25)
+    say_hello_seen = asyncio.Event()
+    send_late_seed_events = asyncio.Event()
+    audio_deltas: list[tuple[int, bytes]] = []
+    turn_results: list[RealtimeTurnResult] = []
+    speech_started_turns: list[int] = []
+
+    async def handler(websocket):
+        frame = parse_frame(await websocket.recv())
+        captured["events"].append(frame.event)
+        assert frame.event == EVENT_START_CONNECTION
+        await websocket.send(
+            _server_json_frame(
+                EVENT_CONNECTION_STARTED,
+                {"ok": True},
+                connect_id="conn-server",
+            )
+        )
+
+        frame = parse_frame(await websocket.recv())
+        captured["events"].append(frame.event)
+        assert frame.event == EVENT_START_SESSION
+        await websocket.send(
+            _server_json_frame(
+                EVENT_SESSION_STARTED,
+                {"ok": True},
+                session_id=frame.session_id,
+            )
+        )
+
+        async for raw_message in websocket:
+            frame = parse_frame(raw_message)
+            captured["events"].append(frame.event)
+            if frame.event != EVENT_SAY_HELLO:
+                continue
+            say_hello_seen.set()
+            await send_late_seed_events.wait()
+            await websocket.send(
+                _server_json_frame(
+                    EVENT_TTS_STARTED,
+                    {},
+                    session_id=frame.session_id,
+                )
+            )
+            await websocket.send(
+                _server_audio_frame(
+                    EVENT_TTS_AUDIO_DATA,
+                    seed_audio,
+                    session_id=frame.session_id,
+                )
+            )
+            await websocket.send(
+                _server_json_frame(
+                    EVENT_TTS_FINISHED,
+                    {"content": "late seed done"},
+                    session_id=frame.session_id,
+                )
+            )
+            async for _ in websocket:
+                pass
+
+    async def on_speech_started(turn_id: int) -> None:
+        speech_started_turns.append(turn_id)
+
+    async def on_audio_delta(turn_id: int, audio: bytes) -> None:
+        audio_deltas.append((turn_id, audio))
+
+    async def on_turn_completed(result: RealtimeTurnResult) -> None:
+        turn_results.append(result)
+
+    server = await serve(handler, "127.0.0.1", 0)
+    try:
+        port = server.sockets[0].getsockname()[1]
+        session = DoubaoS2SServerVadSession(
+            _credentials(websocket_url=f"ws://127.0.0.1:{port}/dialogue"),
+            DoubaoS2SSessionConfig(),
+            on_speech_started=on_speech_started,
+            on_audio_delta=on_audio_delta,
+            on_turn_completed=on_turn_completed,
+        )
+        await session.connect()
+        seed_task = asyncio.create_task(
+            session.seed_assistant_context("seed opening")
+        )
+        await asyncio.wait_for(say_hello_seen.wait(), timeout=3)
+        seed_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await seed_task
+        send_late_seed_events.set()
+        await asyncio.sleep(0.1)
+        await session.close()
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert captured["events"] == [
+        EVENT_START_CONNECTION,
+        EVENT_START_SESSION,
+        EVENT_SAY_HELLO,
+    ]
+    assert speech_started_turns == []
+    assert audio_deltas == []
+    assert turn_results == []
 
 
 def _credentials(

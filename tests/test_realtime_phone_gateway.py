@@ -9,6 +9,7 @@ from websockets.legacy.client import connect
 from app.audio_codec import samples_to_pcm_s16le
 from app.config import FreeSwitchConfig, GatewayConfig, PlaybackConfig, VadConfig
 from app.freeswitch_event_socket import PlaybackProgressEvent
+from app.opening import OpeningAudioStore, PreparedOpeningAudio
 from app.realtime_phone_gateway import (
     ConversationExchange,
     FreeSwitchRealtimeGatewayServer,
@@ -30,6 +31,14 @@ def test_realtime_phone_gateway_replays_interrupt_audio_after_hot_restart():
     asyncio.run(_assert_realtime_phone_gateway_replays_after_hot_restart())
 
 
+def test_realtime_phone_gateway_replays_interrupt_audio_when_context_repair_fails():
+    asyncio.run(_assert_realtime_phone_gateway_replays_when_context_repair_fails())
+
+
+def test_realtime_phone_gateway_waits_for_slow_context_repair_before_replay():
+    asyncio.run(_assert_realtime_phone_gateway_waits_for_slow_context_repair())
+
+
 def test_realtime_phone_gateway_appends_tail_silence_after_turn_done():
     asyncio.run(_assert_realtime_phone_gateway_appends_tail_silence())
 
@@ -48,6 +57,40 @@ def test_realtime_phone_gateway_rejects_slow_playback_send_interval():
 
 def test_realtime_phone_gateway_does_not_emit_silence_when_model_audio_lags():
     asyncio.run(_assert_realtime_phone_gateway_does_not_emit_silence_on_lag())
+
+
+def test_realtime_phone_gateway_plays_opening_audio_before_live_turn():
+    asyncio.run(_assert_realtime_phone_gateway_plays_opening_audio())
+
+
+def test_realtime_phone_gateway_waits_for_answer_before_opening_audio():
+    asyncio.run(_assert_realtime_phone_gateway_waits_for_answer_before_opening_audio())
+
+
+def test_realtime_phone_gateway_allows_opening_audio_interruption():
+    asyncio.run(_assert_realtime_phone_gateway_interrupts_opening_audio())
+
+
+def test_realtime_phone_gateway_locally_interrupts_opening_before_provider_vad():
+    asyncio.run(_assert_realtime_phone_gateway_locally_interrupts_opening())
+
+
+def test_realtime_phone_gateway_ignores_opening_barge_in_before_playback_starts():
+    asyncio.run(
+        _assert_realtime_phone_gateway_ignores_opening_barge_in_before_playback_starts()
+    )
+
+
+def test_realtime_phone_gateway_disables_local_opening_interrupt_when_barge_in_off():
+    asyncio.run(_assert_realtime_phone_gateway_does_not_locally_interrupt_opening())
+
+
+def test_realtime_phone_gateway_uses_opening_speaker_for_live_session():
+    asyncio.run(_assert_realtime_phone_gateway_uses_opening_speaker())
+
+
+def test_realtime_phone_gateway_seeds_opening_as_assistant_context():
+    asyncio.run(_assert_realtime_phone_gateway_seeds_opening_context())
 
 
 def test_realtime_instructions_do_not_reuse_historical_time_question():
@@ -76,6 +119,30 @@ def test_realtime_instructions_do_not_reuse_historical_time_question():
     assert "不能当作本轮用户的新问题" in instructions
     assert "除非用户最新一句明确询问时间，否则不要主动报时" in instructions
     assert "如果打断后的最新语音不清楚" in instructions
+
+
+def test_realtime_instructions_anchor_opening_confirmation_to_fee_followup():
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-call",
+        session_id="test-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+        opening_text="您好，请问是测试业主吗？系统显示您当前有12.34元待缴费用，想和您确认一下。",
+        opening_text_hash="hash-opening",
+        opening_voice="male",
+    )
+
+    instructions = server._instructions_for_realtime_session(session)
+
+    assert "待缴费用确认电话" in instructions
+    assert "如果用户最新一句是在确认身份" in instructions
+    assert "必须继续围绕待缴费用确认" in instructions
+    assert "严禁主动切换到化妆" in instructions
 
 
 async def _assert_realtime_phone_gateway_roundtrip() -> None:
@@ -222,6 +289,84 @@ async def _assert_realtime_phone_gateway_replays_after_hot_restart() -> None:
     assert any(size > 640 for size in fake_session.append_sizes)
 
 
+async def _assert_realtime_phone_gateway_replays_when_context_repair_fails() -> None:
+    fake_session = FakeRealtimeSession(
+        b"",
+        restart_on_interruption=False,
+        auto_provider_events=False,
+        interruption_error=TimeoutError("context repair timed out"),
+    )
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+        realtime_session_factory=fake_session.bind,
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-repair-failure-call",
+        session_id="test-repair-failure-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+    )
+    opening_text = "您好，请问是测试业主吗？"
+    session.output_transcripts_by_turn[0] = opening_text
+    session.repair_replay_frames_16k.append(b"\x01\x00" * 320)
+    session.repair_replay_frames_16k.append(b"\x02\x00" * 320)
+    server._realtime_sessions[session.session_id] = fake_session
+
+    await server._interrupt_realtime_playback_context(
+        session,
+        fake_session,
+        reason="local_opening_barge_in",
+        interrupted_output_turn_id=0,
+    )
+
+    assert fake_session.interruption_calls == [opening_text]
+    assert session.replayed_input_frames == 2
+    assert session.replayed_input_bytes == 1280
+    assert fake_session.append_sizes == [1280]
+    assert list(session.repair_replay_frames_16k) == []
+    assert session.realtime_interrupt_failures == 1
+
+
+async def _assert_realtime_phone_gateway_waits_for_slow_context_repair() -> None:
+    fake_session = FakeRealtimeSession(
+        b"",
+        restart_on_interruption=False,
+        auto_provider_events=False,
+        interruption_delay_seconds=2.05,
+    )
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+        realtime_session_factory=fake_session.bind,
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-slow-repair-call",
+        session_id="test-slow-repair-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+    )
+    opening_text = "您好，请问是测试业主吗？"
+    session.output_transcripts_by_turn[0] = opening_text
+    session.repair_replay_frames_16k.append(b"\x01\x00" * 320)
+    server._realtime_sessions[session.session_id] = fake_session
+
+    await server._interrupt_realtime_playback_context(
+        session,
+        fake_session,
+        reason="local_opening_barge_in",
+        interrupted_output_turn_id=0,
+    )
+
+    assert fake_session.interruption_calls == [opening_text]
+    assert session.replayed_input_frames == 1
+    assert fake_session.append_sizes == [640]
+    assert session.realtime_interrupt_failures == 0
+    assert session.context_repair_requests == 1
+
+
 async def _assert_realtime_phone_gateway_appends_tail_silence() -> None:
     fake_session = FakeRealtimeSession(samples_to_pcm_s16le([1600] * 240))
     server = FreeSwitchRealtimeGatewayServer(
@@ -322,6 +467,403 @@ async def _assert_realtime_phone_gateway_does_not_emit_silence_on_lag() -> None:
     assert session.playback_queue.empty()
 
 
+async def _assert_realtime_phone_gateway_plays_opening_audio() -> None:
+    opening_text = "您好，请问是测试业主吗？系统显示您当前有12.34元待缴费用，想和您确认一下。"
+    store = OpeningAudioStore()
+    store.put(
+        PreparedOpeningAudio(
+            call_id="test-opening-call",
+            opening_text=opening_text,
+            opening_text_hash="hash-a",
+            voice="female",
+            speaker="zh_female_vv_jupiter_bigtts",
+            phone_frames=[_phone_frame(800)],
+            source_sample_rate=24000,
+            source_audio_bytes=960,
+            generation_ms=1200,
+        )
+    )
+    fake_session = FakeRealtimeSession(samples_to_pcm_s16le([1600] * 240))
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+        realtime_session_factory=fake_session.bind,
+        opening_store=store,
+    )
+    await server.start()
+    try:
+        host, port = server.address
+        async with connect(
+            f"ws://{host}:{port}/media/fs/test-opening-call",
+            ping_interval=None,
+        ) as ws:
+            playback = await asyncio.wait_for(ws.recv(), timeout=3)
+            assert playback == _phone_frame(800)
+            await asyncio.sleep(0.05)
+    finally:
+        await server.stop()
+
+    stats = server.completed_sessions[0]
+    assert stats.opening_text_hash == "hash-a"
+    assert stats.opening_playback_frames == 1
+    assert stats.opening_playback_completed_at is not None
+    assert stats.opening_playback_interrupted is False
+    assert opening_text in fake_session.instructions[0]
+    assert store.pop("test-opening-call") is None
+
+
+async def _assert_realtime_phone_gateway_waits_for_answer_before_opening_audio() -> None:
+    store = OpeningAudioStore()
+    store.put(
+        PreparedOpeningAudio(
+            call_id="test-opening-answer-gate-call",
+            opening_text="您好，请问是测试业主吗？",
+            opening_text_hash="hash-answer-gate",
+            voice="female",
+            speaker="zh_female_vv_jupiter_bigtts",
+            phone_frames=[_phone_frame(800)],
+            source_sample_rate=24000,
+            source_audio_bytes=960,
+            generation_ms=1200,
+        )
+    )
+    answered = False
+
+    def is_call_answered(call_id: str) -> bool:
+        assert call_id == "test-opening-answer-gate-call"
+        return answered
+
+    fake_session = FakeRealtimeSession(samples_to_pcm_s16le([1600] * 240))
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+        realtime_session_factory=fake_session.bind,
+        opening_store=store,
+        is_call_answered=is_call_answered,
+    )
+    await server.start()
+    try:
+        host, port = server.address
+        async with connect(
+            f"ws://{host}:{port}/media/fs/test-opening-answer-gate-call",
+            ping_interval=None,
+        ) as ws:
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(ws.recv(), timeout=0.15)
+
+            answered = True
+            playback = await asyncio.wait_for(ws.recv(), timeout=3)
+            assert playback == _phone_frame(800)
+            await asyncio.sleep(0.05)
+    finally:
+        await server.stop()
+
+    stats = server.completed_sessions[0]
+    assert stats.opening_text_hash == "hash-answer-gate"
+    assert stats.opening_playback_frames == 1
+    assert stats.opening_playback_completed_at is not None
+
+
+async def _assert_realtime_phone_gateway_interrupts_opening_audio() -> None:
+    opening_text = "您好，请问是测试业主吗？系统显示您当前有12.34元待缴费用，想和您确认一下。"
+    store = OpeningAudioStore()
+    store.put(
+        PreparedOpeningAudio(
+            call_id="test-opening-interrupt-call",
+            opening_text=opening_text,
+            opening_text_hash="hash-b",
+            voice="female",
+            speaker="zh_female_vv_jupiter_bigtts",
+            phone_frames=[_phone_frame(800) for _ in range(20)],
+            source_sample_rate=24000,
+            source_audio_bytes=6400,
+            generation_ms=1200,
+        )
+    )
+    fake_session = FakeRealtimeSession(
+        samples_to_pcm_s16le([1600] * 240),
+        restart_on_interruption=False,
+    )
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+        realtime_session_factory=fake_session.bind,
+        playback_control=FakePlaybackControl(),
+        opening_store=store,
+    )
+    await server.start()
+    try:
+        host, port = server.address
+        async with connect(
+            f"ws://{host}:{port}/media/fs/test-opening-interrupt-call",
+            ping_interval=None,
+        ) as ws:
+            playback = await asyncio.wait_for(ws.recv(), timeout=3)
+            assert playback == _phone_frame(800)
+            await ws.send(_phone_frame(1200))
+            await ws.send(_phone_frame(1200))
+            await ws.send(_phone_frame(1200))
+            await asyncio.sleep(0.1)
+    finally:
+        await server.stop()
+
+    stats = server.completed_sessions[0]
+    assert stats.opening_text_hash == "hash-b"
+    assert stats.opening_playback_interrupted is True
+    assert fake_session.interruption_calls == [opening_text]
+
+
+async def _assert_realtime_phone_gateway_locally_interrupts_opening() -> None:
+    opening_text = "您好，请问是测试业主吗？系统显示您当前有12.34元待缴费用，想和您确认一下。"
+    store = OpeningAudioStore()
+    store.put(
+        PreparedOpeningAudio(
+            call_id="test-opening-local-barge-call",
+            opening_text=opening_text,
+            opening_text_hash="hash-local-barge",
+            voice="male",
+            speaker="zh_male_yunzhou_jupiter_bigtts",
+            phone_frames=[_phone_frame(800) for _ in range(20)],
+            source_sample_rate=24000,
+            source_audio_bytes=6400,
+            generation_ms=1200,
+        )
+    )
+    playback_control = FakePlaybackControl()
+    fake_session = FakeRealtimeSession(
+        samples_to_pcm_s16le([1600] * 240),
+        auto_provider_events=False,
+        restart_on_interruption=False,
+    )
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+        realtime_session_factory=fake_session.bind,
+        playback_control=playback_control,
+        opening_store=store,
+    )
+    await server.start()
+    try:
+        host, port = server.address
+        async with connect(
+            f"ws://{host}:{port}/media/fs/test-opening-local-barge-call",
+            ping_interval=None,
+        ) as ws:
+            playback = await asyncio.wait_for(ws.recv(), timeout=3)
+            assert playback == _phone_frame(800)
+            await asyncio.sleep(0.35)
+            await ws.send(_phone_frame(1200))
+            await asyncio.sleep(0.1)
+    finally:
+        await server.stop()
+
+    stats = server.completed_sessions[0]
+    assert stats.opening_playback_interrupted is True
+    assert stats.interruptions == 1
+    assert stats.opening_trigger_rms == 1200
+    assert stats.opening_trigger_rms_max == 1200
+    assert stats.opening_trigger_best_playback_correlation == 1.0
+    assert stats.opening_trigger_best_playback_rms == 800
+    assert stats.opening_trigger_last_playback_age_ms is not None
+    assert stats.opening_trigger_last_playback_age_ms >= 0
+    assert playback_control.break_calls == ["test-opening-local-barge-call"]
+    assert fake_session.speech_started_turns == []
+    assert fake_session.interruption_calls == [opening_text]
+
+
+async def _assert_realtime_phone_gateway_ignores_opening_barge_in_before_playback_starts() -> None:
+    opening_text = "您好，请问是测试业主吗？系统显示您当前有12.34元待缴费用，想和您确认一下。"
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-opening-unarmed-barge-call",
+        session_id="test-opening-unarmed-barge-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+        opening_text=opening_text,
+        opening_text_hash="hash-local-barge-unarmed",
+        opening_voice="female",
+        opening_speaker="zh_female_vv_jupiter_bigtts",
+    )
+    session.current_output_turn_id = 0
+    session.opening_playback_started_at = 0
+    session.opening_playback_frames = 426
+    session.opening_barge_in_detector = server._create_opening_barge_in_detector()
+
+    async def noop_repair(
+        repair_session: RealtimePhoneSessionStats,
+        *,
+        reason: str,
+    ) -> None:
+        del repair_session, reason
+
+    server._run_interruption_repair = noop_repair  # type: ignore[method-assign]
+
+    handled = server._handle_local_opening_barge_in(session, _phone_frame(1200))
+    await asyncio.sleep(0)
+
+    assert handled is False
+    assert session.opening_playback_sent_frames == 0
+    assert session.opening_playback_interrupted is False
+    assert session.local_barge_in_events == 0
+    assert session.interruptions == 0
+    assert session.opening_trigger_rms is None
+    assert list(session.opening_inbound_rms_values) == []
+
+
+async def _assert_realtime_phone_gateway_does_not_locally_interrupt_opening() -> None:
+    opening_text = "您好，请问是测试业主吗？系统显示您当前有12.34元待缴费用，想和您确认一下。"
+    store = OpeningAudioStore()
+    store.put(
+        PreparedOpeningAudio(
+            call_id="test-opening-local-barge-disabled-call",
+            opening_text=opening_text,
+            opening_text_hash="hash-local-barge-disabled",
+            voice="female",
+            speaker="zh_female_vv_jupiter_bigtts",
+            phone_frames=[_phone_frame(800) for _ in range(20)],
+            source_sample_rate=24000,
+            source_audio_bytes=6400,
+            generation_ms=1200,
+        )
+    )
+    playback_control = FakePlaybackControl()
+    fake_session = FakeRealtimeSession(
+        samples_to_pcm_s16le([1600] * 240),
+        auto_provider_events=False,
+        restart_on_interruption=False,
+    )
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0, barge_in_enabled=False),
+        api_key="test-key",
+        realtime_session_factory=fake_session.bind,
+        playback_control=playback_control,
+        opening_store=store,
+    )
+    await server.start()
+    try:
+        host, port = server.address
+        async with connect(
+            f"ws://{host}:{port}/media/fs/test-opening-local-barge-disabled-call",
+            ping_interval=None,
+        ) as ws:
+            playback = await asyncio.wait_for(ws.recv(), timeout=3)
+            assert playback == _phone_frame(800)
+            await ws.send(_phone_frame(1200))
+            await asyncio.sleep(0.1)
+    finally:
+        await server.stop()
+
+    stats = server.completed_sessions[0]
+    assert stats.opening_playback_interrupted is False
+    assert stats.local_barge_in_events == 0
+    assert stats.interruptions == 0
+    assert playback_control.break_calls == []
+    assert fake_session.speech_started_turns == []
+    assert fake_session.interruption_calls == []
+
+
+async def _assert_realtime_phone_gateway_uses_opening_speaker() -> None:
+    opening_text = "您好，请问是测试业主吗？系统显示您当前有12.34元待缴费用，想和您确认一下。"
+    opening_speaker = "zh_male_yunzhou_jupiter_bigtts"
+    store = OpeningAudioStore()
+    store.put(
+        PreparedOpeningAudio(
+            call_id="test-opening-speaker-call",
+            opening_text=opening_text,
+            opening_text_hash="hash-c",
+            voice="male",
+            speaker=opening_speaker,
+            phone_frames=[_phone_frame(800)],
+            source_sample_rate=24000,
+            source_audio_bytes=960,
+            generation_ms=1200,
+        )
+    )
+    fake_session = FakeRealtimeSession(samples_to_pcm_s16le([1600] * 240))
+    captured_speakers: list[str | None] = []
+
+    def session_factory(
+        on_speech_started,
+        on_delta,
+        on_turn_completed,
+        turn_id_start,
+        instructions,
+        *extra,
+    ):
+        captured_speakers.append(extra[0] if extra else None)
+        return fake_session.bind(
+            on_speech_started,
+            on_delta,
+            on_turn_completed,
+            turn_id_start,
+            instructions,
+        )
+
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+        realtime_session_factory=session_factory,
+        opening_store=store,
+    )
+    await server.start()
+    try:
+        host, port = server.address
+        async with connect(
+            f"ws://{host}:{port}/media/fs/test-opening-speaker-call",
+            ping_interval=None,
+        ) as ws:
+            playback = await asyncio.wait_for(ws.recv(), timeout=3)
+            assert playback == _phone_frame(800)
+            await asyncio.sleep(0.05)
+    finally:
+        await server.stop()
+
+    assert captured_speakers == [opening_speaker]
+
+
+async def _assert_realtime_phone_gateway_seeds_opening_context() -> None:
+    opening_text = "您好，请问是测试业主吗？系统显示您当前有12.34元待缴费用，想和您确认一下。"
+    store = OpeningAudioStore()
+    store.put(
+        PreparedOpeningAudio(
+            call_id="test-opening-context-seed-call",
+            opening_text=opening_text,
+            opening_text_hash="hash-context-seed",
+            voice="female",
+            speaker="zh_female_vv_jupiter_bigtts",
+            phone_frames=[_phone_frame(800)],
+            source_sample_rate=24000,
+            source_audio_bytes=960,
+            generation_ms=1200,
+        )
+    )
+    fake_session = FakeRealtimeSession(samples_to_pcm_s16le([1600] * 240))
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+        realtime_session_factory=fake_session.bind,
+        opening_store=store,
+    )
+    await server.start()
+    try:
+        host, port = server.address
+        async with connect(
+            f"ws://{host}:{port}/media/fs/test-opening-context-seed-call",
+            ping_interval=None,
+        ) as ws:
+            playback = await asyncio.wait_for(ws.recv(), timeout=3)
+            assert playback == _phone_frame(800)
+            await asyncio.sleep(0.05)
+    finally:
+        await server.stop()
+
+    assert fake_session.seed_context_calls == [opening_text]
+
+
 class FakePlaybackControl:
     def __init__(self) -> None:
         self.break_calls: list[str] = []
@@ -346,10 +888,16 @@ class FakeRealtimeSession:
         *,
         reconnect_delay_seconds: float = 0,
         restart_on_interruption: bool = True,
+        auto_provider_events: bool = True,
+        interruption_error: Exception | None = None,
+        interruption_delay_seconds: float = 0,
     ) -> None:
         self.model_audio_24k = model_audio_24k
         self.reconnect_delay_seconds = reconnect_delay_seconds
         self.restart_on_interruption = restart_on_interruption
+        self.auto_provider_events = auto_provider_events
+        self.interruption_error = interruption_error
+        self.interruption_delay_seconds = interruption_delay_seconds
         self.connected = False
         self.closed = False
         self.connect_calls = 0
@@ -358,10 +906,12 @@ class FakeRealtimeSession:
         self.append_sizes: list[int] = []
         self.cancel_calls = 0
         self.interruption_calls: list[str | None] = []
+        self.seed_context_calls: list[str] = []
         self.append_calls = 0
         self.speech_started_turns: list[int] = []
         self.turn_id_starts: list[int] = []
         self.instructions: list[str] = []
+        self.speakers: list[str | None] = []
         self.second_turn_announced = False
         self.completed_first_turn = False
         self.on_speech_started: Callable[[int], Awaitable[None]] | None = None
@@ -375,12 +925,14 @@ class FakeRealtimeSession:
         on_turn_completed: Callable[[RealtimeTurnResult], Awaitable[None]],
         turn_id_start: int,
         instructions: str,
+        speaker: str | None = None,
     ):
         self.on_speech_started = on_speech_started
         self.on_delta = on_delta
         self.on_turn_completed = on_turn_completed
         self.turn_id_starts.append(turn_id_start)
         self.instructions.append(instructions)
+        self.speakers.append(speaker)
         return self
 
     async def connect(self) -> None:
@@ -398,6 +950,8 @@ class FakeRealtimeSession:
         self.appended_bytes += len(input_pcm_16k)
         self.append_sizes.append(len(input_pcm_16k))
         self.append_calls += 1
+        if not self.auto_provider_events:
+            return
         if self.append_calls == 3 and not self.completed_first_turn:
             self.completed_first_turn = True
             asyncio.create_task(self._complete_turn(1))
@@ -414,7 +968,20 @@ class FakeRealtimeSession:
         interrupted_output_text: str | None = None,
     ) -> None:
         self.interruption_calls.append(interrupted_output_text)
+        if self.interruption_delay_seconds:
+            await asyncio.sleep(self.interruption_delay_seconds)
+        if self.interruption_error is not None:
+            raise self.interruption_error
         await self.cancel_response()
+
+    async def seed_assistant_context(
+        self,
+        text: str,
+        *,
+        source: str = "external",
+    ) -> None:
+        del source
+        self.seed_context_calls.append(text)
 
     async def _announce_speech_started(self, turn_id: int) -> None:
         assert self.on_speech_started is not None
@@ -444,7 +1011,12 @@ class FakeRealtimeSession:
         )
 
 
-def _test_config(*, tail_silence_ms: int, send_interval_ms: int = 10) -> GatewayConfig:
+def _test_config(
+    *,
+    tail_silence_ms: int,
+    send_interval_ms: int = 10,
+    barge_in_enabled: bool = True,
+) -> GatewayConfig:
     return GatewayConfig(
         freeswitch=FreeSwitchConfig(media_host="127.0.0.1", media_port=0),
         playback=PlaybackConfig(
@@ -459,7 +1031,7 @@ def _test_config(*, tail_silence_ms: int, send_interval_ms: int = 10) -> Gateway
             max_utterance_ms=1000,
             pre_speech_ms=0,
             keep_silence_ms=0,
-            barge_in_enabled=True,
+            barge_in_enabled=barge_in_enabled,
         ),
     )
 

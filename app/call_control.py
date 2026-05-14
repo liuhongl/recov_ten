@@ -19,6 +19,16 @@ from .freeswitch_event_socket import (
     EventSocketError,
     FreeSwitchEventSocketClient,
 )
+from .opening import (
+    OpeningAudioGenerator,
+    OpeningAudioStore,
+    OpeningCallMetadata,
+    OpeningGenerationFailed,
+    OpeningGenerationTimeout,
+    OpeningRequest,
+    build_prepared_opening_audio,
+    parse_opening_request,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -42,6 +52,7 @@ class CreateCallRequest:
     caller_id_number: str | None = None
     originate_timeout_seconds: int | None = None
     context: dict[str, Any] = field(default_factory=dict)
+    opening: OpeningRequest | None = None
 
 
 @dataclass
@@ -74,6 +85,7 @@ class OutboundCallRecord:
     sip_reason: str | None = None
     last_event_name: str | None = None
     last_event_at_ms: int | None = None
+    opening: OpeningCallMetadata | None = None
 
     def to_dict(self) -> dict[str, Any]:
         diagnostics = _build_call_diagnostics(self)
@@ -106,6 +118,7 @@ class OutboundCallRecord:
             "sip_reason": self.sip_reason,
             "last_event_name": self.last_event_name,
             "last_event_at_ms": self.last_event_at_ms,
+            "opening": None if self.opening is None else self.opening.to_dict(),
             **diagnostics,
         }
 
@@ -174,9 +187,13 @@ class OutboundCallManager:
         config: GatewayConfig,
         *,
         dialer_factory: DialerFactory | None = None,
+        opening_generator: OpeningAudioGenerator | None = None,
+        opening_store: OpeningAudioStore | None = None,
     ) -> None:
         self.config = config
         self._dialer_factory = dialer_factory or (lambda: FreeSwitchOutboundDialer(config))
+        self._opening_generator = opening_generator
+        self._opening_store = opening_store
         self._calls: dict[str, OutboundCallRecord] = {}
         self._lock = threading.RLock()
         self._executor = ThreadPoolExecutor(
@@ -209,6 +226,9 @@ class OutboundCallManager:
 
         request = parse_create_call_request(payload)
         record = self._build_record(request)
+        if request.opening is not None:
+            self._prepare_opening(record, request.opening)
+
         with self._lock:
             self._calls[record.call_id] = record
             self._trim_locked()
@@ -235,6 +255,13 @@ class OutboundCallManager:
         with self._lock:
             record = self._calls.get(call_id)
             return None if record is None else record.to_dict()
+
+    def is_call_answered(self, call_id: str) -> bool:
+        with self._lock:
+            record = self._calls.get(call_id)
+            if record is None:
+                return True
+            return record.answered_at_ms is not None
 
     def handle_channel_event(self, event: ChannelStateEvent) -> None:
         with self._lock:
@@ -305,6 +332,50 @@ class OutboundCallManager:
             context=request.context,
         )
 
+    def _prepare_opening(
+        self,
+        record: OutboundCallRecord,
+        opening: OpeningRequest,
+    ) -> None:
+        if self._opening_generator is None or self._opening_store is None:
+            raise CallControlError(
+                "opening generation is unavailable",
+                status_code=503,
+            )
+
+        try:
+            audio = self._opening_generator.generate(opening)
+            prepared = build_prepared_opening_audio(
+                call_id=record.call_id,
+                opening=opening,
+                audio=audio,
+                config=self.config,
+            )
+        except OpeningGenerationTimeout as err:
+            raise CallControlError(
+                "opening_generation_timeout",
+                status_code=504,
+            ) from err
+        except OpeningGenerationFailed as err:
+            raise CallControlError(
+                "opening_generation_failed",
+                status_code=502,
+            ) from err
+
+        self._opening_store.put(prepared)
+        record.opening = prepared.to_call_metadata()
+        LOGGER.info(
+            "opening_audio_ready call_id=%s text_hash=%s voice=%s "
+            "generation_ms=%s audio_bytes=%s audio_sample_rate=%s phone_frames=%s",
+            record.call_id,
+            prepared.opening_text_hash,
+            prepared.voice,
+            prepared.generation_ms,
+            prepared.source_audio_bytes,
+            prepared.source_sample_rate,
+            len(prepared.phone_frames),
+        )
+
     def _run_originate_worker(self, call_id: str) -> None:
         try:
             asyncio.run(self._originate(call_id))
@@ -361,6 +432,7 @@ class OutboundCallManager:
                 record.error = str(err)
                 record.completed_at_ms = _now_ms()
                 self._set_status_locked(record, "failed")
+                self._discard_opening_locked(record.call_id)
             LOGGER.info(
                 "outbound_call_endpoint_resolve_failed call_id=%s endpoint=%s error=%s",
                 call_id,
@@ -386,6 +458,7 @@ class OutboundCallManager:
                 record.hangup_cause = _extract_failure_cause(stripped)
                 record.completed_at_ms = _now_ms()
                 self._set_status_locked(record, "failed")
+                self._discard_opening_locked(record.call_id)
             else:
                 if record.status in {"originating", "queued"}:
                     self._set_status_locked(record, "originated")
@@ -428,6 +501,7 @@ class OutboundCallManager:
             record.error = error
             record.completed_at_ms = record.completed_at_ms or _now_ms()
             self._set_status_locked(record, "failed")
+            self._discard_opening_locked(record.call_id)
 
     def _apply_channel_event_locked(
         self,
@@ -463,6 +537,7 @@ class OutboundCallManager:
         if event.name in {"CHANNEL_HANGUP", "CHANNEL_HANGUP_COMPLETE"}:
             record.completed_at_ms = record.completed_at_ms or now_ms
             self._set_status_locked(record, _terminal_status_for_cause(record))
+            self._discard_opening_locked(record.call_id)
 
     def _set_status_locked(self, record: OutboundCallRecord, status: str) -> None:
         record.status = status
@@ -475,6 +550,11 @@ class OutboundCallManager:
         records = sorted(self._calls.values(), key=lambda call: call.created_at_ms)
         for record in records[: len(self._calls) - max_recent_calls]:
             self._calls.pop(record.call_id, None)
+            self._discard_opening_locked(record.call_id)
+
+    def _discard_opening_locked(self, call_id: str) -> None:
+        if self._opening_store is not None:
+            self._opening_store.discard(call_id)
 
 
 def parse_create_call_request(payload: dict[str, Any]) -> CreateCallRequest:
@@ -506,6 +586,11 @@ def parse_create_call_request(payload: dict[str, Any]) -> CreateCallRequest:
     if not isinstance(context, dict):
         raise CallControlError("context must be a JSON object")
 
+    try:
+        opening = parse_opening_request(payload.get("opening"))
+    except OpeningGenerationFailed as err:
+        raise CallControlError(str(err)) from err
+
     return CreateCallRequest(
         destination=destination,
         external_call_id=_optional_safe_str(payload, "external_call_id"),
@@ -516,6 +601,7 @@ def parse_create_call_request(payload: dict[str, Any]) -> CreateCallRequest:
         caller_id_number=_optional_safe_str(payload, "caller_id_number"),
         originate_timeout_seconds=timeout,
         context=context,
+        opening=opening,
     )
 
 

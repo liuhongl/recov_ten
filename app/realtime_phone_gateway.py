@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
+import math
 import os
 import time
 import uuid
@@ -14,13 +16,19 @@ from dataclasses import dataclass, field
 from websockets.exceptions import ConnectionClosed
 from websockets.legacy.server import WebSocketServer, WebSocketServerProtocol, serve
 
-from .audio_codec import pcm_s16le_frame_bytes, resample_pcm_s16le_mono
+from .audio_codec import (
+    pcm_s16le_frame_bytes,
+    pcm_s16le_rms,
+    pcm_s16le_to_samples,
+    resample_pcm_s16le_mono,
+)
 from .config import GatewayConfig
 from .freeswitch_event_socket import (
     FreeSwitchPlaybackController,
     PlaybackProgressEvent,
 )
 from .media_contract import PhoneMediaContract
+from .opening import OpeningAudioStore, PreparedOpeningAudio
 from .playout_controller import (
     PlayoutController,
     PlayoutControllerConfig,
@@ -34,6 +42,7 @@ from .realtime_types import (
     RealtimeTurnResult,
 )
 from .postgres import PromptSnapshot
+from .voice_activity import EnergyVadTurnDetector
 
 LOGGER = logging.getLogger(__name__)
 
@@ -53,9 +62,19 @@ LATEST_UTTERANCE_GUARD = (
     "不要因为历史里问过时间、日期或其他问题，就在本轮继续回答这些旧问题；"
     "除非用户最新一句明确询问时间，否则不要主动报时。"
 )
+OPENING_BUSINESS_GUARD = (
+    "这是待缴费用确认电话，不是闲聊。"
+    "如果用户最新一句是在确认身份，例如“是的”“对”“嗯”“我是”“在的”，"
+    "必须继续围绕待缴费用确认，简短询问是否方便现在处理或确认这笔费用。"
+    "严禁主动切换到化妆、天气、时间、学习知识、闲聊等无关话题。"
+    "如果用户指出你跑题了，先简短道歉，然后立刻回到待缴费用确认。"
+)
 DEFAULT_REPLAY_AUDIO_MS = 800
 MAX_COMMITTED_HISTORY_EXCHANGES = 6
 MAX_COMMITTED_HISTORY_CHARS = 1400
+OPENING_TURN_ID = 0
+OPENING_BARGE_IN_MIN_SENT_FRAMES = 10
+OPENING_BARGE_IN_MIN_PLAYBACK_MS = 300
 
 
 @dataclass(frozen=True)
@@ -87,6 +106,13 @@ class RealtimeSessionProtocol:
         interrupted_output_text: str | None = None,
     ) -> None: ...
 
+    async def seed_assistant_context(
+        self,
+        text: str,
+        *,
+        source: str = "external",
+    ) -> None: ...
+
 
 class PlaybackControlProtocol:
     async def start(self) -> None: ...
@@ -116,9 +142,11 @@ RealtimeSessionFactory = Callable[
         Callable[[RealtimeTurnResult], Awaitable[None]],
         int,
         str,
+        str | None,
     ],
     RealtimeSessionProtocol,
 ]
+CallAnsweredPredicate = Callable[[str], bool]
 
 
 @dataclass
@@ -153,6 +181,7 @@ class RealtimePhoneSessionStats:
     realtime_interrupt_requests: int = 0
     realtime_interrupt_failures: int = 0
     context_repair_requests: int = 0
+    local_barge_in_events: int = 0
     turns_started: int = 0
     turns_committed: int = 0
     turns_completed: int = 0
@@ -167,6 +196,26 @@ class RealtimePhoneSessionStats:
     input_transcripts: list[str] = field(default_factory=list)
     output_transcripts: list[str] = field(default_factory=list)
     output_transcripts_by_turn: dict[int, str] = field(default_factory=dict)
+    opening_text: str | None = field(default=None, repr=False)
+    opening_text_hash: str | None = None
+    opening_voice: str | None = None
+    opening_speaker: str | None = None
+    opening_playback_frames: int = 0
+    opening_playback_started_at: float | None = None
+    opening_playback_completed_at: float | None = None
+    opening_playback_interrupted: bool = False
+    opening_playback_sent_frames: int = 0
+    opening_last_playback_rms: int | None = None
+    opening_last_playback_at: float | None = None
+    opening_trigger_rms: int | None = None
+    opening_trigger_rms_min: int | None = None
+    opening_trigger_rms_max: int | None = None
+    opening_trigger_rms_avg: int | None = None
+    opening_trigger_best_playback_correlation: float | None = None
+    opening_trigger_best_playback_frame: int | None = None
+    opening_trigger_best_playback_rms: int | None = None
+    opening_trigger_last_playback_age_ms: int | None = None
+    opening_answer_wait_ms: int | None = None
     pending_exchanges: dict[int, ConversationExchange] = field(default_factory=dict)
     committed_exchanges: list[ConversationExchange] = field(default_factory=list)
     gateway_history_committed_turns: int = 0
@@ -223,11 +272,28 @@ class RealtimePhoneSessionStats:
     )
     recent_input_frames_16k: deque[bytes] = field(default_factory=deque, repr=False)
     repair_replay_frames_16k: deque[bytes] = field(default_factory=deque, repr=False)
+    opening_inbound_rms_values: deque[int] = field(
+        default_factory=lambda: deque(maxlen=120),
+        repr=False,
+    )
+    opening_recent_playback_frames: deque[bytes] = field(
+        default_factory=lambda: deque(maxlen=120),
+        repr=False,
+    )
+    opening_recent_playback_frame_numbers: deque[int] = field(
+        default_factory=lambda: deque(maxlen=120),
+        repr=False,
+    )
     realtime_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    opening_barge_in_detector: EnergyVadTurnDetector | None = field(
+        default=None,
+        repr=False,
+    )
     interruption_repair_active: bool = False
     playback_active: bool = False
     prompt_scene: str = "default"
     prompt_snapshot: PromptSnapshot | None = None
+    background_tasks: set[asyncio.Task] = field(default_factory=set, repr=False)
 
 
 class FreeSwitchRealtimeGatewayServer:
@@ -247,6 +313,8 @@ class FreeSwitchRealtimeGatewayServer:
         call_result_writer: CallResultWriterProtocol | None = None,
         on_media_connected: Callable[[str], None] | None = None,
         on_media_disconnected: Callable[[str], None] | None = None,
+        opening_store: OpeningAudioStore | None = None,
+        is_call_answered: CallAnsweredPredicate | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("api_key is required")
@@ -313,6 +381,8 @@ class FreeSwitchRealtimeGatewayServer:
         self.call_result_writer = call_result_writer
         self._on_media_connected = on_media_connected
         self._on_media_disconnected = on_media_disconnected
+        self.opening_store = opening_store
+        self._is_call_answered = is_call_answered
 
     @property
     def address(self) -> tuple[str, int]:
@@ -418,12 +488,21 @@ class FreeSwitchRealtimeGatewayServer:
             return
 
         now = time.time()
+        opening_audio = self._pop_opening_audio(call_id)
         session = RealtimePhoneSessionStats(
             call_id=call_id,
             session_id=uuid.uuid4().hex,
             connected_at=now,
             last_seen_at=now,
             expected_frame_bytes=self.expected_frame_bytes,
+            opening_text=(
+                None if opening_audio is None else opening_audio.opening_text
+            ),
+            opening_text_hash=(
+                None if opening_audio is None else opening_audio.opening_text_hash
+            ),
+            opening_voice=None if opening_audio is None else opening_audio.voice,
+            opening_speaker=None if opening_audio is None else opening_audio.speaker,
         )
         playback_task = asyncio.create_task(
             self._playback_worker(websocket, session),
@@ -443,6 +522,7 @@ class FreeSwitchRealtimeGatewayServer:
         try:
             session.prompt_snapshot = await self._load_prompt_snapshot(session)
             await self._connect_realtime_session(session)
+            self._schedule_opening_playback(session, opening_audio)
             async for message in websocket:
                 session.last_seen_at = time.time()
                 if isinstance(message, bytes):
@@ -531,6 +611,7 @@ class FreeSwitchRealtimeGatewayServer:
                 on_turn_completed,
                 session.last_realtime_turn_id,
                 self._instructions_for_realtime_session(session),
+                session.opening_speaker,
             )
 
         raise RuntimeError("realtime_session_factory is required for realtime mode")
@@ -543,13 +624,27 @@ class FreeSwitchRealtimeGatewayServer:
         if session.prompt_snapshot is not None:
             instructions = session.prompt_snapshot.instructions
 
+        opening_lines = []
+        if session.opening_text:
+            opening_lines = [
+                "",
+                OPENING_BUSINESS_GUARD,
+                "",
+                "本通话开始时，系统已经向用户播放了以下开场白。"
+                "用户接下来的简短回答可能是在回应这段开场白：",
+                f"客服：{session.opening_text}",
+            ]
+
         if not session.committed_exchanges:
-            return "\n".join([instructions, "", LATEST_UTTERANCE_GUARD])
+            return "\n".join(
+                [instructions, "", LATEST_UTTERANCE_GUARD, *opening_lines]
+            )
 
         lines = [
             instructions,
             "",
             LATEST_UTTERANCE_GUARD,
+            *opening_lines,
             "",
             "电话用户已经完整听到的历史对话：",
         ]
@@ -566,6 +661,178 @@ class FreeSwitchRealtimeGatewayServer:
             remaining_chars -= len(block)
 
         return "\n".join(lines)
+
+    def _pop_opening_audio(self, call_id: str) -> PreparedOpeningAudio | None:
+        if self.opening_store is None:
+            return None
+        return self.opening_store.pop(call_id)
+
+    def _schedule_opening_playback(
+        self,
+        session: RealtimePhoneSessionStats,
+        opening_audio: PreparedOpeningAudio | None,
+    ) -> None:
+        if opening_audio is None or not opening_audio.phone_frames:
+            return
+
+        async def runner() -> None:
+            await self._wait_for_call_answer_before_opening(session)
+            await self._start_opening_playback(session, opening_audio)
+
+        task = asyncio.create_task(
+            runner(),
+            name=f"opening-playback-{session.session_id}",
+        )
+        session.background_tasks.add(task)
+        task.add_done_callback(session.background_tasks.discard)
+
+    async def _wait_for_call_answer_before_opening(
+        self,
+        session: RealtimePhoneSessionStats,
+    ) -> None:
+        if self._is_call_answered is None:
+            return
+        if self._call_is_answered(session.call_id):
+            session.opening_answer_wait_ms = 0
+            return
+
+        started_at = time.monotonic()
+        LOGGER.info(
+            "opening_playback_waiting_for_answer call_id=%s session_id=%s "
+            "text_hash=%s",
+            session.call_id,
+            session.session_id,
+            session.opening_text_hash,
+        )
+        while not self._call_is_answered(session.call_id):
+            await asyncio.sleep(0.05)
+
+        session.opening_answer_wait_ms = int(
+            (time.monotonic() - started_at) * 1000
+        )
+        LOGGER.info(
+            "opening_playback_answer_detected call_id=%s session_id=%s "
+            "text_hash=%s wait_ms=%s",
+            session.call_id,
+            session.session_id,
+            session.opening_text_hash,
+            session.opening_answer_wait_ms,
+        )
+
+    def _call_is_answered(self, call_id: str) -> bool:
+        if self._is_call_answered is None:
+            return True
+        try:
+            return self._is_call_answered(call_id)
+        except Exception:
+            LOGGER.warning("call_answer_state_callback_failed call_id=%s", call_id)
+            return True
+
+    async def _start_opening_playback(
+        self,
+        session: RealtimePhoneSessionStats,
+        opening_audio: PreparedOpeningAudio | None,
+    ) -> None:
+        if opening_audio is None or not opening_audio.phone_frames:
+            return
+
+        now = time.monotonic()
+        session.current_output_turn_id = OPENING_TURN_ID
+        session.opening_playback_started_at = time.time()
+        session.opening_playback_frames = len(opening_audio.phone_frames)
+        session.turn_speech_started_at[OPENING_TURN_ID] = now
+        session.turn_first_model_audio_at[OPENING_TURN_ID] = now
+        session.turn_model_done_at[OPENING_TURN_ID] = now
+        session.turn_model_first_audio_delta_ms[OPENING_TURN_ID] = 0
+        session.output_transcripts_by_turn[OPENING_TURN_ID] = (
+            opening_audio.opening_text
+        )
+        session.model_done_turns.add(OPENING_TURN_ID)
+        session.opening_barge_in_detector = self._create_opening_barge_in_detector()
+
+        for payload in opening_audio.phone_frames:
+            await self._enqueue_playback_frame(
+                session,
+                PlaybackFrame(OPENING_TURN_ID, payload),
+            )
+
+        LOGGER.info(
+            "opening_playback_queued call_id=%s session_id=%s text_hash=%s "
+            "voice=%s frames=%s source_audio_bytes=%s generation_ms=%s "
+            "answer_wait_ms=%s",
+            session.call_id,
+            session.session_id,
+            opening_audio.opening_text_hash,
+            opening_audio.voice,
+            len(opening_audio.phone_frames),
+            opening_audio.source_audio_bytes,
+            opening_audio.generation_ms,
+            session.opening_answer_wait_ms,
+        )
+        self._schedule_opening_context_seed(session, opening_audio.opening_text)
+
+    def _schedule_opening_context_seed(
+        self,
+        session: RealtimePhoneSessionStats,
+        opening_text: str,
+    ) -> None:
+        realtime_session = self._realtime_sessions.get(session.session_id)
+        if realtime_session is None:
+            return
+        seed_context = getattr(realtime_session, "seed_assistant_context", None)
+        if seed_context is None:
+            return
+
+        async def runner() -> None:
+            started_at = time.monotonic()
+            LOGGER.info(
+                "opening_context_seed_started call_id=%s session_id=%s "
+                "text_hash=%s text_chars=%s",
+                session.call_id,
+                session.session_id,
+                session.opening_text_hash,
+                len(opening_text),
+            )
+            try:
+                await seed_context(opening_text, source="opening_context")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.warning(
+                    "opening_context_seed_failed call_id=%s session_id=%s "
+                    "text_hash=%s elapsed_ms=%s",
+                    session.call_id,
+                    session.session_id,
+                    session.opening_text_hash,
+                    int((time.monotonic() - started_at) * 1000),
+                    exc_info=True,
+                )
+                return
+
+            LOGGER.info(
+                "opening_context_seeded call_id=%s session_id=%s text_hash=%s "
+                "elapsed_ms=%s",
+                session.call_id,
+                session.session_id,
+                session.opening_text_hash,
+                int((time.monotonic() - started_at) * 1000),
+            )
+
+        task = asyncio.create_task(
+            runner(),
+            name=f"opening-context-seed-{session.session_id}",
+        )
+        session.background_tasks.add(task)
+        task.add_done_callback(session.background_tasks.discard)
+
+    def _create_opening_barge_in_detector(self) -> EnergyVadTurnDetector | None:
+        if not self.config.vad.barge_in_enabled:
+            return None
+        return EnergyVadTurnDetector(
+            self.config.vad,
+            frame_bytes=self.expected_frame_bytes,
+            frame_duration_ms=self.frame_duration_ms,
+        )
 
     def _create_playback_control(self) -> PlaybackControlProtocol | None:
         if not self.config.event_socket.enabled:
@@ -637,6 +904,9 @@ class FreeSwitchRealtimeGatewayServer:
         while len(session.recent_input_frames_16k) > self.replay_frame_limit:
             session.recent_input_frames_16k.popleft()
 
+        if self._handle_local_opening_barge_in(session, payload):
+            return
+
         async with session.realtime_lock:
             if session.interruption_repair_active:
                 session.repair_replay_frames_16k.append(frame_16k)
@@ -647,6 +917,107 @@ class FreeSwitchRealtimeGatewayServer:
                 return
             await realtime_session.append_audio(frame_16k)
             session.streamed_input_bytes += len(frame_16k)
+
+    def _handle_local_opening_barge_in(
+        self,
+        session: RealtimePhoneSessionStats,
+        payload: bytes,
+    ) -> bool:
+        detector = session.opening_barge_in_detector
+        if detector is None:
+            return False
+        if session.current_output_turn_id != OPENING_TURN_ID:
+            return False
+        if session.opening_playback_interrupted:
+            return False
+        if session.opening_playback_completed_at is not None:
+            return False
+        if session.interruption_repair_active:
+            return False
+        if not self._opening_barge_in_is_armed(session):
+            return False
+
+        inbound_rms = pcm_s16le_rms(payload)
+        session.opening_inbound_rms_values.append(inbound_rms)
+
+        event = detector.process_frame_event(payload)
+        if not event.started:
+            return False
+
+        playback_elapsed_ms = None
+        if session.opening_playback_started_at is not None:
+            playback_elapsed_ms = int(
+                (time.time() - session.opening_playback_started_at) * 1000
+            )
+        rms_min, rms_max, rms_avg = _int_window_stats(
+            session.opening_inbound_rms_values
+        )
+        reference_match = _best_playback_reference_match(session, payload)
+        last_playback_age_ms = _elapsed_ms(session.opening_last_playback_at)
+        session.opening_trigger_rms = inbound_rms
+        session.opening_trigger_rms_min = rms_min
+        session.opening_trigger_rms_max = rms_max
+        session.opening_trigger_rms_avg = rms_avg
+        session.opening_trigger_best_playback_correlation = (
+            reference_match.correlation
+        )
+        session.opening_trigger_best_playback_frame = reference_match.frame_number
+        session.opening_trigger_best_playback_rms = reference_match.rms
+        session.opening_trigger_last_playback_age_ms = last_playback_age_ms
+        session.local_barge_in_events += 1
+        session.interruption_repair_active = True
+        session.repair_replay_frames_16k = deque(
+            session.recent_input_frames_16k,
+            maxlen=self.repair_replay_frame_limit,
+        )
+        asyncio.create_task(
+            self._run_interruption_repair(
+                session,
+                reason="local_opening_barge_in",
+            ),
+            name=f"opening-barge-in-repair-{session.session_id}",
+        )
+        LOGGER.info(
+            "realtime_phone_local_opening_barge_in_started call_id=%s "
+            "session_id=%s threshold=%s start_speech_ms=%s trigger_rms=%s "
+            "opening_playback_elapsed_ms=%s replay_frames=%s "
+            "inbound_rms_min=%s inbound_rms_max=%s inbound_rms_avg=%s "
+            "opening_sent_frames=%s opening_last_playback_rms=%s "
+            "opening_last_playback_age_ms=%s "
+            "opening_best_playback_correlation=%s "
+            "opening_best_playback_frame=%s opening_best_playback_rms=%s",
+            session.call_id,
+            session.session_id,
+            self.config.vad.speech_rms_threshold,
+            self.config.vad.start_speech_ms,
+            inbound_rms,
+            playback_elapsed_ms,
+            len(session.repair_replay_frames_16k),
+            rms_min,
+            rms_max,
+            rms_avg,
+            session.opening_playback_sent_frames,
+            session.opening_last_playback_rms,
+            last_playback_age_ms,
+            _format_correlation(reference_match.correlation),
+            reference_match.frame_number,
+            reference_match.rms,
+        )
+        return True
+
+    def _opening_barge_in_is_armed(
+        self,
+        session: RealtimePhoneSessionStats,
+    ) -> bool:
+        if session.opening_playback_sent_frames < OPENING_BARGE_IN_MIN_SENT_FRAMES:
+            return False
+
+        first_playback_at = session.turn_first_playback_at.get(OPENING_TURN_ID)
+        audible_ms = _elapsed_ms(first_playback_at)
+        return (
+            audible_ms is not None
+            and audible_ms >= OPENING_BARGE_IN_MIN_PLAYBACK_MS
+        )
 
     async def _handle_server_vad_speech_started(
         self,
@@ -985,6 +1356,9 @@ class FreeSwitchRealtimeGatewayServer:
             session.playback_active = False
             raise
 
+        if item.turn_id == OPENING_TURN_ID:
+            _record_opening_playback_frame(session, item.payload, send_started_at)
+
         if session.first_playback_at is None:
             session.first_playback_at = time.time()
             LOGGER.info(
@@ -1172,7 +1546,19 @@ class FreeSwitchRealtimeGatewayServer:
         ):
             return False
 
-        self._commit_played_turn(session, turn_id)
+        if turn_id == OPENING_TURN_ID:
+            session.opening_playback_completed_at = time.time()
+            session.opening_barge_in_detector = None
+            LOGGER.info(
+                "opening_playback_completed call_id=%s session_id=%s text_hash=%s "
+                "frames=%s",
+                session.call_id,
+                session.session_id,
+                session.opening_text_hash,
+                session.opening_playback_frames,
+            )
+        else:
+            self._commit_played_turn(session, turn_id)
         session.current_output_turn_id = None
         session.model_done_turns.discard(turn_id)
         session.freeswitch_completed_turns.discard(turn_id)
@@ -1226,6 +1612,9 @@ class FreeSwitchRealtimeGatewayServer:
     ) -> None:
         session.interruptions += 1
         interrupted_output_turn_id = session.current_output_turn_id
+        if interrupted_output_turn_id == OPENING_TURN_ID:
+            session.opening_playback_interrupted = True
+            session.opening_barge_in_detector = None
         dropped_frames = self._clear_playback_queue(session)
         session.dropped_playback_frames += dropped_frames
         self._abandon_pending_turn(
@@ -1280,12 +1669,32 @@ class FreeSwitchRealtimeGatewayServer:
         if realtime_session is None:
             return
 
+        interrupted_output_text = None
+        if interrupted_output_turn_id is not None:
+            interrupted_output_text = session.output_transcripts_by_turn.get(
+                interrupted_output_turn_id
+            )
         session.realtime_interrupt_requests += 1
         try:
             restart_on_interruption = getattr(
                 realtime_session,
                 "restart_on_interruption",
                 True,
+            )
+            LOGGER.info(
+                "realtime_playback_context_repair_started call_id=%s "
+                "session_id=%s reason=%s interrupted_turn=%s "
+                "restart_on_interruption=%s interrupted_text_hash=%s "
+                "interrupted_text_chars=%s",
+                session.call_id,
+                session.session_id,
+                reason,
+                interrupted_output_turn_id,
+                restart_on_interruption,
+                _text_hash(interrupted_output_text)
+                if interrupted_output_text
+                else None,
+                len(interrupted_output_text or ""),
             )
             if restart_on_interruption:
                 await asyncio.wait_for(
@@ -1297,25 +1706,19 @@ class FreeSwitchRealtimeGatewayServer:
                     timeout=8,
                 )
             else:
-                interrupted_output_text = None
-                if interrupted_output_turn_id is not None:
-                    interrupted_output_text = session.output_transcripts_by_turn.get(
-                        interrupted_output_turn_id
-                    )
-                await asyncio.wait_for(
-                    realtime_session.handle_playback_interruption(
+                try:
+                    await realtime_session.handle_playback_interruption(
                         interrupted_output_text=interrupted_output_text,
-                    ),
-                    timeout=2,
-                )
-                async with session.realtime_lock:
-                    current = self._realtime_sessions.get(session.session_id)
-                    if current is realtime_session:
-                        await self._replay_repair_audio_locked(
-                            session,
-                            realtime_session,
-                            reason=reason,
-                        )
+                    )
+                finally:
+                    async with session.realtime_lock:
+                        current = self._realtime_sessions.get(session.session_id)
+                        if current is realtime_session:
+                            await self._replay_repair_audio_locked(
+                                session,
+                                realtime_session,
+                                reason=reason,
+                            )
             session.context_repair_requests += 1
         except AttributeError:
             try:
@@ -1467,6 +1870,12 @@ class FreeSwitchRealtimeGatewayServer:
         session: RealtimePhoneSessionStats,
         playback_task: asyncio.Task[None],
     ) -> None:
+        if session.background_tasks:
+            for task in list(session.background_tasks):
+                task.cancel()
+            await asyncio.gather(*session.background_tasks, return_exceptions=True)
+            session.background_tasks.clear()
+
         realtime_session = self._realtime_sessions.get(session.session_id)
         if realtime_session is not None:
             await realtime_session.close()
@@ -1495,10 +1904,17 @@ class FreeSwitchRealtimeGatewayServer:
             "freeswitch_playback_events=%s freeswitch_queue_completed_events=%s "
             "freeswitch_break_requests=%s freeswitch_break_failures=%s "
             "realtime_interrupt_requests=%s realtime_interrupt_failures=%s "
-            "context_repair_requests=%s realtime_session_restarts=%s "
+            "context_repair_requests=%s local_barge_in_events=%s "
+            "realtime_session_restarts=%s "
             "gateway_history_committed_turns=%s "
             "gateway_history_abandoned_turns=%s replayed_input_frames=%s "
             "replayed_input_bytes=%s "
+            "opening_trigger_rms=%s opening_trigger_rms_min=%s "
+            "opening_trigger_rms_max=%s opening_trigger_rms_avg=%s "
+            "opening_trigger_best_playback_correlation=%s "
+            "opening_trigger_best_playback_frame=%s "
+            "opening_trigger_best_playback_rms=%s "
+            "opening_trigger_last_playback_age_ms=%s "
             "turns_started=%s turns_committed=%s turns_completed=%s "
             "turns_failed=%s duration_ms=%s",
             session.call_id,
@@ -1528,11 +1944,20 @@ class FreeSwitchRealtimeGatewayServer:
             session.realtime_interrupt_requests,
             session.realtime_interrupt_failures,
             session.context_repair_requests,
+            session.local_barge_in_events,
             session.realtime_session_restarts,
             session.gateway_history_committed_turns,
             session.gateway_history_abandoned_turns,
             session.replayed_input_frames,
             session.replayed_input_bytes,
+            session.opening_trigger_rms,
+            session.opening_trigger_rms_min,
+            session.opening_trigger_rms_max,
+            session.opening_trigger_rms_avg,
+            _format_correlation(session.opening_trigger_best_playback_correlation),
+            session.opening_trigger_best_playback_frame,
+            session.opening_trigger_best_playback_rms,
+            session.opening_trigger_last_playback_age_ms,
             session.turns_started,
             session.turns_committed,
             session.turns_completed,
@@ -1584,6 +2009,13 @@ class FreeSwitchRealtimeGatewayServer:
             "prompt": prompt,
             "input_transcripts": list(session.input_transcripts),
             "output_transcripts": list(session.output_transcripts),
+            "opening": {
+                "text_hash": session.opening_text_hash,
+                "voice": session.opening_voice,
+                "speaker": session.opening_speaker,
+                "playback_frames": session.opening_playback_frames,
+                "playback_interrupted": session.opening_playback_interrupted,
+            },
             "committed_exchanges": committed_exchanges,
             "metrics": {
                 "inbound_frames": session.inbound_frames,
@@ -1593,6 +2025,7 @@ class FreeSwitchRealtimeGatewayServer:
                 "outbound_bytes": session.outbound_bytes,
                 "invalid_frame_count": session.invalid_frame_count,
                 "interruptions": session.interruptions,
+                "local_barge_in_events": session.local_barge_in_events,
                 "dropped_playback_frames": session.dropped_playback_frames,
                 "dropped_stale_frames": session.dropped_stale_frames,
                 "playback_underruns": session.playback_underruns,
@@ -1621,6 +2054,22 @@ class FreeSwitchRealtimeGatewayServer:
                 "turns_committed": session.turns_committed,
                 "turns_completed": session.turns_completed,
                 "turns_failed": session.turns_failed,
+                "opening_trigger_rms": session.opening_trigger_rms,
+                "opening_trigger_rms_min": session.opening_trigger_rms_min,
+                "opening_trigger_rms_max": session.opening_trigger_rms_max,
+                "opening_trigger_rms_avg": session.opening_trigger_rms_avg,
+                "opening_trigger_best_playback_correlation": (
+                    session.opening_trigger_best_playback_correlation
+                ),
+                "opening_trigger_best_playback_frame": (
+                    session.opening_trigger_best_playback_frame
+                ),
+                "opening_trigger_best_playback_rms": (
+                    session.opening_trigger_best_playback_rms
+                ),
+                "opening_trigger_last_playback_age_ms": (
+                    session.opening_trigger_last_playback_age_ms
+                ),
             },
         }
 
@@ -1702,6 +2151,90 @@ def _call_id_from_path(path: str) -> str | None:
         if call_id:
             return call_id
     return None
+
+
+@dataclass(frozen=True)
+class PlaybackReferenceMatch:
+    correlation: float | None
+    frame_number: int | None
+    rms: int | None
+
+
+def _record_opening_playback_frame(
+    session: RealtimePhoneSessionStats,
+    payload: bytes,
+    sent_at: float,
+) -> None:
+    session.opening_playback_sent_frames += 1
+    session.opening_last_playback_at = sent_at
+    session.opening_last_playback_rms = pcm_s16le_rms(payload)
+    session.opening_recent_playback_frames.append(payload)
+    session.opening_recent_playback_frame_numbers.append(
+        session.opening_playback_sent_frames
+    )
+
+
+def _best_playback_reference_match(
+    session: RealtimePhoneSessionStats,
+    inbound_payload: bytes,
+) -> PlaybackReferenceMatch:
+    best_correlation: float | None = None
+    best_frame_number: int | None = None
+    best_rms: int | None = None
+    for frame_number, playback_payload in zip(
+        session.opening_recent_playback_frame_numbers,
+        session.opening_recent_playback_frames,
+    ):
+        correlation = _pcm_abs_correlation(inbound_payload, playback_payload)
+        if correlation is None:
+            continue
+        if best_correlation is None or correlation > best_correlation:
+            best_correlation = correlation
+            best_frame_number = frame_number
+            best_rms = pcm_s16le_rms(playback_payload)
+    return PlaybackReferenceMatch(
+        correlation=best_correlation,
+        frame_number=best_frame_number,
+        rms=best_rms,
+    )
+
+
+def _pcm_abs_correlation(left_pcm: bytes, right_pcm: bytes) -> float | None:
+    if len(left_pcm) != len(right_pcm) or not left_pcm:
+        return None
+    left_samples = pcm_s16le_to_samples(left_pcm)
+    right_samples = pcm_s16le_to_samples(right_pcm)
+    if len(left_samples) != len(right_samples) or not left_samples:
+        return None
+
+    dot_product = 0
+    left_square_sum = 0
+    right_square_sum = 0
+    for left, right in zip(left_samples, right_samples):
+        dot_product += left * right
+        left_square_sum += left * left
+        right_square_sum += right * right
+    if left_square_sum == 0 or right_square_sum == 0:
+        return None
+    return abs(dot_product) / math.sqrt(left_square_sum * right_square_sum)
+
+
+def _int_window_stats(values: deque[int]) -> tuple[int | None, int | None, int | None]:
+    if not values:
+        return None, None, None
+    return min(values), max(values), round(sum(values) / len(values))
+
+
+def _format_correlation(value: float | None) -> str | None:
+    if value is None:
+        return None
+    return f"{value:.3f}"
+
+
+def _text_hash(text: str | None) -> str | None:
+    if not text:
+        return None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _elapsed_ms(start: float | None, end: float | None = None) -> int | None:

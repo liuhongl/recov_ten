@@ -14,6 +14,11 @@ from .env_loader import load_env_file
 from .freeswitch_media import FreeSwitchMediaEchoServer
 from .health_server import HealthServer
 from .logging_config import configure_logging
+from .opening import (
+    DEFAULT_OPENING_TIMEOUT_SECONDS,
+    DoubaoOpeningAudioGenerator,
+    OpeningAudioStore,
+)
 from .postgres import PostgresRuntime
 from .doubao_s2s_client import (
     DEFAULT_REALTIME_APP_KEY,
@@ -78,7 +83,22 @@ async def _serve(config, *, media_mode: str) -> None:
     )
     await postgres_runtime.start()
 
-    outbound_manager = OutboundCallManager(config)
+    opening_store = OpeningAudioStore()
+    doubao_credentials = None
+    opening_generator = None
+    if media_mode == "realtime":
+        doubao_credentials = _load_doubao_s2s_credentials(config)
+        opening_generator = DoubaoOpeningAudioGenerator(
+            doubao_credentials,
+            config.doubao_s2s,
+            timeout_seconds=DEFAULT_OPENING_TIMEOUT_SECONDS,
+        )
+
+    outbound_manager = OutboundCallManager(
+        config,
+        opening_generator=opening_generator,
+        opening_store=opening_store,
+    )
     outbound_manager.start()
     health_server = HealthServer(config, call_manager=outbound_manager)
     health_thread = threading.Thread(
@@ -89,7 +109,7 @@ async def _serve(config, *, media_mode: str) -> None:
     if media_mode == "echo":
         media_server = FreeSwitchMediaEchoServer(config.freeswitch)
     elif media_mode == "realtime":
-        credentials = _load_doubao_s2s_credentials(config)
+        assert doubao_credentials is not None
         session_config = DoubaoS2SSessionConfig(
             speaker=config.doubao_s2s.speaker,
             output_sample_rate=config.doubao_s2s.output_sample_rate,
@@ -101,10 +121,15 @@ async def _serve(config, *, media_mode: str) -> None:
             on_turn_completed,
             turn_id_start,
             instructions,
+            speaker,
         ):
             return DoubaoS2SServerVadSession(
-                credentials,
-                replace(session_config, system_prompt=instructions),
+                doubao_credentials,
+                replace(
+                    session_config,
+                    system_prompt=instructions,
+                    speaker=speaker or session_config.speaker,
+                ),
                 turn_id_start=turn_id_start,
                 on_speech_started=on_speech_started,
                 on_audio_delta=on_audio_delta,
@@ -120,6 +145,8 @@ async def _serve(config, *, media_mode: str) -> None:
             call_result_writer=postgres_runtime.call_result_writer,
             on_media_connected=outbound_manager.mark_media_connected,
             on_media_disconnected=outbound_manager.mark_media_disconnected,
+            opening_store=opening_store,
+            is_call_answered=outbound_manager.is_call_answered,
         )
     else:
         raise ValueError(f"unsupported media_mode: {media_mode}")

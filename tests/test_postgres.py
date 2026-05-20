@@ -85,10 +85,10 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
                 assert args == ("collector-a",)
                 return {"name": "李经理"}
             if "from persona_call_strategy" in query:
-                assert args == ("collector-a", "persona-1")
+                assert args == ("collector-a", 3)
                 return {"strategy_core": "先确认本人，再说明费用。"}
             if "from debt_record" in query:
-                assert args == ("debt-1",)
+                assert args == (2049810626160668673,)
                 return {
                     "debtor_name": "测试业主",
                     "address": "测试小区一号楼",
@@ -104,8 +104,8 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
         store.prepare_business_prompt(
             {
                 "identityName": "collector-a",
-                "personaId": "persona-1",
-                "debtId": "debt-1",
+                "personaId": "3",
+                "debtId": "2049810626160668673",
             },
             fallback_instructions="fallback",
         )
@@ -113,7 +113,7 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
 
     assert prep is not None
     assert isinstance(prep, BusinessPromptPreparation)
-    assert prep.prompt_snapshot.scene == "collector-a:persona-1"
+    assert prep.prompt_snapshot.scene == "collector-a:3"
     assert prep.prompt_snapshot.version == "postgres"
     assert "你是李经理" in prep.prompt_snapshot.instructions
     assert "先确认本人，再说明费用。" in prep.prompt_snapshot.instructions
@@ -121,6 +121,8 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert "逾期金额：12.34" in prep.prompt_snapshot.instructions
     assert prep.prompt_snapshot.metadata["source"] == "postgres"
     assert prep.prompt_snapshot.metadata["identityName"] == "collector-a"
+    assert prep.prompt_snapshot.metadata["personaId"] == "3"
+    assert prep.prompt_snapshot.metadata["debtId"] == "2049810626160668673"
     assert prep.opening.opening_text.startswith("您好，请问是测试业主女士吗？我是李经理。")
 
 

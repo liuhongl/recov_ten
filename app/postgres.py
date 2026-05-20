@@ -165,8 +165,8 @@ class PostgresPromptStore:
                 metadata={
                     "source": "postgres",
                     "identityName": identity_name,
-                    "personaId": persona_id,
-                    "debtId": debt_id,
+                    "personaId": str(persona_id),
+                    "debtId": str(debt_id),
                     "employee_name": _prompt_text(employee_name),
                     "opening_text_hash": opening.opening_text_hash,
                 },
@@ -283,10 +283,10 @@ def _load_asyncpg() -> Any:
 
 def _business_prompt_params(
     context: Mapping[str, Any],
-) -> tuple[str, str, str] | None:
+) -> tuple[str, int, int] | None:
     identity_name = _context_text(context.get("identityName"))
-    persona_id = _context_text(context.get("personaId"))
-    debt_id = _context_text(context.get("debtId"))
+    persona_id = _context_int(context.get("personaId"))
+    debt_id = _context_int(context.get("debtId"))
     if identity_name is None or persona_id is None or debt_id is None:
         return None
     return identity_name, persona_id, debt_id
@@ -297,6 +297,16 @@ def _context_text(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _context_int(value: object) -> int | None:
+    text = _context_text(value)
+    if text is None:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
 
 
 def _row_value(row: Any, key: str) -> Any:

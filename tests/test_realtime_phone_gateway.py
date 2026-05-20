@@ -144,6 +144,10 @@ def test_realtime_instructions_anchor_opening_confirmation_to_fee_followup():
     assert "待缴费用确认电话" in instructions
     assert "如果用户最新一句是在确认身份" in instructions
     assert "必须继续围绕待缴费用确认" in instructions
+    assert "后续回复必须延续开场白的礼貌核实口吻" in instructions
+    assert "全程使用“您”" in instructions
+    assert "不要说“你家”" in instructions
+    assert "避免使用“尽快缴纳”“不影响物业服务”" in instructions
     assert "严禁主动切换到化妆" in instructions
 
 
@@ -183,9 +187,15 @@ def test_realtime_dialog_config_anchors_postgres_employee_identity():
     assert "物业中心小明" in dialog_config.system_role
     assert "禁止自称豆包" in dialog_config.system_role
     assert "业务外呼" in dialog_config.system_role
+    assert "后续回复必须延续开场白的礼貌核实口吻" in dialog_config.system_role
+    assert "全程使用“您”" in dialog_config.system_role
+    assert "不要说“你家”" in dialog_config.system_role
+    assert "避免使用“尽快缴纳”“不影响物业服务”" in dialog_config.system_role
     assert "先确认本人，再说明待缴物业费。" in dialog_config.system_role
     assert "完整业务提示词" not in dialog_config.system_role
     assert "电话客服" in dialog_config.speaking_style
+    assert "全程使用“您”" in dialog_config.speaking_style
+    assert "不用“你家”" in dialog_config.speaking_style
 
 
 def test_realtime_gateway_passes_dialog_config_to_realtime_factory():

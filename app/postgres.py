@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Protocol
 
+from .business_dialog_style import numbered_business_dialog_style_rules
 from .config import GatewayConfig
 from .opening import (
     OpeningGenerationFailed,
@@ -350,6 +351,9 @@ def _render_business_prompt(
             "",
             "# 催收策略",
             _prompt_block(strategy),
+            "",
+            "# 对话风格",
+            *numbered_business_dialog_style_rules(),
             "",
             "# 业主信息",
             f"业主姓名：{_prompt_text(debtor_name)}",

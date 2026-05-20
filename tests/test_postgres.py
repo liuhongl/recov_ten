@@ -124,6 +124,11 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert prep.prompt_snapshot.metadata["personaId"] == "3"
     assert prep.prompt_snapshot.metadata["debtId"] == "2049810626160668673"
     assert prep.prompt_snapshot.metadata["strategy_core"] == "先确认本人，再说明费用。"
+    assert "# 对话风格" in prep.prompt_snapshot.instructions
+    assert "后续回复必须延续开场白的礼貌核实口吻" in prep.prompt_snapshot.instructions
+    assert "全程使用“您”" in prep.prompt_snapshot.instructions
+    assert "不要说“你家”" in prep.prompt_snapshot.instructions
+    assert "避免使用“尽快缴纳”“不影响物业服务”" in prep.prompt_snapshot.instructions
     assert prep.opening.opening_text.startswith("您好，请问是测试业主女士吗？我是李经理。")
 
 

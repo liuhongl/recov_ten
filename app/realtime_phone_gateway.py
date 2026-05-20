@@ -22,6 +22,10 @@ from .audio_codec import (
     pcm_s16le_to_samples,
     resample_pcm_s16le_mono,
 )
+from .business_dialog_style import (
+    BUSINESS_DIALOG_SPEAKING_STYLE,
+    BUSINESS_DIALOG_STYLE_RULES,
+)
 from .config import GatewayConfig
 from .freeswitch_event_socket import (
     FreeSwitchPlaybackController,
@@ -63,12 +67,15 @@ LATEST_UTTERANCE_GUARD = (
     "不要因为历史里问过时间、日期或其他问题，就在本轮继续回答这些旧问题；"
     "除非用户最新一句明确询问时间，否则不要主动报时。"
 )
-OPENING_BUSINESS_GUARD = (
-    "这是待缴费用确认电话，不是闲聊。"
-    "如果用户最新一句是在确认身份，例如“是的”“对”“嗯”“我是”“在的”，"
-    "必须继续围绕待缴费用确认，简短询问是否方便现在处理或确认这笔费用。"
-    "严禁主动切换到化妆、天气、时间、学习知识、闲聊等无关话题。"
-    "如果用户指出你跑题了，先简短道歉，然后立刻回到待缴费用确认。"
+OPENING_BUSINESS_GUARD = "\n".join(
+    [
+        "这是待缴费用确认电话，不是闲聊。",
+        "如果用户最新一句是在确认身份，例如“是的”“对”“嗯”“我是”“在的”，"
+        "必须继续围绕待缴费用确认，简短询问是否方便现在处理或确认这笔费用。",
+        *BUSINESS_DIALOG_STYLE_RULES,
+        "严禁主动切换到化妆、天气、时间、学习知识、闲聊等无关话题。",
+        "如果用户指出你跑题了，先简短道歉，然后立刻回到待缴费用确认。",
+    ]
 )
 DEFAULT_REPLAY_AUDIO_MS = 800
 MAX_COMMITTED_HISTORY_EXCHANGES = 6
@@ -79,10 +86,7 @@ OPENING_BARGE_IN_MIN_PLAYBACK_MS = 300
 DEFAULT_DIALOG_MODEL = "1.2.1.1"
 MAX_DIALOG_BOT_NAME_CHARS = 20
 MAX_DIALOG_STRATEGY_CHARS = 240
-DIALOG_SPEAKING_STYLE = (
-    "电话客服口吻，简短、自然、礼貌但坚定；每次不超过两句；"
-    "优先确认身份和待缴费用事项，不主动闲聊。"
-)
+DIALOG_SPEAKING_STYLE = BUSINESS_DIALOG_SPEAKING_STYLE
 
 
 @dataclass(frozen=True)
@@ -2242,6 +2246,7 @@ def _business_dialog_system_role(employee_name: str, strategy_core: str) -> str:
         "用户询问“你是谁”“你找我干什么”“为什么打电话”时，必须回到逾期费用确认。",
         "用户聊无关内容时，只能一句话带过，并立刻拉回当前待缴费用事项。",
         "只围绕逾期费用提醒、身份确认、还款意愿和还款安排沟通。",
+        *BUSINESS_DIALOG_STYLE_RULES,
     ]
     if strategy_core:
         lines.append(

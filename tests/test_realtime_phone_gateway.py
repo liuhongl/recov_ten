@@ -10,6 +10,7 @@ from app.audio_codec import samples_to_pcm_s16le
 from app.config import FreeSwitchConfig, GatewayConfig, PlaybackConfig, VadConfig
 from app.freeswitch_event_socket import PlaybackProgressEvent
 from app.opening import OpeningAudioStore, PreparedOpeningAudio
+from app.postgres import PromptSnapshot
 from app.realtime_phone_gateway import (
     ConversationExchange,
     FreeSwitchRealtimeGatewayServer,
@@ -143,6 +144,43 @@ def test_realtime_instructions_anchor_opening_confirmation_to_fee_followup():
     assert "如果用户最新一句是在确认身份" in instructions
     assert "必须继续围绕待缴费用确认" in instructions
     assert "严禁主动切换到化妆" in instructions
+
+
+def test_realtime_gateway_prefers_prebuilt_prompt_snapshot_by_call_id():
+    asyncio.run(_assert_realtime_gateway_prefers_prebuilt_prompt_snapshot_by_call_id())
+
+
+async def _assert_realtime_gateway_prefers_prebuilt_prompt_snapshot_by_call_id() -> None:
+    snapshot = PromptSnapshot(
+        scene="collector-a:persona-1",
+        version="postgres",
+        instructions="业务提示词",
+        content_hash="hash-prompt",
+        loaded_at_ms=123,
+        metadata={"source": "postgres"},
+    )
+
+    class FailingStore:
+        async def get_prompt_snapshot(self, scene=None, *, fallback_instructions=None):
+            raise AssertionError("legacy prompt store should not be queried")
+
+    server = FreeSwitchRealtimeGatewayServer(
+        GatewayConfig(),
+        api_key="test",
+        prompt_store=FailingStore(),
+        prompt_snapshot_provider=lambda call_id: snapshot if call_id == "call-1" else None,
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="call-1",
+        session_id="session-1",
+        connected_at=1.0,
+        last_seen_at=1.0,
+        expected_frame_bytes=320,
+    )
+
+    loaded = await server._load_prompt_snapshot(session)
+
+    assert loaded is snapshot
 
 
 async def _assert_realtime_phone_gateway_roundtrip() -> None:

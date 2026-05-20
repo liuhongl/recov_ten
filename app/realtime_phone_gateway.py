@@ -147,6 +147,7 @@ RealtimeSessionFactory = Callable[
     RealtimeSessionProtocol,
 ]
 CallAnsweredPredicate = Callable[[str], bool]
+PromptSnapshotProvider = Callable[[str], PromptSnapshot | None]
 
 
 @dataclass
@@ -315,6 +316,7 @@ class FreeSwitchRealtimeGatewayServer:
         on_media_disconnected: Callable[[str], None] | None = None,
         opening_store: OpeningAudioStore | None = None,
         is_call_answered: CallAnsweredPredicate | None = None,
+        prompt_snapshot_provider: PromptSnapshotProvider | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("api_key is required")
@@ -378,6 +380,7 @@ class FreeSwitchRealtimeGatewayServer:
         self._realtime_sessions: dict[str, RealtimeSessionProtocol] = {}
         self.playback_control = playback_control or self._create_playback_control()
         self.prompt_store = prompt_store
+        self.prompt_snapshot_provider = prompt_snapshot_provider
         self.call_result_writer = call_result_writer
         self._on_media_connected = on_media_connected
         self._on_media_disconnected = on_media_disconnected
@@ -563,6 +566,29 @@ class FreeSwitchRealtimeGatewayServer:
         self,
         session: RealtimePhoneSessionStats,
     ) -> PromptSnapshot | None:
+        if self.prompt_snapshot_provider is not None:
+            try:
+                snapshot = self.prompt_snapshot_provider(session.call_id)
+            except Exception:
+                LOGGER.warning(
+                    "prebuilt_prompt_snapshot_load_failed call_id=%s session_id=%s",
+                    session.call_id,
+                    session.session_id,
+                    exc_info=True,
+                )
+            else:
+                if snapshot is not None:
+                    LOGGER.info(
+                        "prebuilt_prompt_snapshot_loaded call_id=%s session_id=%s "
+                        "scene=%s version=%s content_hash=%s",
+                        session.call_id,
+                        session.session_id,
+                        snapshot.scene,
+                        snapshot.version,
+                        snapshot.content_hash,
+                    )
+                    return snapshot
+
         if self.prompt_store is None:
             return None
         try:

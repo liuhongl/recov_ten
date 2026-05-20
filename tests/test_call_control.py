@@ -18,8 +18,10 @@ from app.opening import (
     OpeningAudioStore,
     OpeningGenerationFailed,
     OpeningGenerationTimeout,
+    parse_opening_request,
 )
 from app.audio_codec import samples_to_pcm_s16le
+from app.postgres import BusinessPromptPreparation, PromptSnapshot
 
 
 def test_build_originate_command_uses_local_dialplan():
@@ -335,6 +337,89 @@ def test_outbound_manager_generates_opening_before_originating():
         assert events[0].startswith("generate:female:")
         assert events[-1] == "originate"
         assert commands
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_prepares_business_prompt_and_opening_before_originating():
+    events: list[str] = []
+    store = OpeningAudioStore()
+    snapshot = PromptSnapshot(
+        scene="collector-a:persona-1",
+        version="postgres",
+        instructions="业务提示词",
+        content_hash="hash-prompt",
+        loaded_at_ms=123,
+        metadata={"source": "postgres"},
+    )
+
+    class FakeBusinessPromptPreparer:
+        def prepare(self, context):
+            events.append("prepare_prompt")
+            assert context == {
+                "identityName": "collector-a",
+                "personaId": "persona-1",
+                "debtId": "debt-1",
+            }
+            opening = parse_opening_request(
+                {
+                    "voice": "female",
+                    "business": {
+                        "owner_name": "测试业主",
+                        "arrears_amount": "12.34",
+                    },
+                }
+            )
+            assert opening is not None
+            return BusinessPromptPreparation(snapshot, opening)
+
+    class FakeOpeningGenerator:
+        def generate(self, opening):
+            events.append("generate_opening")
+            assert opening.opening_text_hash
+            return OpeningAudio(
+                pcm16=samples_to_pcm_s16le([1200] * 480),
+                sample_rate=24000,
+                generation_ms=1200,
+            )
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return endpoint
+
+        async def originate(self, command: str) -> str:
+            events.append("originate")
+            return "+OK call accepted"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(event_socket=EventSocketConfig(enabled=True)),
+        dialer_factory=lambda: FakeDialer(),
+        opening_generator=FakeOpeningGenerator(),
+        opening_store=store,
+        business_prompt_preparer=FakeBusinessPromptPreparer(),
+    )
+
+    try:
+        call = manager.create_call(
+            {
+                "destination": "1000",
+                "context": {
+                    "identityName": "collector-a",
+                    "personaId": "persona-1",
+                    "debtId": "debt-1",
+                },
+            }
+        )
+
+        assert call["prompt"]["content_hash"] == "hash-prompt"
+        assert "instructions" not in call["prompt"]
+        assert call["opening"]["status"] == "ready"
+        assert manager.get_prompt_snapshot(call["call_id"]) is snapshot
+        _wait_for_status(manager, call["call_id"], "originated")
+        assert events == ["prepare_prompt", "generate_opening", "originate"]
     finally:
         manager.shutdown()
 

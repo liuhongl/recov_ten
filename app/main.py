@@ -19,7 +19,7 @@ from .opening import (
     DoubaoOpeningAudioGenerator,
     OpeningAudioStore,
 )
-from .postgres import PostgresRuntime
+from .postgres import PostgresRuntime, ThreadsafeBusinessPromptPreparer
 from .doubao_s2s_client import (
     DEFAULT_REALTIME_APP_KEY,
     DoubaoS2SCredentials,
@@ -94,10 +94,20 @@ async def _serve(config, *, media_mode: str) -> None:
             timeout_seconds=DEFAULT_OPENING_TIMEOUT_SECONDS,
         )
 
+    business_prompt_preparer = None
+    if postgres_runtime.prompt_store is not None and opening_generator is not None:
+        business_prompt_preparer = ThreadsafeBusinessPromptPreparer(
+            asyncio.get_running_loop(),
+            postgres_runtime.prompt_store,
+            fallback_instructions=DEFAULT_PHONE_INSTRUCTIONS,
+            timeout_seconds=config.postgres.command_timeout_seconds,
+        )
+
     outbound_manager = OutboundCallManager(
         config,
         opening_generator=opening_generator,
         opening_store=opening_store,
+        business_prompt_preparer=business_prompt_preparer,
     )
     outbound_manager.start()
     health_server = HealthServer(config, call_manager=outbound_manager)
@@ -142,6 +152,7 @@ async def _serve(config, *, media_mode: str) -> None:
             model_output_sample_rate=config.doubao_s2s.output_sample_rate,
             realtime_session_factory=session_factory,
             prompt_store=postgres_runtime.prompt_store,
+            prompt_snapshot_provider=outbound_manager.get_prompt_snapshot,
             call_result_writer=postgres_runtime.call_result_writer,
             on_media_connected=outbound_manager.mark_media_connected,
             on_media_disconnected=outbound_manager.mark_media_disconnected,

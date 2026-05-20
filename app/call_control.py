@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from .config import GatewayConfig, OutboundCallConfig
 from .freeswitch_event_socket import (
@@ -29,6 +29,7 @@ from .opening import (
     build_prepared_opening_audio,
     parse_opening_request,
 )
+from .postgres import BusinessPromptPreparation, PromptSnapshot
 
 LOGGER = logging.getLogger(__name__)
 
@@ -86,6 +87,7 @@ class OutboundCallRecord:
     last_event_name: str | None = None
     last_event_at_ms: int | None = None
     opening: OpeningCallMetadata | None = None
+    prompt_snapshot: PromptSnapshot | None = None
 
     def to_dict(self) -> dict[str, Any]:
         diagnostics = _build_call_diagnostics(self)
@@ -119,6 +121,17 @@ class OutboundCallRecord:
             "last_event_name": self.last_event_name,
             "last_event_at_ms": self.last_event_at_ms,
             "opening": None if self.opening is None else self.opening.to_dict(),
+            "prompt": (
+                None
+                if self.prompt_snapshot is None
+                else {
+                    "scene": self.prompt_snapshot.scene,
+                    "version": self.prompt_snapshot.version,
+                    "content_hash": self.prompt_snapshot.content_hash,
+                    "loaded_at_ms": self.prompt_snapshot.loaded_at_ms,
+                    "metadata": self.prompt_snapshot.metadata,
+                }
+            ),
             **diagnostics,
         }
 
@@ -181,6 +194,10 @@ class FreeSwitchOutboundDialer:
 DialerFactory = Callable[[], FreeSwitchOutboundDialer]
 
 
+class BusinessPromptPreparerProtocol(Protocol):
+    def prepare(self, context: dict[str, Any]) -> BusinessPromptPreparation | None: ...
+
+
 class OutboundCallManager:
     def __init__(
         self,
@@ -189,11 +206,13 @@ class OutboundCallManager:
         dialer_factory: DialerFactory | None = None,
         opening_generator: OpeningAudioGenerator | None = None,
         opening_store: OpeningAudioStore | None = None,
+        business_prompt_preparer: BusinessPromptPreparerProtocol | None = None,
     ) -> None:
         self.config = config
         self._dialer_factory = dialer_factory or (lambda: FreeSwitchOutboundDialer(config))
         self._opening_generator = opening_generator
         self._opening_store = opening_store
+        self._business_prompt_preparer = business_prompt_preparer
         self._calls: dict[str, OutboundCallRecord] = {}
         self._lock = threading.RLock()
         self._executor = ThreadPoolExecutor(
@@ -226,8 +245,10 @@ class OutboundCallManager:
 
         request = parse_create_call_request(payload)
         record = self._build_record(request)
-        if request.opening is not None:
-            self._prepare_opening(record, request.opening)
+        business_opening = self._prepare_business_prompt(record)
+        opening = business_opening or request.opening
+        if opening is not None:
+            self._prepare_opening(record, opening)
 
         with self._lock:
             self._calls[record.call_id] = record
@@ -255,6 +276,11 @@ class OutboundCallManager:
         with self._lock:
             record = self._calls.get(call_id)
             return None if record is None else record.to_dict()
+
+    def get_prompt_snapshot(self, call_id: str) -> PromptSnapshot | None:
+        with self._lock:
+            record = self._calls.get(call_id)
+            return None if record is None else record.prompt_snapshot
 
     def is_call_answered(self, call_id: str) -> bool:
         with self._lock:
@@ -331,6 +357,27 @@ class OutboundCallManager:
             ),
             context=request.context,
         )
+
+    def _prepare_business_prompt(
+        self,
+        record: OutboundCallRecord,
+    ) -> OpeningRequest | None:
+        if self._business_prompt_preparer is None:
+            return None
+
+        preparation = self._business_prompt_preparer.prepare(record.context)
+        if preparation is None:
+            return None
+
+        record.prompt_snapshot = preparation.prompt_snapshot
+        LOGGER.info(
+            "business_prompt_ready call_id=%s scene=%s version=%s content_hash=%s",
+            record.call_id,
+            preparation.prompt_snapshot.scene,
+            preparation.prompt_snapshot.version,
+            preparation.prompt_snapshot.content_hash,
+        )
+        return preparation.opening
 
     def _prepare_opening(
         self,

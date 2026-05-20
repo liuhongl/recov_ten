@@ -29,6 +29,11 @@ OPENING_TEMPLATE = (
     "您好，请问是{owner_name}吗？系统显示您当前有{arrears_amount}元待缴费用，"
     "想和您确认一下。"
 )
+BUSINESS_OPENING_TEMPLATE = (
+    "您好，请问是{debtor_name}{title}吗？我是{employee_name}。"
+    "这边来电是想和您确认一下{address}相关的逾期费用，"
+    "目前系统显示待处理金额为{debt_amount}元，方便和您核实一下吗？"
+)
 OPENING_TTS_PREFIX = "请严格朗读以下开场白，不要添加、删减或改写："
 DEFAULT_OPENING_TIMEOUT_SECONDS = 60
 VOICE_SPEAKERS = {
@@ -225,6 +230,48 @@ def parse_opening_request(payload: object) -> OpeningRequest | None:
     )
 
 
+def build_business_opening_request(
+    *,
+    employee_name: object,
+    debtor_name: object,
+    debtor_gender: object,
+    debt_amount: object,
+    address: object,
+    voice: str = "female",
+) -> OpeningRequest:
+    speaker = VOICE_SPEAKERS.get(voice)
+    if speaker is None:
+        raise OpeningGenerationFailed("opening.voice must be female or male")
+
+    employee_name_text = _business_text(employee_name, "employee_name", max_length=32)
+    debtor_name_text = _business_text(debtor_name, "debtor_name", max_length=32)
+    gender_text = "" if debtor_gender is None else str(debtor_gender).strip()
+    amount_text = _arrears_amount(debt_amount)
+    address_text = _business_text(address, "address", max_length=120)
+    title = _debtor_title(gender_text)
+    rendered = BUSINESS_OPENING_TEMPLATE.format(
+        debtor_name=debtor_name_text,
+        title=title,
+        employee_name=employee_name_text,
+        address=address_text,
+        debt_amount=amount_text,
+    )
+    return OpeningRequest(
+        voice=voice,
+        speaker=speaker,
+        business={
+            "employee_name": employee_name_text,
+            "debtor_name": debtor_name_text,
+            "debtor_gender": gender_text,
+            "debt_amount": amount_text,
+            "address": address_text,
+            "title": title,
+        },
+        opening_text=rendered,
+        opening_text_hash=_text_hash(rendered),
+    )
+
+
 def build_prepared_opening_audio(
     *,
     call_id: str,
@@ -291,6 +338,25 @@ def _arrears_amount(value: object) -> str:
         raise OpeningGenerationFailed("arrears_amount is out of range")
     amount = amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     return format(amount, "f")
+
+
+def _business_text(value: object, field_name: str, *, max_length: int) -> str:
+    if value is None:
+        raise OpeningGenerationFailed(f"{field_name} is required")
+    text = " ".join(str(value).split())
+    if not text:
+        raise OpeningGenerationFailed(f"{field_name} is required")
+    if len(text) > max_length:
+        raise OpeningGenerationFailed(f"{field_name} is too long")
+    return text
+
+
+def _debtor_title(gender: str) -> str:
+    if gender == "男":
+        return "先生"
+    if gender == "女":
+        return "女士"
+    return ""
 
 
 def _text_hash(text: str) -> str:

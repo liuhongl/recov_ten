@@ -8,6 +8,7 @@ from app.opening import (
     OpeningAudio,
     OpeningAudioStore,
     OpeningGenerationFailed,
+    build_business_opening_request,
     build_prepared_opening_audio,
     parse_opening_request,
 )
@@ -44,6 +45,46 @@ def test_parse_opening_request_rejects_missing_business_field():
                 },
             }
         )
+
+
+def test_build_business_opening_request_renders_employee_and_debt_snapshot():
+    opening = build_business_opening_request(
+        employee_name="李经理",
+        debtor_name="测试业主",
+        debtor_gender="男",
+        debt_amount="12.34",
+        address="测试小区一号楼",
+    )
+
+    assert opening.voice == "female"
+    assert opening.speaker == "zh_female_vv_jupiter_bigtts"
+    assert opening.business == {
+        "employee_name": "李经理",
+        "debtor_name": "测试业主",
+        "debtor_gender": "男",
+        "debt_amount": "12.34",
+        "address": "测试小区一号楼",
+        "title": "先生",
+    }
+    assert opening.opening_text == (
+        "您好，请问是测试业主先生吗？我是李经理。"
+        "这边来电是想和您确认一下测试小区一号楼相关的逾期费用，"
+        "目前系统显示待处理金额为12.34元，方便和您核实一下吗？"
+    )
+    assert len(opening.opening_text_hash) == 64
+
+
+def test_build_business_opening_request_uses_empty_title_for_unknown_gender():
+    opening = build_business_opening_request(
+        employee_name="李经理",
+        debtor_name="测试业主",
+        debtor_gender="",
+        debt_amount="12.34",
+        address="测试小区一号楼",
+    )
+
+    assert "测试业主吗？" in opening.opening_text
+    assert opening.business["title"] == ""
 
 
 def test_build_prepared_opening_audio_resamples_to_phone_frames_and_adds_tail():

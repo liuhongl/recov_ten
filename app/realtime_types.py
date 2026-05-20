@@ -8,6 +8,14 @@ DEFAULT_OUTPUT_SAMPLE_RATE = 24000
 
 
 @dataclass(frozen=True)
+class RealtimeDialogConfig:
+    bot_name: str | None = None
+    system_role: str | None = None
+    speaking_style: str | None = None
+    model: str | None = None
+
+
+@dataclass(frozen=True)
 class RealtimeTurnResult:
     turn_id: int
     input_audio_bytes: int

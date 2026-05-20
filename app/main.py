@@ -132,6 +132,7 @@ async def _serve(config, *, media_mode: str) -> None:
             turn_id_start,
             instructions,
             speaker,
+            dialog_config,
         ):
             return DoubaoS2SServerVadSession(
                 doubao_credentials,
@@ -139,6 +140,7 @@ async def _serve(config, *, media_mode: str) -> None:
                     session_config,
                     system_prompt=instructions,
                     speaker=speaker or session_config.speaker,
+                    dialog=dialog_config,
                 ),
                 turn_id_start=turn_id_start,
                 on_speech_started=on_speech_started,

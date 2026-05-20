@@ -4,6 +4,7 @@ import asyncio
 import json
 import struct
 
+import pytest
 from websockets.legacy.server import serve
 
 from app.doubao_s2s_client import (
@@ -35,6 +36,7 @@ from app.doubao_s2s_client import (
     _format_handshake_error,
     _redact_provider_error,
 )
+from app.realtime_types import RealtimeDialogConfig
 
 
 class _InvalidStatus:
@@ -75,6 +77,37 @@ def test_start_session_payload_uses_selected_speaker():
         "bits": 16,
     }
     assert payload["asr"]["language"] == "zh-CN"
+
+
+def test_start_session_payload_includes_dialog_identity_fields():
+    payload = build_start_session_payload(
+        DoubaoS2SSessionConfig(
+            system_prompt="完整业务提示词",
+            dialog=RealtimeDialogConfig(
+                bot_name="物业中心小明",
+                system_role="你是物业中心小明，负责逾期费用提醒，禁止自称豆包。",
+                speaking_style="电话客服口吻，简短、自然、礼貌但坚定。",
+                model="1.2.1.1",
+            ),
+        )
+    )
+
+    assert payload["dialog"] == {
+        "bot_name": "物业中心小明",
+        "system_role": "你是物业中心小明，负责逾期费用提醒，禁止自称豆包。",
+        "speaking_style": "电话客服口吻，简短、自然、礼貌但坚定。",
+        "extra": {"model": "1.2.1.1"},
+    }
+    assert payload["prompt"]["system"] == "完整业务提示词"
+
+
+def test_session_config_rejects_too_long_dialog_bot_name():
+    config = DoubaoS2SSessionConfig(
+        dialog=RealtimeDialogConfig(bot_name="一二三四五六七八九十一二三四五六七八九十一")
+    )
+
+    with pytest.raises(ValueError, match="dialog.bot_name"):
+        config.validate()
 
 
 def test_event_frame_roundtrip_with_session_id():

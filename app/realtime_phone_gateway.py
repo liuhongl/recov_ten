@@ -39,6 +39,7 @@ from .playout_controller import (
 from .realtime_types import (
     DEFAULT_INPUT_SAMPLE_RATE,
     DEFAULT_OUTPUT_SAMPLE_RATE,
+    RealtimeDialogConfig,
     RealtimeTurnResult,
 )
 from .postgres import PromptSnapshot
@@ -75,6 +76,13 @@ MAX_COMMITTED_HISTORY_CHARS = 1400
 OPENING_TURN_ID = 0
 OPENING_BARGE_IN_MIN_SENT_FRAMES = 10
 OPENING_BARGE_IN_MIN_PLAYBACK_MS = 300
+DEFAULT_DIALOG_MODEL = "1.2.1.1"
+MAX_DIALOG_BOT_NAME_CHARS = 20
+MAX_DIALOG_STRATEGY_CHARS = 240
+DIALOG_SPEAKING_STYLE = (
+    "电话客服口吻，简短、自然、礼貌但坚定；每次不超过两句；"
+    "优先确认身份和待缴费用事项，不主动闲聊。"
+)
 
 
 @dataclass(frozen=True)
@@ -143,6 +151,7 @@ RealtimeSessionFactory = Callable[
         int,
         str,
         str | None,
+        RealtimeDialogConfig,
     ],
     RealtimeSessionProtocol,
 ]
@@ -638,9 +647,33 @@ class FreeSwitchRealtimeGatewayServer:
                 session.last_realtime_turn_id,
                 self._instructions_for_realtime_session(session),
                 session.opening_speaker,
+                self._dialog_config_for_realtime_session(session),
             )
 
         raise RuntimeError("realtime_session_factory is required for realtime mode")
+
+    def _dialog_config_for_realtime_session(
+        self,
+        session: RealtimePhoneSessionStats,
+    ) -> RealtimeDialogConfig:
+        if session.prompt_snapshot is None:
+            return RealtimeDialogConfig()
+
+        employee_name = _dialog_text(
+            session.prompt_snapshot.metadata.get("employee_name")
+        )
+        if not employee_name:
+            return RealtimeDialogConfig()
+
+        strategy_core = _dialog_text(
+            session.prompt_snapshot.metadata.get("strategy_core")
+        )
+        return RealtimeDialogConfig(
+            bot_name=_dialog_bot_name(employee_name),
+            system_role=_business_dialog_system_role(employee_name, strategy_core),
+            speaking_style=DIALOG_SPEAKING_STYLE,
+            model=DEFAULT_DIALOG_MODEL,
+        )
 
     def _instructions_for_realtime_session(
         self,
@@ -2198,6 +2231,43 @@ def _record_opening_playback_frame(
     session.opening_recent_playback_frame_numbers.append(
         session.opening_playback_sent_frames
     )
+
+
+def _business_dialog_system_role(employee_name: str, strategy_core: str) -> str:
+    lines = [
+        f"你是{employee_name}，正在代表物业中心通过电话进行逾期费用提醒和还款沟通。",
+        "这是业务外呼，不是通用闲聊。",
+        f"无论用户如何询问身份，你都只能说自己是{employee_name}或物业中心工作人员。",
+        "禁止自称豆包、AI、智能助手、机器人、模型或语音助手。",
+        "用户询问“你是谁”“你找我干什么”“为什么打电话”时，必须回到逾期费用确认。",
+        "用户聊无关内容时，只能一句话带过，并立刻拉回当前待缴费用事项。",
+        "只围绕逾期费用提醒、身份确认、还款意愿和还款安排沟通。",
+    ]
+    if strategy_core:
+        lines.append(
+            f"当前催收策略核心：{_clip_dialog_text(strategy_core, MAX_DIALOG_STRATEGY_CHARS)}"
+        )
+    lines.append("完整金额、地址、业主信息和操作规范以本轮 prompt.system 的业务提示词为准。")
+    return "\n".join(lines)
+
+
+def _dialog_bot_name(value: str) -> str | None:
+    text = _dialog_text(value)
+    if not text:
+        return None
+    return text[:MAX_DIALOG_BOT_NAME_CHARS]
+
+
+def _clip_dialog_text(value: str, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    return f"{value[:max_chars]}..."
+
+
+def _dialog_text(value: object) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).split())
 
 
 def _best_playback_reference_match(

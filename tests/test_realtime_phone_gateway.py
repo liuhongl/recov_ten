@@ -18,6 +18,7 @@ from app.realtime_phone_gateway import (
     RealtimePhoneSessionStats,
 )
 from app.realtime_types import RealtimeTurnResult
+from app.realtime_types import RealtimeDialogConfig
 
 
 def test_realtime_phone_gateway_plays_model_audio_back_to_client():
@@ -144,6 +145,96 @@ def test_realtime_instructions_anchor_opening_confirmation_to_fee_followup():
     assert "如果用户最新一句是在确认身份" in instructions
     assert "必须继续围绕待缴费用确认" in instructions
     assert "严禁主动切换到化妆" in instructions
+
+
+def test_realtime_dialog_config_anchors_postgres_employee_identity():
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-call",
+        session_id="test-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+        prompt_snapshot=PromptSnapshot(
+            scene="项目员工:7",
+            version="postgres",
+            instructions="完整业务提示词",
+            content_hash="hash-prompt",
+            loaded_at_ms=123,
+            metadata={
+                "source": "postgres",
+                "employee_name": "物业中心小明",
+                "strategy_core": "先确认本人，再说明待缴物业费。",
+            },
+        ),
+    )
+
+    dialog_config = server._dialog_config_for_realtime_session(session)
+
+    assert dialog_config == RealtimeDialogConfig(
+        bot_name="物业中心小明",
+        system_role=dialog_config.system_role,
+        speaking_style=dialog_config.speaking_style,
+        model="1.2.1.1",
+    )
+    assert "物业中心小明" in dialog_config.system_role
+    assert "禁止自称豆包" in dialog_config.system_role
+    assert "业务外呼" in dialog_config.system_role
+    assert "先确认本人，再说明待缴物业费。" in dialog_config.system_role
+    assert "完整业务提示词" not in dialog_config.system_role
+    assert "电话客服" in dialog_config.speaking_style
+
+
+def test_realtime_gateway_passes_dialog_config_to_realtime_factory():
+    captured: dict[str, RealtimeDialogConfig] = {}
+
+    def session_factory(
+        on_speech_started,
+        on_delta,
+        on_turn_completed,
+        turn_id_start,
+        instructions,
+        speaker,
+        dialog_config,
+    ):
+        captured["dialog_config"] = dialog_config
+        return FakeRealtimeSession(b"").bind(
+            on_speech_started,
+            on_delta,
+            on_turn_completed,
+            turn_id_start,
+            instructions,
+            speaker,
+            dialog_config,
+        )
+
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+        realtime_session_factory=session_factory,
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-call",
+        session_id="test-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+        prompt_snapshot=PromptSnapshot(
+            scene="项目员工:7",
+            version="postgres",
+            instructions="完整业务提示词",
+            content_hash="hash-prompt",
+            loaded_at_ms=123,
+            metadata={"source": "postgres", "employee_name": "物业中心小明"},
+        ),
+    )
+
+    server._create_realtime_session(session)
+
+    assert captured["dialog_config"].bot_name == "物业中心小明"
 
 
 def test_realtime_gateway_prefers_prebuilt_prompt_snapshot_by_call_id():
@@ -950,6 +1041,7 @@ class FakeRealtimeSession:
         self.turn_id_starts: list[int] = []
         self.instructions: list[str] = []
         self.speakers: list[str | None] = []
+        self.dialog_configs: list[RealtimeDialogConfig | None] = []
         self.second_turn_announced = False
         self.completed_first_turn = False
         self.on_speech_started: Callable[[int], Awaitable[None]] | None = None
@@ -964,6 +1056,7 @@ class FakeRealtimeSession:
         turn_id_start: int,
         instructions: str,
         speaker: str | None = None,
+        dialog_config: RealtimeDialogConfig | None = None,
     ):
         self.on_speech_started = on_speech_started
         self.on_delta = on_delta
@@ -971,6 +1064,7 @@ class FakeRealtimeSession:
         self.turn_id_starts.append(turn_id_start)
         self.instructions.append(instructions)
         self.speakers.append(speaker)
+        self.dialog_configs.append(dialog_config)
         return self
 
     async def connect(self) -> None:

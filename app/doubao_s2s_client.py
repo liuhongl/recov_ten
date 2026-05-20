@@ -9,7 +9,7 @@ import time
 import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from websockets.legacy.client import connect
@@ -20,6 +20,7 @@ from .audio_codec import (
     pcm_s16le_frame_bytes,
     split_audio_frames,
 )
+from .realtime_types import RealtimeDialogConfig
 
 DEFAULT_WS_URL = "wss://openspeech.bytedance.com/api/v3/realtime/dialogue"
 DEFAULT_RESOURCE_ID = "volc.speech.dialog"
@@ -134,6 +135,7 @@ class DoubaoS2SSessionConfig:
     temperature: float = 0.3
     top_p: float = 0.9
     max_tokens: int = 256
+    dialog: RealtimeDialogConfig = field(default_factory=RealtimeDialogConfig)
 
     def validate(self) -> None:
         if not self.speaker:
@@ -146,6 +148,8 @@ class DoubaoS2SSessionConfig:
             raise ValueError("only mono audio is supported")
         if self.bits != DEFAULT_BITS:
             raise ValueError("only 16-bit PCM is supported")
+        if self.dialog.bot_name and len(self.dialog.bot_name) > 20:
+            raise ValueError("dialog.bot_name must be at most 20 characters")
 
 
 @dataclass(frozen=True)
@@ -492,7 +496,7 @@ def build_start_session_payload(config: DoubaoS2SSessionConfig) -> dict[str, Any
                 "bits": config.bits,
             },
         },
-        "dialog": {},
+        "dialog": _build_dialog_payload(config.dialog),
         "prompt": {
             "system": config.system_prompt,
         },
@@ -502,6 +506,19 @@ def build_start_session_payload(config: DoubaoS2SSessionConfig) -> dict[str, Any
             "max_tokens": config.max_tokens,
         },
     }
+    return payload
+
+
+def _build_dialog_payload(config: RealtimeDialogConfig) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if config.bot_name:
+        payload["bot_name"] = config.bot_name
+    if config.system_role:
+        payload["system_role"] = config.system_role
+    if config.speaking_style:
+        payload["speaking_style"] = config.speaking_style
+    if config.model:
+        payload["extra"] = {"model": config.model}
     return payload
 
 

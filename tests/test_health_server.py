@@ -122,12 +122,32 @@ def test_outbound_test_page_is_served():
         assert "Dialplan Extension（接通后入口）" in body
         assert "Dialplan Context（拨号上下文）" in body
         assert "业务标记（日志标记，不影响拨号）" in body
-        assert 'id="openingEnabled"' in body
-        assert 'id="openingVoice"' in body
-        assert 'id="ownerName"' in body
-        assert 'id="arrearsAmount"' in body
-        assert 'payload.opening = {' in body
-        assert 'delete payload.opening_enabled' in body
+        assert "数据库业务参数" in body
+        assert 'id="identityName"' in body
+        assert 'name="identityName"' in body
+        assert 'value="项目员工"' in body
+        assert 'id="employeeName"' in body
+        assert 'name="employeeName"' in body
+        assert 'value="物业中心小明"' in body
+        assert 'id="personaId"' in body
+        assert 'name="personaId"' in body
+        assert 'value="7"' in body
+        assert 'id="debtId"' in body
+        assert 'name="debtId"' in body
+        assert 'value="2056563388954320898"' in body
+        assert "启用手工开场白" not in body
+        assert "开场白音色" not in body
+        assert "业主姓名" not in body
+        assert "待缴金额" not in body
+        assert 'id="openingEnabled"' not in body
+        assert 'id="openingVoice"' not in body
+        assert 'id="ownerName"' not in body
+        assert 'id="arrearsAmount"' not in body
+        assert "const context = {};" in body
+        assert 'for (const key of ["identityName", "employeeName", "personaId", "debtId"])' in body
+        assert "payload.context = context;" in body
+        assert 'payload.opening = {' not in body
+        assert 'delete payload.opening_enabled' not in body
         assert "ready 表示页面接口可用" not in body
         assert "外呼测试" in body
         assert "交接文档" in body

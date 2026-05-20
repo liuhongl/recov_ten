@@ -29,6 +29,14 @@ order by random()
 limit 1
 """
 
+IDENTITY_NAME_BY_NAME_SQL = """
+select name
+from call_identity_name
+where identity_name = $1 and name = $2
+order by id
+limit 1
+"""
+
 STRATEGY_SQL = """
 select strategy_core
 from persona_call_strategy
@@ -101,9 +109,16 @@ class PostgresPromptStore:
         if params is None:
             return None
 
-        identity_name, persona_id, debt_id = params
+        identity_name, employee_name, persona_id, debt_id = params
         async with self.pool.acquire() as conn:
-            identity_row = await conn.fetchrow(IDENTITY_NAME_SQL, identity_name)
+            if employee_name is None:
+                identity_row = await conn.fetchrow(IDENTITY_NAME_SQL, identity_name)
+            else:
+                identity_row = await conn.fetchrow(
+                    IDENTITY_NAME_BY_NAME_SQL,
+                    identity_name,
+                    employee_name,
+                )
             strategy_row = await conn.fetchrow(STRATEGY_SQL, identity_name, persona_id)
             debt_row = await conn.fetchrow(DEBT_RECORD_SQL, debt_id)
 
@@ -168,6 +183,7 @@ class PostgresPromptStore:
                     "personaId": str(persona_id),
                     "debtId": str(debt_id),
                     "employee_name": _prompt_text(employee_name),
+                    "strategy_core": _prompt_text(strategy),
                     "opening_text_hash": opening.opening_text_hash,
                 },
             ),
@@ -283,13 +299,14 @@ def _load_asyncpg() -> Any:
 
 def _business_prompt_params(
     context: Mapping[str, Any],
-) -> tuple[str, int, int] | None:
+) -> tuple[str, str | None, int, int] | None:
     identity_name = _context_text(context.get("identityName"))
+    employee_name = _context_text(context.get("employeeName"))
     persona_id = _context_int(context.get("personaId"))
     debt_id = _context_int(context.get("debtId"))
     if identity_name is None or persona_id is None or debt_id is None:
         return None
-    return identity_name, persona_id, debt_id
+    return identity_name, employee_name, persona_id, debt_id
 
 
 def _context_text(value: object) -> str | None:

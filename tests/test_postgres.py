@@ -123,6 +123,7 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert prep.prompt_snapshot.metadata["identityName"] == "collector-a"
     assert prep.prompt_snapshot.metadata["personaId"] == "3"
     assert prep.prompt_snapshot.metadata["debtId"] == "2049810626160668673"
+    assert prep.prompt_snapshot.metadata["strategy_core"] == "先确认本人，再说明费用。"
     assert prep.opening.opening_text.startswith("您好，请问是测试业主女士吗？我是李经理。")
 
 
@@ -141,6 +142,47 @@ def test_postgres_prompt_store_returns_none_when_business_context_missing():
     )
 
     assert prep is None
+
+
+def test_postgres_prompt_store_can_pin_employee_name_from_context():
+    class Conn:
+        async def fetchrow(self, query, *args):
+            if "from call_identity_name" in query:
+                assert "and name = $2" in query
+                assert args == ("项目员工", "物业中心小明")
+                return {"name": "物业中心小明"}
+            if "from persona_call_strategy" in query:
+                assert args == ("项目员工", 7)
+                return {"strategy_core": "围绕物业费提醒。"}
+            if "from debt_record" in query:
+                assert args == (2056563388954320898,)
+                return {
+                    "debtor_name": "测试业主",
+                    "address": "测试小区一号楼",
+                    "debt_amount": "12.34",
+                    "debtor_gender": "女",
+                    "debtor_age": 38,
+                }
+            raise AssertionError(query)
+
+    store = PostgresPromptStore(FakePool(Conn()))
+
+    prep = asyncio.run(
+        store.prepare_business_prompt(
+            {
+                "identityName": "项目员工",
+                "employeeName": "物业中心小明",
+                "personaId": "7",
+                "debtId": "2056563388954320898",
+            },
+            fallback_instructions="fallback",
+        )
+    )
+
+    assert prep is not None
+    assert prep.prompt_snapshot.metadata["employee_name"] == "物业中心小明"
+    assert "你是物业中心小明" in prep.prompt_snapshot.instructions
+    assert prep.opening.opening_text.startswith("您好，请问是测试业主女士吗？我是物业中心小明。")
 
 
 def test_threadsafe_business_prompt_preparer_runs_store_on_event_loop():

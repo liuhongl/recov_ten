@@ -341,6 +341,16 @@
         color: var(--muted);
       }
 
+      .form-subtitle {
+        grid-column: 1 / -1;
+        margin-top: 4px;
+        padding-top: 12px;
+        border-top: 1px solid var(--line);
+        color: var(--text);
+        font-size: 14px;
+        font-weight: 700;
+      }
+
       label.wide {
         grid-column: 1 / -1;
       }
@@ -353,20 +363,6 @@
         border-radius: 6px;
         padding: 8px 10px;
         background: var(--surface);
-        color: var(--text);
-      }
-
-      input[type="checkbox"] {
-        width: 18px;
-        min-height: 18px;
-        padding: 0;
-      }
-
-      .check-field {
-        display: flex;
-        min-height: 38px;
-        align-items: center;
-        gap: 10px;
         color: var(--text);
       }
 
@@ -634,24 +630,22 @@
                   <span class="field-label">业务标记（日志标记，不影响拨号）</span>
                   <input id="metadataScene" name="metadata_scene" value="local-outbound-test" />
                 </label>
-                <label class="wide check-field">
-                  <input id="openingEnabled" name="opening_enabled" type="checkbox" />
-                  <span>启用个性化开场白</span>
+                <div class="form-subtitle">数据库业务参数</div>
+                <label>
+                  数字员工身份 identityName
+                  <input id="identityName" name="identityName" value="项目员工" />
                 </label>
                 <label>
-                  开场白音色
-                  <select id="openingVoice" name="opening_voice">
-                    <option value="female">女声</option>
-                    <option value="male">男声</option>
-                  </select>
+                  指定客服 employeeName
+                  <input id="employeeName" name="employeeName" value="物业中心小明" />
                 </label>
                 <label>
-                  业主姓名
-                  <input id="ownerName" name="owner_name" value="测试业主" />
+                  策略 personaId
+                  <input id="personaId" name="personaId" value="7" />
                 </label>
                 <label>
-                  待缴金额
-                  <input id="arrearsAmount" name="arrears_amount" value="12.34" inputmode="decimal" />
+                  债务记录 debtId
+                  <input id="debtId" name="debtId" value="2056563388954320898" />
                 </label>
               </div>
               <div class="form-actions">
@@ -705,10 +699,6 @@
       const dialplanContextInput = document.getElementById("dialplanContext");
       const endpointInput = document.getElementById("endpoint");
       const metadataSceneInput = document.getElementById("metadataScene");
-      const openingEnabledInput = document.getElementById("openingEnabled");
-      const openingVoiceInput = document.getElementById("openingVoice");
-      const ownerNameInput = document.getElementById("ownerName");
-      const arrearsAmountInput = document.getElementById("arrearsAmount");
 
       let currentCallId = null;
 
@@ -925,23 +915,21 @@
           payload.originate_timeout_seconds = Number(payload.originate_timeout_seconds);
         }
 
+        const context = {};
         if (payload.metadata_scene) {
-          payload.context = { scene: payload.metadata_scene };
-          delete payload.metadata_scene;
+          context.scene = payload.metadata_scene;
         }
-        if (payload.opening_enabled) {
-          payload.opening = {
-            voice: payload.opening_voice || "female",
-            business: {
-              owner_name: payload.owner_name || "",
-              arrears_amount: payload.arrears_amount || "",
-            },
-          };
+        delete payload.metadata_scene;
+        for (const key of ["identityName", "employeeName", "personaId", "debtId"]) {
+          if (payload[key]) {
+            context[key] = payload[key];
+          }
+          delete payload[key];
         }
-        delete payload.opening_enabled;
-        delete payload.opening_voice;
-        delete payload.owner_name;
-        delete payload.arrears_amount;
+        if (Object.keys(context).length > 0) {
+          payload.context = context;
+        }
+
         delete payload.scenario_preset;
         return payload;
       }
@@ -964,10 +952,6 @@
         dialplanContextInput.value = "default";
         endpointInput.value = preset.endpoint;
         metadataSceneInput.value = preset.scene;
-        openingEnabledInput.checked = false;
-        openingVoiceInput.value = "female";
-        ownerNameInput.value = "测试业主";
-        arrearsAmountInput.value = "12.34";
       }
 
       scenarioPreset.addEventListener("change", applyScenarioPreset);

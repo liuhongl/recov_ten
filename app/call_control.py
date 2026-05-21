@@ -659,6 +659,7 @@ def build_originate_command(record: OutboundCallRecord) -> str:
         "origination_caller_id_number": record.caller_id_number,
         "originate_timeout": str(record.originate_timeout_seconds),
         "hangup_after_bridge": "true",
+        "ignore_early_media": "true",
         "sip_realtime_gateway_call_id": record.call_id,
     }
     if record.external_call_id:

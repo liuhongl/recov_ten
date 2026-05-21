@@ -43,6 +43,7 @@ def test_build_originate_command_uses_local_dialplan():
     assert command.startswith("originate {")
     assert "origination_uuid=call-1" in command
     assert "origination_caller_id_number=9000" in command
+    assert "ignore_early_media=true" in command
     assert "sip_realtime_external_call_id=biz-1" in command
     assert command.endswith("}user/1000 9199 XML default")
 

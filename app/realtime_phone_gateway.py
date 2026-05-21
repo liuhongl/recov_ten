@@ -85,7 +85,7 @@ OPENING_BARGE_IN_MIN_SENT_FRAMES = 10
 OPENING_BARGE_IN_MIN_PLAYBACK_MS = 300
 DEFAULT_DIALOG_MODEL = "1.2.1.1"
 MAX_DIALOG_BOT_NAME_CHARS = 20
-MAX_DIALOG_STRATEGY_CHARS = 240
+DIALOG_PROMPT_SOFT_LIMIT_CHARS = 12000
 DIALOG_SPEAKING_STYLE = BUSINESS_DIALOG_SPEAKING_STYLE
 
 
@@ -669,13 +669,28 @@ class FreeSwitchRealtimeGatewayServer:
         if not employee_name:
             return RealtimeDialogConfig()
 
-        strategy_core = _dialog_text(
-            session.prompt_snapshot.metadata.get("strategy_core")
+        identity_name = _dialog_text(
+            session.prompt_snapshot.metadata.get("identityName")
+        )
+        speaking_style = _dialog_text(
+            session.prompt_snapshot.metadata.get("speaking_style")
+        )
+        system_role = _business_dialog_system_role(
+            employee_name,
+            identity_name,
+            business_instructions=self._instructions_for_realtime_session(session),
+        )
+        speaking_style = speaking_style or DIALOG_SPEAKING_STYLE
+        _log_dialog_prompt_lengths(
+            call_id=session.call_id,
+            session_id=session.session_id,
+            system_role=system_role,
+            speaking_style=speaking_style,
         )
         return RealtimeDialogConfig(
             bot_name=_dialog_bot_name(employee_name),
-            system_role=_business_dialog_system_role(employee_name, strategy_core),
-            speaking_style=DIALOG_SPEAKING_STYLE,
+            system_role=system_role,
+            speaking_style=speaking_style,
             model=DEFAULT_DIALOG_MODEL,
         )
 
@@ -2237,23 +2252,76 @@ def _record_opening_playback_frame(
     )
 
 
-def _business_dialog_system_role(employee_name: str, strategy_core: str) -> str:
+def _business_dialog_system_role(
+    employee_name: str,
+    identity_name: str,
+    *,
+    business_instructions: str | None = None,
+) -> str:
+    role = _business_identity_role(identity_name)
     lines = [
-        f"你是{employee_name}，正在代表物业中心通过电话进行逾期费用提醒和还款沟通。",
-        "这是业务外呼，不是通用闲聊。",
-        f"无论用户如何询问身份，你都只能说自己是{employee_name}或物业中心工作人员。",
+        f"你是{employee_name}，{role}",
+        "你代表物业中心联系小区业主或相关费用联系人，进行物业费用事项提醒、信息核实和服务协助。",
         "禁止自称豆包、AI、智能助手、机器人、模型或语音助手。",
-        "用户询问“你是谁”“你找我干什么”“为什么打电话”时，必须回到逾期费用确认。",
-        "用户聊无关内容时，只能一句话带过，并立刻拉回当前待缴费用事项。",
-        "只围绕逾期费用提醒、身份确认、还款意愿和还款安排沟通。",
-        *BUSINESS_DIALOG_STYLE_RULES,
     ]
-    if strategy_core:
-        lines.append(
-            f"当前催收策略核心：{_clip_dialog_text(strategy_core, MAX_DIALOG_STRATEGY_CHARS)}"
+    if business_instructions:
+        lines.extend(
+            [
+                "",
+                "# 业务提示词",
+                business_instructions.strip(),
+            ]
         )
-    lines.append("完整金额、地址、业主信息和操作规范以本轮 prompt.system 的业务提示词为准。")
     return "\n".join(lines)
+
+
+def _business_identity_role(identity_name: str) -> str:
+    if identity_name == "项目员工":
+        return "是小区物业项目员工。"
+    if identity_name == "企业客服":
+        return "是物业客服中心工作人员。"
+    if identity_name == "企业法务":
+        return "是物业公司法务部工作人员。"
+    if identity_name == "第三方律师":
+        return "是受物业公司委托的法律事务联系人。"
+    return "是物业服务工作人员。"
+
+
+def _log_dialog_prompt_lengths(
+    *,
+    call_id: str,
+    session_id: str,
+    system_role: str,
+    speaking_style: str | None,
+) -> None:
+    system_role_chars = len(system_role)
+    speaking_style_chars = len(speaking_style or "")
+    total_chars = system_role_chars + speaking_style_chars
+    LOGGER.info(
+        "dialog_prompt_lengths call_id=%s session_id=%s "
+        "system_role_chars=%s speaking_style_chars=%s total_chars=%s "
+        "soft_limit_chars=%s",
+        call_id,
+        session_id,
+        system_role_chars,
+        speaking_style_chars,
+        total_chars,
+        DIALOG_PROMPT_SOFT_LIMIT_CHARS,
+    )
+    if total_chars <= DIALOG_PROMPT_SOFT_LIMIT_CHARS:
+        return
+
+    LOGGER.warning(
+        "dialog_prompt_soft_limit_exceeded call_id=%s session_id=%s "
+        "system_role_chars=%s speaking_style_chars=%s total_chars=%s "
+        "soft_limit_chars=%s",
+        call_id,
+        session_id,
+        system_role_chars,
+        speaking_style_chars,
+        total_chars,
+        DIALOG_PROMPT_SOFT_LIMIT_CHARS,
+    )
 
 
 def _dialog_bot_name(value: str) -> str | None:
@@ -2261,12 +2329,6 @@ def _dialog_bot_name(value: str) -> str | None:
     if not text:
         return None
     return text[:MAX_DIALOG_BOT_NAME_CHARS]
-
-
-def _clip_dialog_text(value: str, max_chars: int) -> str:
-    if len(value) <= max_chars:
-        return value
-    return f"{value[:max_chars]}..."
 
 
 def _dialog_text(value: object) -> str:

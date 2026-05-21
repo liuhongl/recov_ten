@@ -13,6 +13,7 @@ from app.opening import OpeningAudioStore, PreparedOpeningAudio
 from app.postgres import PromptSnapshot
 from app.realtime_phone_gateway import (
     ConversationExchange,
+    DIALOG_PROMPT_SOFT_LIMIT_CHARS,
     FreeSwitchRealtimeGatewayServer,
     PlaybackFrame,
     RealtimePhoneSessionStats,
@@ -144,7 +145,9 @@ def test_realtime_instructions_anchor_opening_confirmation_to_fee_followup():
     assert "待缴费用确认电话" in instructions
     assert "如果用户最新一句是在确认身份" in instructions
     assert "必须继续围绕待缴费用确认" in instructions
-    assert "后续回复必须延续开场白的礼貌核实口吻" in instructions
+    assert "以已播放开场白为语气参照" in instructions
+    assert "保持相同的身份、称呼方式、语气基调和沟通边界" in instructions
+    assert "不要突然变得更强硬、更随意" in instructions
     assert "全程使用“您”" in instructions
     assert "不要说“你家”" in instructions
     assert "避免使用“尽快缴纳”“不影响物业服务”" in instructions
@@ -165,13 +168,15 @@ def test_realtime_dialog_config_anchors_postgres_employee_identity():
         prompt_snapshot=PromptSnapshot(
             scene="项目员工:7",
             version="postgres",
-            instructions="完整业务提示词",
+            instructions="完整业务提示词\n先确认本人，再说明待缴物业费。",
             content_hash="hash-prompt",
             loaded_at_ms=123,
             metadata={
                 "source": "postgres",
+                "identityName": "项目员工",
                 "employee_name": "物业中心小明",
                 "strategy_core": "先确认本人，再说明待缴物业费。",
+                "speaking_style": "协调型、熟人式、耐心沟通的物业工作人员口吻。",
             },
         ),
     )
@@ -186,16 +191,49 @@ def test_realtime_dialog_config_anchors_postgres_employee_identity():
     )
     assert "物业中心小明" in dialog_config.system_role
     assert "禁止自称豆包" in dialog_config.system_role
-    assert "业务外呼" in dialog_config.system_role
-    assert "后续回复必须延续开场白的礼貌核实口吻" in dialog_config.system_role
-    assert "全程使用“您”" in dialog_config.system_role
-    assert "不要说“你家”" in dialog_config.system_role
-    assert "避免使用“尽快缴纳”“不影响物业服务”" in dialog_config.system_role
+    assert "小区物业项目员工" in dialog_config.system_role
     assert "先确认本人，再说明待缴物业费。" in dialog_config.system_role
-    assert "完整业务提示词" not in dialog_config.system_role
-    assert "电话客服" in dialog_config.speaking_style
-    assert "全程使用“您”" in dialog_config.speaking_style
-    assert "不用“你家”" in dialog_config.speaking_style
+    assert "完整业务提示词" in dialog_config.system_role
+    assert "不能当作本轮用户的新问题" in dialog_config.system_role
+    assert dialog_config.speaking_style == "协调型、熟人式、耐心沟通的物业工作人员口吻。"
+
+
+def test_realtime_dialog_config_warns_when_dialog_prompt_is_too_long(caplog):
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+    )
+    long_business_prompt = "业务规则" * DIALOG_PROMPT_SOFT_LIMIT_CHARS
+    session = RealtimePhoneSessionStats(
+        call_id="test-call",
+        session_id="test-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+        prompt_snapshot=PromptSnapshot(
+            scene="项目员工:7",
+            version="postgres",
+            instructions=long_business_prompt,
+            content_hash="hash-prompt",
+            loaded_at_ms=123,
+            metadata={
+                "source": "postgres",
+                "identityName": "项目员工",
+                "employee_name": "物业中心小明",
+                "speaking_style": "协调型、熟人式、耐心沟通的物业工作人员口吻。",
+            },
+        ),
+    )
+
+    with caplog.at_level("WARNING"):
+        dialog_config = server._dialog_config_for_realtime_session(session)
+
+    assert long_business_prompt in dialog_config.system_role
+    assert "dialog_prompt_soft_limit_exceeded" in caplog.text
+    assert "system_role_chars=" in caplog.text
+    assert "speaking_style_chars=" in caplog.text
+    assert "soft_limit_chars=" in caplog.text
+    assert long_business_prompt not in caplog.text
 
 
 def test_realtime_gateway_passes_dialog_config_to_realtime_factory():
@@ -245,6 +283,7 @@ def test_realtime_gateway_passes_dialog_config_to_realtime_factory():
     server._create_realtime_session(session)
 
     assert captured["dialog_config"].bot_name == "物业中心小明"
+    assert "完整业务提示词" in captured["dialog_config"].system_role
 
 
 def test_realtime_gateway_prefers_prebuilt_prompt_snapshot_by_call_id():

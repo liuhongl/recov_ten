@@ -22,6 +22,7 @@ from .doubao_s2s_client import (
     DoubaoS2SSessionConfig,
     run_doubao_s2s_text_probe,
 )
+from .realtime_types import RealtimeDialogConfig
 
 LOGGER = logging.getLogger(__name__)
 
@@ -30,9 +31,8 @@ OPENING_TEMPLATE = (
     "想和您确认一下。"
 )
 BUSINESS_OPENING_TEMPLATE = (
-    "您好，请问是{debtor_name}{title}吗？我是{employee_name}。"
-    "这边来电是想和您确认一下{address}相关的逾期费用，"
-    "目前系统显示待处理金额为{debt_amount}元，方便和您核实一下吗？"
+    "您好，请问是{salutation}吗？我是{employee_name}。"
+    "这边有一项物业费事项需要和您本人核实一下，请问现在方便确认吗？"
 )
 OPENING_TTS_PREFIX = "请严格朗读以下开场白，不要添加、删减或改写："
 DEFAULT_OPENING_TIMEOUT_SECONDS = 60
@@ -59,6 +59,7 @@ class OpeningRequest:
     business: dict[str, str]
     opening_text: str
     opening_text_hash: str
+    speaking_style: str | None = None
 
 
 @dataclass(frozen=True)
@@ -163,6 +164,7 @@ class DoubaoOpeningAudioGenerator:
         session_config = DoubaoS2SSessionConfig(
             speaker=opening.speaker,
             output_sample_rate=self.config.output_sample_rate,
+            dialog=RealtimeDialogConfig(speaking_style=opening.speaking_style),
         )
         input_text = f"{OPENING_TTS_PREFIX}{opening.opening_text}"
         try:
@@ -237,6 +239,8 @@ def build_business_opening_request(
     debtor_gender: object,
     debt_amount: object,
     address: object,
+    speaking_style: object | None = None,
+    opening_template: object | None = None,
     voice: str = "female",
 ) -> OpeningRequest:
     speaker = VOICE_SPEAKERS.get(voice)
@@ -249,26 +253,29 @@ def build_business_opening_request(
     amount_text = _arrears_amount(debt_amount)
     address_text = _business_text(address, "address", max_length=120)
     title = _debtor_title(gender_text)
-    rendered = BUSINESS_OPENING_TEMPLATE.format(
-        debtor_name=debtor_name_text,
-        title=title,
-        employee_name=employee_name_text,
-        address=address_text,
-        debt_amount=amount_text,
+    salutation = _debtor_salutation(debtor_name_text, title)
+    speaking_style_text = _optional_business_text(
+        speaking_style,
+        "speaking_style",
+        max_length=500,
     )
+    template_values = {
+        "employee_name": employee_name_text,
+        "debtor_name": debtor_name_text,
+        "debtor_gender": gender_text,
+        "debt_amount": amount_text,
+        "address": address_text,
+        "title": title,
+        "salutation": salutation,
+    }
+    rendered = _render_business_opening_template(opening_template, template_values)
     return OpeningRequest(
         voice=voice,
         speaker=speaker,
-        business={
-            "employee_name": employee_name_text,
-            "debtor_name": debtor_name_text,
-            "debtor_gender": gender_text,
-            "debt_amount": amount_text,
-            "address": address_text,
-            "title": title,
-        },
+        business=template_values,
         opening_text=rendered,
         opening_text_hash=_text_hash(rendered),
+        speaking_style=speaking_style_text,
     )
 
 
@@ -351,12 +358,70 @@ def _business_text(value: object, field_name: str, *, max_length: int) -> str:
     return text
 
 
+def _optional_business_text(
+    value: object | None,
+    field_name: str,
+    *,
+    max_length: int,
+) -> str | None:
+    if value is None:
+        return None
+    text = " ".join(str(value).split())
+    if not text:
+        return None
+    if len(text) > max_length:
+        raise OpeningGenerationFailed(f"{field_name} is too long")
+    return text
+
+
 def _debtor_title(gender: str) -> str:
     if gender == "男":
         return "先生"
     if gender == "女":
         return "女士"
     return ""
+
+
+def _debtor_salutation(debtor_name: str, title: str) -> str:
+    if not title:
+        return f"{debtor_name[0]}业主"
+    return f"{debtor_name[0]}{title}"
+
+
+def _render_business_opening_template(
+    opening_template: object | None,
+    values: dict[str, str],
+) -> str:
+    default_text = BUSINESS_OPENING_TEMPLATE.format(**values)
+    if opening_template is None:
+        return default_text
+
+    template_text = " ".join(str(opening_template).split())
+    if not template_text:
+        return default_text
+
+    try:
+        rendered = template_text.format(**values)
+    except (KeyError, IndexError, ValueError):
+        LOGGER.warning("business_opening_template_render_failed", exc_info=True)
+        return default_text
+
+    rendered = " ".join(rendered.split())
+    if _contains_pre_identity_sensitive_details(rendered, values):
+        LOGGER.warning("business_opening_template_contains_sensitive_details")
+        return default_text
+    return rendered or default_text
+
+
+def _contains_pre_identity_sensitive_details(
+    rendered: str,
+    values: dict[str, str],
+) -> bool:
+    for key in ("debtor_name", "address", "debt_amount"):
+        value = values.get(key, "")
+        if value and value in rendered:
+            return True
+    return False
 
 
 def _text_hash(text: str) -> str:

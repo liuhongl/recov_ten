@@ -33,6 +33,10 @@ from .realtime_phone_gateway import (
 
 LOGGER = logging.getLogger(__name__)
 
+DOUBAO_DIALOG_FIELD_COMPAT_SYSTEM_PROMPT = (
+    "请遵循 dialog.system_role 和 dialog.speaking_style 中的会话设定进行回复。"
+)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="SIP realtime voice gateway")
@@ -138,7 +142,10 @@ async def _serve(config, *, media_mode: str) -> None:
                 doubao_credentials,
                 replace(
                     session_config,
-                    system_prompt=instructions,
+                    system_prompt=_system_prompt_for_doubao_session(
+                        instructions,
+                        dialog_config,
+                    ),
                     speaker=speaker or session_config.speaker,
                     dialog=dialog_config,
                 ),
@@ -196,6 +203,15 @@ def _load_doubao_s2s_credentials(config) -> DoubaoS2SCredentials:
         resource_id=doubao.resource_id,
         websocket_url=doubao.websocket_url,
     )
+
+
+def _system_prompt_for_doubao_session(
+    instructions: str,
+    dialog_config,
+) -> str:
+    if getattr(dialog_config, "system_role", None):
+        return DOUBAO_DIALOG_FIELD_COMPAT_SYSTEM_PROMPT
+    return instructions
 
 
 if __name__ == "__main__":

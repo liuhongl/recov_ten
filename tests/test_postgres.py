@@ -85,12 +85,18 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
                 assert args == ("collector-a",)
                 return {"name": "李经理"}
             if "from persona_call_strategy" in query:
+                assert "speaking_style" in query
+                assert "opening_template" in query
                 assert args == ("collector-a", 3)
-                return {"strategy_core": "先确认本人，再说明费用。"}
+                return {
+                    "strategy_core": "先确认本人，再说明费用。",
+                    "speaking_style": "正式但亲切的客服口吻。",
+                    "opening_template": "",
+                }
             if "from debt_record" in query:
                 assert args == (2049810626160668673,)
                 return {
-                    "debtor_name": "测试业主",
+                    "debtor_name": "金阳",
                     "address": "测试小区一号楼",
                     "debt_amount": "12.34",
                     "debtor_gender": "女",
@@ -117,19 +123,40 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert prep.prompt_snapshot.version == "postgres"
     assert "你是李经理" in prep.prompt_snapshot.instructions
     assert "先确认本人，再说明费用。" in prep.prompt_snapshot.instructions
-    assert "业主姓名：测试业主" in prep.prompt_snapshot.instructions
-    assert "逾期金额：12.34" in prep.prompt_snapshot.instructions
+    assert "业主称呼：金女士" in prep.prompt_snapshot.instructions
+    assert "业主姓名：金阳" not in prep.prompt_snapshot.instructions
+    assert "系统记录待处理金额：12.34" in prep.prompt_snapshot.instructions
+    assert "# 金额与争议处理" in prep.prompt_snapshot.instructions
+    assert "# 身份核实与隐私边界" in prep.prompt_snapshot.instructions
+    assert "业主本人或该费用事项的授权处理人" in prep.prompt_snapshot.instructions
+    assert "用户只说“好的”“嗯”“你说吧”“什么事”等" in prep.prompt_snapshot.instructions
+    assert "不得主动披露具体姓名、地址、房号、待处理金额" in prep.prompt_snapshot.instructions
+    assert "身份确认阶段只能使用业主称呼，不得说出完整姓名" in prep.prompt_snapshot.instructions
+    assert "只能说明“物业费事项”或“费用事项需要核实”" in prep.prompt_snapshot.instructions
+    assert "用户主动询问欠款金额" in prep.prompt_snapshot.instructions
+    assert "必须先确认对方是业主本人或授权处理人" in prep.prompt_snapshot.instructions
+    assert "可以说明系统记录的待处理金额" in prep.prompt_snapshot.instructions
+    assert "不要承诺减免、豁免利息" in prep.prompt_snapshot.instructions
+    assert "不要确认用户已经还清" in prep.prompt_snapshot.instructions
+    assert "安排物业工作人员或财务人员核对" in prep.prompt_snapshot.instructions
     assert prep.prompt_snapshot.metadata["source"] == "postgres"
     assert prep.prompt_snapshot.metadata["identityName"] == "collector-a"
     assert prep.prompt_snapshot.metadata["personaId"] == "3"
     assert prep.prompt_snapshot.metadata["debtId"] == "2049810626160668673"
     assert prep.prompt_snapshot.metadata["strategy_core"] == "先确认本人，再说明费用。"
+    assert prep.prompt_snapshot.metadata["speaking_style"] == "正式但亲切的客服口吻。"
     assert "# 对话风格" in prep.prompt_snapshot.instructions
-    assert "后续回复必须延续开场白的礼貌核实口吻" in prep.prompt_snapshot.instructions
+    assert "以已播放开场白为语气参照" in prep.prompt_snapshot.instructions
+    assert "保持相同的身份、称呼方式、语气基调和沟通边界" in prep.prompt_snapshot.instructions
+    assert "不要突然变得更强硬、更随意" in prep.prompt_snapshot.instructions
     assert "全程使用“您”" in prep.prompt_snapshot.instructions
     assert "不要说“你家”" in prep.prompt_snapshot.instructions
     assert "避免使用“尽快缴纳”“不影响物业服务”" in prep.prompt_snapshot.instructions
-    assert prep.opening.opening_text.startswith("您好，请问是测试业主女士吗？我是李经理。")
+    assert "不得编造或猜测天气、新闻、时间" in prep.prompt_snapshot.instructions
+    assert "不掌握该信息" in prep.prompt_snapshot.instructions
+    assert "无租客信息时，不得主动假设存在租客" in prep.prompt_snapshot.instructions
+    assert "不得建议联系租客" in prep.prompt_snapshot.instructions
+    assert prep.opening.opening_text.startswith("您好，请问是金女士吗？我是李经理。")
 
 
 def test_postgres_prompt_store_returns_none_when_business_context_missing():
@@ -157,12 +184,22 @@ def test_postgres_prompt_store_can_pin_employee_name_from_context():
                 assert args == ("项目员工", "物业中心小明")
                 return {"name": "物业中心小明"}
             if "from persona_call_strategy" in query:
+                assert "speaking_style" in query
+                assert "opening_template" in query
                 assert args == ("项目员工", 7)
-                return {"strategy_core": "围绕物业费提醒。"}
+                return {
+                    "strategy_core": "围绕物业费提醒。",
+                    "speaking_style": "协调型、熟人式、耐心沟通的物业工作人员口吻。",
+                    "opening_template": (
+                        "您好，请问是{salutation}吗？我是{employee_name}。"
+                        "这边想和您确认一下{address}的物业费事项，"
+                        "系统显示目前还有{debt_amount}元待处理。"
+                    ),
+                }
             if "from debt_record" in query:
                 assert args == (2056563388954320898,)
                 return {
-                    "debtor_name": "测试业主",
+                    "debtor_name": "金阳",
                     "address": "测试小区一号楼",
                     "debt_amount": "12.34",
                     "debtor_gender": "女",
@@ -186,8 +223,16 @@ def test_postgres_prompt_store_can_pin_employee_name_from_context():
 
     assert prep is not None
     assert prep.prompt_snapshot.metadata["employee_name"] == "物业中心小明"
+    assert (
+        prep.prompt_snapshot.metadata["speaking_style"]
+        == "协调型、熟人式、耐心沟通的物业工作人员口吻。"
+    )
+    assert prep.opening.speaking_style == "协调型、熟人式、耐心沟通的物业工作人员口吻。"
     assert "你是物业中心小明" in prep.prompt_snapshot.instructions
-    assert prep.opening.opening_text.startswith("您好，请问是测试业主女士吗？我是物业中心小明。")
+    assert prep.opening.opening_text == (
+        "您好，请问是金女士吗？我是物业中心小明。"
+        "这边有一项物业费事项需要和您本人核实一下，请问现在方便确认吗？"
+    )
 
 
 def test_threadsafe_business_prompt_preparer_runs_store_on_event_loop():

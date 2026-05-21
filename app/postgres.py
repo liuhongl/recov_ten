@@ -12,7 +12,12 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Protocol
 
-from .business_dialog_style import numbered_business_dialog_style_rules
+from .business_dialog_style import (
+    numbered_business_amount_dispute_rules,
+    numbered_business_dialog_style_rules,
+    numbered_business_fact_boundary_rules,
+    numbered_business_privacy_disclosure_rules,
+)
 from .config import GatewayConfig
 from .opening import (
     OpeningGenerationFailed,
@@ -39,7 +44,7 @@ limit 1
 """
 
 STRATEGY_SQL = """
-select strategy_core
+select strategy_core, speaking_style, opening_template
 from persona_call_strategy
 where identity_name = $1 and persona_id = $2
 limit 1
@@ -138,6 +143,8 @@ class PostgresPromptStore:
 
         employee_name = _row_value(identity_row, "name")
         strategy = _row_value(strategy_row, "strategy_core")
+        speaking_style = _row_value(strategy_row, "speaking_style")
+        opening_template = _row_value(strategy_row, "opening_template")
         debtor_name = _row_value(debt_row, "debtor_name")
         address = _row_value(debt_row, "address")
         debt_amount = _row_value(debt_row, "debt_amount")
@@ -150,6 +157,8 @@ class PostgresPromptStore:
                 debtor_gender=debtor_gender,
                 debt_amount=debt_amount,
                 address=address,
+                speaking_style=speaking_style,
+                opening_template=opening_template,
             )
         except OpeningGenerationFailed:
             LOGGER.warning(
@@ -185,6 +194,7 @@ class PostgresPromptStore:
                     "debtId": str(debt_id),
                     "employee_name": _prompt_text(employee_name),
                     "strategy_core": _prompt_text(strategy),
+                    "speaking_style": _prompt_text(speaking_style),
                     "opening_text_hash": opening.opening_text_hash,
                 },
             ),
@@ -355,12 +365,21 @@ def _render_business_prompt(
             "# 对话风格",
             *numbered_business_dialog_style_rules(),
             "",
+            "# 事实边界",
+            *numbered_business_fact_boundary_rules(),
+            "",
+            "# 身份核实与隐私边界",
+            *numbered_business_privacy_disclosure_rules(),
+            "",
             "# 业主信息",
-            f"业主姓名：{_prompt_text(debtor_name)}",
+            f"业主称呼：{_prompt_debtor_salutation(debtor_name, debtor_gender)}",
             f"性别：{_prompt_text(debtor_gender)}",
             f"年龄：{_prompt_text(debtor_age)}",
-            f"逾期金额：{_prompt_text(debt_amount)}",
+            f"系统记录待处理金额：{_prompt_text(debt_amount)}",
             f"地址：{_prompt_text(address)}",
+            "",
+            "# 金额与争议处理",
+            *numbered_business_amount_dispute_rules(),
             "",
             "# 沟通规范",
             "1. 只围绕逾期费用提醒、身份确认、还款意愿、还款安排进行沟通。",
@@ -382,6 +401,20 @@ def _prompt_text(value: object) -> str:
     if isinstance(value, Decimal):
         return format(value, "f")
     return " ".join(str(value).split())
+
+
+def _prompt_debtor_salutation(debtor_name: object, debtor_gender: object) -> str:
+    name = _prompt_text(debtor_name)
+    if not name:
+        return "业主"
+    gender = _prompt_text(debtor_gender)
+    if gender == "男":
+        title = "先生"
+    elif gender == "女":
+        title = "女士"
+    else:
+        title = "业主"
+    return f"{name[0]}{title}"
 
 
 def _hash_text(value: str) -> str:

@@ -26,20 +26,13 @@ from .opening import (
 )
 
 LOGGER = logging.getLogger(__name__)
+POSTGRES_APPLICATION_NAME = "recov_ten_gateway"
 
 IDENTITY_NAME_SQL = """
 select name
 from call_identity_name
 where identity_name = $1
 order by random()
-limit 1
-"""
-
-IDENTITY_NAME_BY_NAME_SQL = """
-select name
-from call_identity_name
-where identity_name = $1 and name = $2
-order by id
 limit 1
 """
 
@@ -51,9 +44,47 @@ limit 1
 """
 
 DEBT_RECORD_SQL = """
-select debtor_name, address, debt_amount, debtor_gender, debtor_age
+select debtor_name, address, debt_amount, debtor_gender, debtor_age, tenant_id, persona_id
 from debt_record
 where id = $1
+limit 1
+"""
+
+VOICE_EMPLOYEE_SQL = """
+select
+  vc.gender_match,
+  vc.voice_id as config_voice_id,
+  vc.male_voice_gender,
+  vc.female_voice_gender,
+  case
+    when vc.gender_match = '1' and $3 = '男' then vc.male_voice_gender
+    when vc.gender_match = '1' and $3 = '女' then vc.female_voice_gender
+    else ''
+  end as selected_gender,
+  cin.name as employee_name,
+  cin.voice_id as selected_voice_id,
+  lib.voice_name,
+  lib.base_voice_id
+from call_voice_config vc
+join call_identity_name cin
+  on cin.identity_name = vc.identity_name
+ and cin.tenant_id = vc.tenant_id
+join call_voice_library lib
+  on lib.id = cin.voice_id
+where vc.identity_name = $1
+  and vc.tenant_id = $2
+  and (
+    (coalesce(vc.gender_match, '0') <> '1' and cin.voice_id = vc.voice_id)
+    or (
+      vc.gender_match = '1'
+      and lib.gender = case
+        when $3 = '男' then vc.male_voice_gender
+        when $3 = '女' then vc.female_voice_gender
+        else null
+      end
+    )
+  )
+order by random()
 limit 1
 """
 
@@ -82,6 +113,16 @@ class PromptSnapshot:
 class BusinessPromptPreparation:
     prompt_snapshot: PromptSnapshot
     opening: OpeningRequest
+
+
+@dataclass(frozen=True)
+class VoiceSelection:
+    voice_id: str
+    voice_name: str
+    speaker: str
+    gender_match: str
+    employee_name: str
+    selected_gender: str
 
 
 class AsyncBusinessPromptStoreProtocol(Protocol):
@@ -115,33 +156,57 @@ class PostgresPromptStore:
         if params is None:
             return None
 
-        identity_name, employee_name, persona_id, debt_id = params
+        identity_name, debt_id = params
+        identity_row = None
+        strategy_row = None
+        debt_row = None
+        voice_row = None
         async with self.pool.acquire() as conn:
-            if employee_name is None:
-                identity_row = await conn.fetchrow(IDENTITY_NAME_SQL, identity_name)
-            else:
-                identity_row = await conn.fetchrow(
-                    IDENTITY_NAME_BY_NAME_SQL,
-                    identity_name,
-                    employee_name,
-                )
-            strategy_row = await conn.fetchrow(STRATEGY_SQL, identity_name, persona_id)
             debt_row = await conn.fetchrow(DEBT_RECORD_SQL, debt_id)
+            if debt_row is not None:
+                persona_id = _context_int(_row_value(debt_row, "persona_id"))
+                if persona_id is not None:
+                    strategy_row = await conn.fetchrow(
+                        STRATEGY_SQL,
+                        identity_name,
+                        persona_id,
+                    )
+                voice_row = await conn.fetchrow(
+                    VOICE_EMPLOYEE_SQL,
+                    identity_name,
+                    _row_value(debt_row, "tenant_id"),
+                    _prompt_text(_row_value(debt_row, "debtor_gender")),
+                )
+            if voice_row is None:
+                identity_row = await conn.fetchrow(IDENTITY_NAME_SQL, identity_name)
 
-        if identity_row is None or strategy_row is None or debt_row is None:
+        voice_selection = _voice_selection_from_row(voice_row)
+        persona_id = (
+            None if debt_row is None else _context_int(_row_value(debt_row, "persona_id"))
+        )
+        if (
+            debt_row is None
+            or strategy_row is None
+            or (voice_selection is None and identity_row is None)
+            or persona_id is None
+        ):
             LOGGER.warning(
                 "business_prompt_lookup_missing identityName=%s personaId=%s "
                 "debtId=%s has_identity=%s has_strategy=%s has_debt=%s",
                 identity_name,
                 persona_id,
                 debt_id,
-                identity_row is not None,
+                voice_selection is not None or identity_row is not None,
                 strategy_row is not None,
                 debt_row is not None,
             )
             return None
 
-        employee_name = _row_value(identity_row, "name")
+        employee_name = (
+            voice_selection.employee_name
+            if voice_selection is not None
+            else _row_value(identity_row, "name")
+        )
         strategy = _row_value(strategy_row, "strategy_core")
         speaking_style = _row_value(strategy_row, "speaking_style")
         opening_template = _row_value(strategy_row, "opening_template")
@@ -159,6 +224,10 @@ class PostgresPromptStore:
                 address=address,
                 speaking_style=speaking_style,
                 opening_template=opening_template,
+                voice=(
+                    "female" if voice_selection is None else voice_selection.voice_name
+                ),
+                speaker=None if voice_selection is None else voice_selection.speaker,
             )
         except OpeningGenerationFailed:
             LOGGER.warning(
@@ -180,6 +249,28 @@ class PostgresPromptStore:
             debt_amount=debt_amount,
             address=address,
         )
+        metadata = {
+            "source": "postgres",
+            "identityName": identity_name,
+            "personaId": str(persona_id),
+            "debtId": str(debt_id),
+            "employee_name": _prompt_text(employee_name),
+            "strategy_core": _prompt_text(strategy),
+            "speaking_style": _prompt_text(speaking_style),
+            "opening_text_hash": opening.opening_text_hash,
+        }
+        if voice_selection is not None:
+            metadata.update(
+                {
+                    "voice_source": "call_voice_config",
+                    "voice_id": voice_selection.voice_id,
+                    "voice_name": voice_selection.voice_name,
+                    "speaker": voice_selection.speaker,
+                    "gender_match": voice_selection.gender_match,
+                    "selected_gender": voice_selection.selected_gender,
+                }
+            )
+
         return BusinessPromptPreparation(
             prompt_snapshot=PromptSnapshot(
                 scene=f"{identity_name}:{persona_id}",
@@ -187,16 +278,7 @@ class PostgresPromptStore:
                 instructions=instructions,
                 content_hash=_hash_text(instructions),
                 loaded_at_ms=_now_ms(),
-                metadata={
-                    "source": "postgres",
-                    "identityName": identity_name,
-                    "personaId": str(persona_id),
-                    "debtId": str(debt_id),
-                    "employee_name": _prompt_text(employee_name),
-                    "strategy_core": _prompt_text(strategy),
-                    "speaking_style": _prompt_text(speaking_style),
-                    "opening_text_hash": opening.opening_text_hash,
-                },
+                metadata=metadata,
             ),
             opening=opening,
         )
@@ -264,6 +346,8 @@ class PostgresRuntime:
                 min_size=self.config.min_pool_size,
                 max_size=self.config.max_pool_size,
                 command_timeout=self.config.command_timeout_seconds,
+                max_inactive_connection_lifetime=0,
+                server_settings={"application_name": POSTGRES_APPLICATION_NAME},
             )
         except Exception:
             LOGGER.warning("postgres_pool_start_failed", exc_info=True)
@@ -310,14 +394,12 @@ def _load_asyncpg() -> Any:
 
 def _business_prompt_params(
     context: Mapping[str, Any],
-) -> tuple[str, str | None, int, int] | None:
+) -> tuple[str, int] | None:
     identity_name = _context_text(context.get("identityName"))
-    employee_name = _context_text(context.get("employeeName"))
-    persona_id = _context_int(context.get("personaId"))
     debt_id = _context_int(context.get("debtId"))
-    if identity_name is None or persona_id is None or debt_id is None:
+    if identity_name is None or debt_id is None:
         return None
-    return identity_name, employee_name, persona_id, debt_id
+    return identity_name, debt_id
 
 
 def _context_text(value: object) -> str | None:
@@ -344,6 +426,24 @@ def _row_value(row: Any, key: str) -> Any:
         return getattr(row, key)
 
 
+def _voice_selection_from_row(row: Any | None) -> VoiceSelection | None:
+    if row is None:
+        return None
+    speaker = _prompt_text(_row_value(row, "base_voice_id"))
+    if not speaker:
+        return None
+    voice_id = _prompt_text(_row_value(row, "selected_voice_id"))
+    voice_name = _prompt_text(_row_value(row, "voice_name")) or speaker
+    return VoiceSelection(
+        voice_id=voice_id,
+        voice_name=voice_name,
+        speaker=speaker,
+        gender_match=_prompt_text(_row_value(row, "gender_match")),
+        employee_name=_prompt_text(_row_value(row, "employee_name")),
+        selected_gender=_prompt_text(_row_value(row, "selected_gender")),
+    )
+
+
 def _render_business_prompt(
     *,
     employee_name: object,
@@ -354,6 +454,7 @@ def _render_business_prompt(
     debt_amount: object,
     address: object,
 ) -> str:
+    salutation = _prompt_debtor_salutation(debtor_name, debtor_gender)
     return "\n".join(
         [
             "# 角色",
@@ -370,9 +471,12 @@ def _render_business_prompt(
             "",
             "# 身份核实与隐私边界",
             *numbered_business_privacy_disclosure_rules(),
+            f"7. 身份未确认时，下一句只能问：请问您是{salutation}本人，或方便处理这项物业费事项的授权处理人吗？",
+            "8. 这类身份核实句不得夹带地址、房号、待处理金额、欠费明细或费用原因。",
             "",
-            "# 业主信息",
-            f"业主称呼：{_prompt_debtor_salutation(debtor_name, debtor_gender)}",
+            "# 身份确认后才可使用的信息",
+            "以下信息即使系统已知，身份确认前也禁止说出；只有用户明确确认本人或授权处理人后才可用于沟通。",
+            f"业主称呼：{salutation}",
             f"性别：{_prompt_text(debtor_gender)}",
             f"年龄：{_prompt_text(debtor_age)}",
             f"系统记录待处理金额：{_prompt_text(debt_amount)}",

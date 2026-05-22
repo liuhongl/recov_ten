@@ -126,15 +126,13 @@ def test_outbound_test_page_is_served():
         assert 'id="identityName"' in body
         assert 'name="identityName"' in body
         assert 'value="项目员工"' in body
-        assert 'id="employeeName"' in body
-        assert 'name="employeeName"' in body
-        assert 'value="物业中心小明"' in body
-        assert 'id="personaId"' in body
-        assert 'name="personaId"' in body
-        assert 'value="7"' in body
+        assert 'id="employeeName"' not in body
+        assert 'name="employeeName"' not in body
+        assert 'id="personaId"' not in body
+        assert 'name="personaId"' not in body
         assert 'id="debtId"' in body
         assert 'name="debtId"' in body
-        assert 'value="2056563388954320898"' in body
+        assert 'value="2056600544053252097"' in body
         assert "启用手工开场白" not in body
         assert "开场白音色" not in body
         assert "业主姓名" not in body
@@ -144,7 +142,7 @@ def test_outbound_test_page_is_served():
         assert 'id="ownerName"' not in body
         assert 'id="arrearsAmount"' not in body
         assert "const context = {};" in body
-        assert 'for (const key of ["identityName", "employeeName", "personaId", "debtId"])' in body
+        assert 'for (const key of ["identityName", "debtId"])' in body
         assert "payload.context = context;" in body
         assert 'payload.opening = {' not in body
         assert 'delete payload.opening_enabled' not in body

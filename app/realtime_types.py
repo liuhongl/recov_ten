@@ -8,11 +8,29 @@ DEFAULT_OUTPUT_SAMPLE_RATE = 24000
 
 
 @dataclass(frozen=True)
+class RealtimeDialogContextItem:
+    role: str
+    text: str
+    timestamp: int | None = None
+
+    def to_payload(self) -> dict[str, int | str]:
+        payload: dict[str, int | str] = {
+            "role": self.role,
+            "text": self.text,
+        }
+        if self.timestamp is not None:
+            payload["timestamp"] = self.timestamp
+        return payload
+
+
+@dataclass(frozen=True)
 class RealtimeDialogConfig:
     bot_name: str | None = None
     system_role: str | None = None
     speaking_style: str | None = None
     model: str | None = None
+    dialog_id: str | None = None
+    dialog_context: tuple[RealtimeDialogContextItem, ...] = ()
 
 
 @dataclass(frozen=True)

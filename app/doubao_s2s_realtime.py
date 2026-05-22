@@ -5,7 +5,6 @@ import contextlib
 import hashlib
 import logging
 import time
-import uuid
 from collections import Counter, deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -71,7 +70,7 @@ class DoubaoS2SServerVadSession:
     events into the same turn callbacks used by the existing realtime gateway.
     """
 
-    restart_on_interruption = False
+    restart_on_interruption = True
 
     def __init__(
         self,
@@ -165,38 +164,11 @@ class DoubaoS2SServerVadSession:
         *,
         interrupted_output_text: str | None = None,
     ) -> None:
+        del interrupted_output_text
         async with self._session_restart_lock:
             session = self._require_session()
             self._invalidate_active_response()
-            self._hot_restart_in_progress = True
-            started_at = time.monotonic()
-            try:
-                finish_future = self._new_future()
-                self._pending_session_finished = finish_future
-                await session.finish_session()
-                await asyncio.wait_for(finish_future, timeout=5)
-
-                self._reset_turn_state_after_hot_restart()
-                session.session_id = f"session_{uuid.uuid4().hex}"
-
-                start_future = self._new_future()
-                self._pending_session_started = start_future
-                await session.send_start_session()
-                await asyncio.wait_for(start_future, timeout=5)
-                if interrupted_output_text:
-                    await self._seed_assistant_context_locked(
-                        interrupted_output_text,
-                        source="interruption_repair",
-                    )
-            finally:
-                self._hot_restart_in_progress = False
-                self._pending_session_finished = None
-                self._pending_session_started = None
-
-        LOGGER.info(
-            "doubao_s2s_hot_session_restarted elapsed_ms=%s",
-            int((time.monotonic() - started_at) * 1000),
-        )
+            await session.client_interrupt()
 
     async def seed_assistant_context(
         self,
@@ -440,9 +412,7 @@ class DoubaoS2SServerVadSession:
             input_audio_bytes=state.input_audio_bytes,
             output_audio_bytes=state.output_audio_bytes,
             input_transcript=state.input_transcript,
-            output_transcript=""
-            if state.invalidated
-            else "".join(state.output_transcript_parts or []),
+            output_transcript="".join(state.output_transcript_parts or []),
             event_counts=dict(state.event_counts),
             first_audio_delta_ms=state.first_audio_delta_ms,
             response_done_ms=int((time.monotonic() - state.started_at) * 1000),

@@ -44,6 +44,7 @@ from .realtime_types import (
     DEFAULT_INPUT_SAMPLE_RATE,
     DEFAULT_OUTPUT_SAMPLE_RATE,
     RealtimeDialogConfig,
+    RealtimeDialogContextItem,
     RealtimeTurnResult,
 )
 from .postgres import PromptSnapshot
@@ -99,8 +100,16 @@ class PlaybackFrame:
 @dataclass
 class ConversationExchange:
     turn_id: int
+    status: str = "completed"
     input_transcript: str = ""
     output_transcript: str = ""
+    heard_output_transcript: str = ""
+    question_id: str | None = None
+    reply_id: str | None = None
+    played_audio_ms: int = 0
+    playback_completed: bool = False
+    source: str = ""
+    created_at_ms: int | None = None
 
 
 class RealtimeSessionProtocol:
@@ -207,8 +216,6 @@ class RealtimePhoneSessionStats:
     playback_last_send_turn_id: int | None = None
     disconnected_at: float | None = None
     control_messages: list[str] = field(default_factory=list)
-    input_transcripts: list[str] = field(default_factory=list)
-    output_transcripts: list[str] = field(default_factory=list)
     output_transcripts_by_turn: dict[int, str] = field(default_factory=dict)
     opening_text: str | None = field(default=None, repr=False)
     opening_text_hash: str | None = None
@@ -232,8 +239,12 @@ class RealtimePhoneSessionStats:
     opening_answer_wait_ms: int | None = None
     pending_exchanges: dict[int, ConversationExchange] = field(default_factory=dict)
     committed_exchanges: list[ConversationExchange] = field(default_factory=list)
+    closed_output_turn_ids: set[int] = field(default_factory=set, repr=False)
     gateway_history_committed_turns: int = 0
     gateway_history_abandoned_turns: int = 0
+    gateway_history_completed_turns: int = 0
+    gateway_history_interrupted_turns: int = 0
+    gateway_history_missing_output_turns: int = 0
     realtime_session_restarts: int = 0
     replayed_input_frames: int = 0
     replayed_input_bytes: int = 0
@@ -660,14 +671,15 @@ class FreeSwitchRealtimeGatewayServer:
         self,
         session: RealtimePhoneSessionStats,
     ) -> RealtimeDialogConfig:
+        dialog_context = self._dialog_context_for_realtime_session(session)
         if session.prompt_snapshot is None:
-            return RealtimeDialogConfig()
+            return RealtimeDialogConfig(dialog_context=dialog_context)
 
         employee_name = _dialog_text(
             session.prompt_snapshot.metadata.get("employee_name")
         )
         if not employee_name:
-            return RealtimeDialogConfig()
+            return RealtimeDialogConfig(dialog_context=dialog_context)
 
         identity_name = _dialog_text(
             session.prompt_snapshot.metadata.get("identityName")
@@ -692,7 +704,30 @@ class FreeSwitchRealtimeGatewayServer:
             system_role=system_role,
             speaking_style=speaking_style,
             model=DEFAULT_DIALOG_MODEL,
+            dialog_context=dialog_context,
         )
+
+    def _dialog_context_for_realtime_session(
+        self,
+        session: RealtimePhoneSessionStats,
+    ) -> tuple[RealtimeDialogContextItem, ...]:
+        items: list[RealtimeDialogContextItem] = []
+        remaining_chars = MAX_COMMITTED_HISTORY_CHARS
+        selected = session.committed_exchanges[-MAX_COMMITTED_HISTORY_EXCHANGES:]
+        for exchange in selected:
+            user_text = exchange.input_transcript.strip()
+            assistant_text = exchange.output_transcript.strip()
+            if not user_text or not assistant_text:
+                continue
+            block_len = len(user_text) + len(assistant_text)
+            if block_len > remaining_chars:
+                continue
+            items.append(RealtimeDialogContextItem(role="user", text=user_text))
+            items.append(
+                RealtimeDialogContextItem(role="assistant", text=assistant_text)
+            )
+            remaining_chars -= block_len
+        return tuple(items)
 
     def _instructions_for_realtime_session(
         self,
@@ -713,32 +748,7 @@ class FreeSwitchRealtimeGatewayServer:
                 f"客服：{session.opening_text}",
             ]
 
-        if not session.committed_exchanges:
-            return "\n".join(
-                [instructions, "", LATEST_UTTERANCE_GUARD, *opening_lines]
-            )
-
-        lines = [
-            instructions,
-            "",
-            LATEST_UTTERANCE_GUARD,
-            *opening_lines,
-            "",
-            "电话用户已经完整听到的历史对话：",
-        ]
-        remaining_chars = MAX_COMMITTED_HISTORY_CHARS
-        for exchange in session.committed_exchanges[
-            -MAX_COMMITTED_HISTORY_EXCHANGES:
-        ]:
-            user_line = f"用户：{exchange.input_transcript.strip()}"
-            assistant_line = f"客服：{exchange.output_transcript.strip()}"
-            block = f"{user_line}\n{assistant_line}"
-            if len(block) > remaining_chars:
-                break
-            lines.extend([user_line, assistant_line])
-            remaining_chars -= len(block)
-
-        return "\n".join(lines)
+        return "\n".join([instructions, "", LATEST_UTTERANCE_GUARD, *opening_lines])
 
     def _pop_opening_audio(self, call_id: str) -> PreparedOpeningAudio | None:
         if self.opening_store is None:
@@ -1102,8 +1112,34 @@ class FreeSwitchRealtimeGatewayServer:
         session: RealtimePhoneSessionStats,
         turn_id: int,
     ) -> None:
+        was_busy = self._session_is_busy(session)
+        previous_capture_turn_id = session.current_capture_turn_id
         session.last_realtime_turn_id = max(session.last_realtime_turn_id, turn_id)
-        if self._session_is_busy(session):
+        if turn_id not in session.turn_speech_started_at:
+            session.turns_started += 1
+            session.turn_speech_started_at[turn_id] = time.monotonic()
+        session.current_capture_turn_id = turn_id
+        LOGGER.info(
+            "realtime_phone_server_vad_speech_started call_id=%s session_id=%s "
+            "turn=%s threshold=%s silence_duration_ms=%s",
+            session.call_id,
+            session.session_id,
+            turn_id,
+            self.config.server_vad.threshold,
+            self.config.server_vad.silence_duration_ms,
+        )
+
+        if was_busy:
+            if (
+                previous_capture_turn_id is not None
+                and previous_capture_turn_id != turn_id
+                and previous_capture_turn_id != session.current_output_turn_id
+            ):
+                self._abandon_pending_turn(
+                    session,
+                    previous_capture_turn_id,
+                    reason="server_vad_speech_started",
+                )
             if not session.interruption_repair_active:
                 session.interruption_repair_active = True
                 session.repair_replay_frames_16k = deque(
@@ -1133,19 +1169,6 @@ class FreeSwitchRealtimeGatewayServer:
                 turn_id,
             )
             return
-
-        session.turns_started += 1
-        session.current_capture_turn_id = turn_id
-        session.turn_speech_started_at[turn_id] = time.monotonic()
-        LOGGER.info(
-            "realtime_phone_server_vad_speech_started call_id=%s session_id=%s "
-            "turn=%s threshold=%s silence_duration_ms=%s",
-            session.call_id,
-            session.session_id,
-            turn_id,
-            self.config.server_vad.threshold,
-            self.config.server_vad.silence_duration_ms,
-        )
 
     async def _run_interruption_repair(
         self,
@@ -1206,10 +1229,7 @@ class FreeSwitchRealtimeGatewayServer:
         else:
             session.turns_failed += 1
 
-        if result.input_transcript:
-            session.input_transcripts.append(result.input_transcript)
         if result.output_transcript:
-            session.output_transcripts.append(result.output_transcript)
             session.output_transcripts_by_turn[turn_id] = result.output_transcript
         if result.input_transcript or result.output_transcript:
             exchange = session.pending_exchanges.get(turn_id)
@@ -1218,10 +1238,17 @@ class FreeSwitchRealtimeGatewayServer:
                 session.pending_exchanges[turn_id] = exchange
             if result.input_transcript:
                 exchange.input_transcript = result.input_transcript
-            if result.output_transcript and result.status == "completed":
+            if result.output_transcript:
                 exchange.output_transcript = result.output_transcript
         if result.status != "completed":
-            session.pending_exchanges.pop(turn_id, None)
+            if turn_id in session.closed_output_turn_ids:
+                self._abandon_pending_turn(
+                    session,
+                    turn_id,
+                    reason="realtime_turn_cancelled",
+                )
+            else:
+                session.pending_exchanges.pop(turn_id, None)
 
         LOGGER.info(
             "realtime_phone_server_vad_turn_done call_id=%s session_id=%s turn=%s "
@@ -1266,6 +1293,10 @@ class FreeSwitchRealtimeGatewayServer:
         turn_id: int,
         model_audio_delta: bytes,
     ) -> None:
+        if turn_id in session.closed_output_turn_ids:
+            session.dropped_stale_frames += 1
+            return
+
         if session.current_output_turn_id not in (None, turn_id):
             session.dropped_stale_frames += 1
             return
@@ -1531,8 +1562,15 @@ class FreeSwitchRealtimeGatewayServer:
         if not exchange.input_transcript or not exchange.output_transcript:
             return
 
+        exchange.status = "completed"
+        exchange.playback_completed = True
+        exchange.played_audio_ms = self._played_audio_ms_for_turn(session, turn_id)
+        exchange.heard_output_transcript = exchange.output_transcript
+        exchange.source = "playback_completed"
+        exchange.created_at_ms = int(time.time() * 1000)
         session.committed_exchanges.append(exchange)
         session.gateway_history_committed_turns += 1
+        session.gateway_history_completed_turns += 1
         completed_at = time.monotonic()
         LOGGER.info(
             "gateway_conversation_turn_committed call_id=%s session_id=%s "
@@ -1552,6 +1590,17 @@ class FreeSwitchRealtimeGatewayServer:
             session.turn_max_playback_send_gap_ms.get(turn_id, 0),
         )
 
+    @staticmethod
+    def _played_audio_ms_for_turn(
+        session: RealtimePhoneSessionStats,
+        turn_id: int,
+    ) -> int:
+        first = session.turn_first_playback_at.get(turn_id)
+        last = session.turn_last_playback_at.get(turn_id)
+        if first is None or last is None or last < first:
+            return 0
+        return int((last - first) * 1000)
+
     def _abandon_pending_turn(
         self,
         session: RealtimePhoneSessionStats,
@@ -1561,19 +1610,60 @@ class FreeSwitchRealtimeGatewayServer:
     ) -> None:
         if turn_id is None:
             return
-        exchange = session.pending_exchanges.pop(turn_id, None)
-        if exchange is None and turn_id not in session.output_transcripts_by_turn:
+        if turn_id == OPENING_TURN_ID:
             return
 
-        session.gateway_history_abandoned_turns += 1
+        session.closed_output_turn_ids.add(turn_id)
+        exchange = session.pending_exchanges.pop(turn_id, None)
+        output_transcript = session.output_transcripts_by_turn.get(turn_id, "")
+        if exchange is None:
+            exchange = ConversationExchange(
+                turn_id=turn_id,
+                output_transcript=output_transcript,
+            )
+        elif output_transcript and not exchange.output_transcript:
+            exchange.output_transcript = output_transcript
+
+        if not exchange.input_transcript and not exchange.output_transcript:
+            return
+
+        existing_exchange = next(
+            (
+                item
+                for item in session.committed_exchanges
+                if item.turn_id == turn_id
+            ),
+            None,
+        )
+        if existing_exchange is not None:
+            if exchange.input_transcript and not existing_exchange.input_transcript:
+                existing_exchange.input_transcript = exchange.input_transcript
+            if exchange.output_transcript and not existing_exchange.output_transcript:
+                existing_exchange.output_transcript = exchange.output_transcript
+            return
+
+        exchange.status = "interrupted"
+        exchange.playback_completed = False
+        exchange.played_audio_ms = self._played_audio_ms_for_turn(session, turn_id)
+        exchange.heard_output_transcript = ""
+        exchange.source = "client_interrupt"
+        exchange.created_at_ms = int(time.time() * 1000)
+        session.committed_exchanges.append(exchange)
+        session.gateway_history_committed_turns += 1
+        session.gateway_history_interrupted_turns += 1
+        if not exchange.output_transcript:
+            session.gateway_history_missing_output_turns += 1
+
         LOGGER.info(
-            "gateway_conversation_turn_abandoned call_id=%s session_id=%s "
-            "turn=%s reason=%s committed_history_turns=%s",
+            "gateway_conversation_turn_interrupted_committed "
+            "call_id=%s session_id=%s turn=%s reason=%s "
+            "committed_history_turns=%s played_audio_ms=%s",
             session.call_id,
             session.session_id,
             turn_id,
             reason,
             len(session.committed_exchanges),
+            exchange.played_audio_ms,
         )
 
     async def _handle_control_message(
@@ -1792,10 +1882,14 @@ class FreeSwitchRealtimeGatewayServer:
                     async with session.realtime_lock:
                         current = self._realtime_sessions.get(session.session_id)
                         if current is realtime_session:
-                            await self._replay_repair_audio_locked(
-                                session,
-                                realtime_session,
-                                reason=reason,
+                            session.repair_replay_frames_16k.clear()
+                            session.interruption_repair_active = False
+                            LOGGER.info(
+                                "realtime_interruption_audio_discarded "
+                                "call_id=%s session_id=%s reason=%s",
+                                session.call_id,
+                                session.session_id,
+                                reason,
                             )
             session.context_repair_requests += 1
         except AttributeError:
@@ -1840,6 +1934,7 @@ class FreeSwitchRealtimeGatewayServer:
                 await realtime_session.cancel_response()
             await realtime_session.close()
 
+            session.current_capture_turn_id = None
             session.realtime_session_restarts += 1
             replacement = self._create_realtime_session(session)
             self._realtime_sessions[session.session_id] = replacement
@@ -2072,11 +2167,31 @@ class FreeSwitchRealtimeGatewayServer:
         committed_exchanges = [
             {
                 "turn_id": exchange.turn_id,
+                "status": exchange.status,
+                "question_id": exchange.question_id,
+                "reply_id": exchange.reply_id,
                 "input_transcript": exchange.input_transcript,
                 "output_transcript": exchange.output_transcript,
+                "heard_output_transcript": exchange.heard_output_transcript,
+                "played_audio_ms": exchange.played_audio_ms,
+                "playback_completed": exchange.playback_completed,
+                "source": exchange.source,
+                "created_at_ms": exchange.created_at_ms,
             }
             for exchange in session.committed_exchanges
         ]
+        turns = self._build_call_result_turns(session)
+        completed_history_turns = sum(
+            1 for exchange in session.committed_exchanges if exchange.status == "completed"
+        )
+        interrupted_history_turns = sum(
+            1
+            for exchange in session.committed_exchanges
+            if exchange.status == "interrupted"
+        )
+        missing_output_turns = sum(
+            1 for exchange in session.committed_exchanges if not exchange.output_transcript
+        )
         return {
             "call_id": session.call_id,
             "session_id": session.session_id,
@@ -2085,15 +2200,15 @@ class FreeSwitchRealtimeGatewayServer:
             "disconnected_at_ms": int(disconnected_at * 1000),
             "duration_ms": int((disconnected_at - session.connected_at) * 1000),
             "prompt": prompt,
-            "input_transcripts": list(session.input_transcripts),
-            "output_transcripts": list(session.output_transcripts),
             "opening": {
+                "text": session.opening_text,
                 "text_hash": session.opening_text_hash,
                 "voice": session.opening_voice,
                 "speaker": session.opening_speaker,
                 "playback_frames": session.opening_playback_frames,
                 "playback_interrupted": session.opening_playback_interrupted,
             },
+            "turns": turns,
             "committed_exchanges": committed_exchanges,
             "metrics": {
                 "inbound_frames": session.inbound_frames,
@@ -2126,6 +2241,18 @@ class FreeSwitchRealtimeGatewayServer:
                 "gateway_history_abandoned_turns": (
                     session.gateway_history_abandoned_turns
                 ),
+                "gateway_history_completed_turns": max(
+                    session.gateway_history_completed_turns,
+                    completed_history_turns,
+                ),
+                "gateway_history_interrupted_turns": max(
+                    session.gateway_history_interrupted_turns,
+                    interrupted_history_turns,
+                ),
+                "gateway_history_missing_output_turns": max(
+                    session.gateway_history_missing_output_turns,
+                    missing_output_turns,
+                ),
                 "replayed_input_frames": session.replayed_input_frames,
                 "replayed_input_bytes": session.replayed_input_bytes,
                 "turns_started": session.turns_started,
@@ -2151,8 +2278,29 @@ class FreeSwitchRealtimeGatewayServer:
             },
         }
 
+    def _build_call_result_turns(
+        self,
+        session: RealtimePhoneSessionStats,
+    ) -> list[dict[str, str]]:
+        turns: list[dict[str, str]] = []
+
+        def append_turn(role: str, text: str | None) -> None:
+            normalized = (text or "").strip()
+            if normalized:
+                turns.append({"role": role, "text": normalized})
+
+        append_turn("assistant", session.opening_text)
+        for exchange in session.committed_exchanges:
+            append_turn("user", exchange.input_transcript)
+            append_turn("assistant", exchange.output_transcript)
+        return turns
+
     def _session_is_busy(self, session: RealtimePhoneSessionStats) -> bool:
-        return session.current_output_turn_id is not None or self._has_playback(session)
+        return (
+            session.current_capture_turn_id is not None
+            or session.current_output_turn_id is not None
+            or self._has_playback(session)
+        )
 
     def _has_playback(self, session: RealtimePhoneSessionStats) -> bool:
         return session.playback_active or not session.playback_queue.empty()

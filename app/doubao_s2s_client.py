@@ -77,6 +77,7 @@ EVENT_ASR_RESPONSE = 451
 EVENT_ASR_ENDED = 459
 EVENT_TTS_TEXT = 500
 EVENT_USER_TEXT = 501
+EVENT_CLIENT_INTERRUPT = 515
 EVENT_CHAT_RESPONSE = 550
 EVENT_CHAT_ENDED = 559
 
@@ -301,6 +302,9 @@ class DoubaoS2SRealtimeSession:
     async def finish_session(self) -> None:
         await self._send_json_event(EVENT_FINISH_SESSION, {})
 
+    async def client_interrupt(self) -> None:
+        await self._send_json_event(EVENT_CLIENT_INTERRUPT, {})
+
     async def recv_event(self) -> DoubaoS2SEvent:
         if self._ws is None:
             raise RuntimeError("Doubao S2S session is not connected")
@@ -517,6 +521,12 @@ def _build_dialog_payload(config: RealtimeDialogConfig) -> dict[str, Any]:
         payload["system_role"] = config.system_role
     if config.speaking_style:
         payload["speaking_style"] = config.speaking_style
+    if config.dialog_id:
+        payload["dialog_id"] = config.dialog_id
+    if config.dialog_context:
+        payload["dialog_context"] = [
+            item.to_payload() for item in config.dialog_context
+        ]
     if config.model:
         payload["extra"] = {"model": config.model}
     return payload

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 
 import pytest
@@ -15,6 +16,7 @@ from app.realtime_phone_gateway import (
     ConversationExchange,
     DIALOG_PROMPT_SOFT_LIMIT_CHARS,
     FreeSwitchRealtimeGatewayServer,
+    OPENING_TURN_ID,
     PlaybackFrame,
     RealtimePhoneSessionStats,
 )
@@ -30,15 +32,23 @@ def test_realtime_phone_gateway_clears_playback_on_user_interrupt():
     asyncio.run(_assert_realtime_phone_gateway_interrupts_playback())
 
 
-def test_realtime_phone_gateway_replays_interrupt_audio_after_hot_restart():
-    asyncio.run(_assert_realtime_phone_gateway_replays_after_hot_restart())
+def test_realtime_phone_gateway_interrupts_pending_provider_turn_on_new_speech():
+    asyncio.run(_assert_realtime_phone_gateway_interrupts_pending_provider_turn())
 
 
-def test_realtime_phone_gateway_replays_interrupt_audio_when_context_repair_fails():
-    asyncio.run(_assert_realtime_phone_gateway_replays_when_context_repair_fails())
+def test_realtime_phone_gateway_restart_clears_interrupted_capture_before_replay():
+    asyncio.run(_assert_realtime_phone_gateway_restart_clears_interrupted_capture())
 
 
-def test_realtime_phone_gateway_waits_for_slow_context_repair_before_replay():
+def test_realtime_phone_gateway_replays_interrupt_audio_after_fallback_hot_restart():
+    asyncio.run(_assert_realtime_phone_gateway_replays_after_fallback_hot_restart())
+
+
+def test_realtime_phone_gateway_does_not_replay_interrupt_audio_when_context_repair_fails():
+    asyncio.run(_assert_realtime_phone_gateway_does_not_replay_when_context_repair_fails())
+
+
+def test_realtime_phone_gateway_waits_for_slow_context_repair_without_replay():
     asyncio.run(_assert_realtime_phone_gateway_waits_for_slow_context_repair())
 
 
@@ -118,10 +128,265 @@ def test_realtime_instructions_do_not_reuse_historical_time_question():
 
     instructions = server._instructions_for_realtime_session(session)
 
-    assert "现在几点？" in instructions
     assert "不能当作本轮用户的新问题" in instructions
     assert "除非用户最新一句明确询问时间，否则不要主动报时" in instructions
     assert "如果打断后的最新语音不清楚" in instructions
+    assert "现在几点？" not in instructions
+
+    dialog_context = server._dialog_config_for_realtime_session(session).dialog_context
+
+    assert [item.role for item in dialog_context] == ["user", "assistant"]
+    assert [item.text for item in dialog_context] == [
+        "现在几点？",
+        "现在是下午三点。",
+    ]
+
+
+def test_call_result_payload_uses_committed_exchanges_as_authoritative_history():
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-call",
+        session_id="test-session",
+        connected_at=10.0,
+        last_seen_at=10.0,
+        expected_frame_bytes=320,
+        opening_text="您好，系统显示您还有物业费未缴。",
+        opening_text_hash="hash-opening",
+        opening_voice="female",
+        opening_speaker="zh_female_vv_jupiter_bigtts",
+    )
+    session.disconnected_at = 12.0
+    session.committed_exchanges.append(
+        ConversationExchange(
+            turn_id=1,
+            status="interrupted",
+            input_transcript="这个费用是什么？",
+            output_transcript="这是三月份的物业费。",
+            heard_output_transcript="这是三月份",
+            played_audio_ms=820,
+            playback_completed=False,
+            source="client_interrupt",
+            created_at_ms=1770000005000,
+        )
+    )
+    session.committed_exchanges.append(
+        ConversationExchange(
+            turn_id=2,
+            status="completed",
+            input_transcript="我先核对一下金额。",
+            output_transcript="",
+            playback_completed=True,
+            source="playback_completed",
+        )
+    )
+
+    payload = server._build_call_result_payload(session)
+
+    assert "input_transcripts" not in payload
+    assert "output_transcripts" not in payload
+    assert payload["committed_exchanges"] == [
+        {
+            "turn_id": 1,
+            "status": "interrupted",
+            "question_id": None,
+            "reply_id": None,
+            "input_transcript": "这个费用是什么？",
+            "output_transcript": "这是三月份的物业费。",
+            "heard_output_transcript": "这是三月份",
+            "played_audio_ms": 820,
+            "playback_completed": False,
+            "source": "client_interrupt",
+            "created_at_ms": 1770000005000,
+        },
+        {
+            "turn_id": 2,
+            "status": "completed",
+            "question_id": None,
+            "reply_id": None,
+            "input_transcript": "我先核对一下金额。",
+            "output_transcript": "",
+            "heard_output_transcript": "",
+            "played_audio_ms": 0,
+            "playback_completed": True,
+            "source": "playback_completed",
+            "created_at_ms": None,
+        },
+    ]
+    assert payload["opening"]["text"] == "您好，系统显示您还有物业费未缴。"
+    assert payload["turns"] == [
+        {"role": "assistant", "text": "您好，系统显示您还有物业费未缴。"},
+        {"role": "user", "text": "这个费用是什么？"},
+        {"role": "assistant", "text": "这是三月份的物业费。"},
+        {"role": "user", "text": "我先核对一下金额。"},
+    ]
+    assert payload["metrics"]["gateway_history_interrupted_turns"] == 1
+
+
+def test_abandoned_pending_turn_is_committed_as_interrupted_history():
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-call",
+        session_id="test-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+    )
+    session.pending_exchanges[3] = ConversationExchange(
+        turn_id=3,
+        input_transcript="这个费用是什么？",
+        output_transcript="这是三月份的物业费。",
+    )
+    session.turn_first_playback_at[3] = 10.0
+    session.turn_last_playback_at[3] = 10.82
+
+    server._abandon_pending_turn(session, 3, reason="user_interrupt")
+
+    assert session.pending_exchanges == {}
+    assert len(session.committed_exchanges) == 1
+    exchange = session.committed_exchanges[0]
+    assert exchange.status == "interrupted"
+    assert exchange.output_transcript == "这是三月份的物业费。"
+    assert exchange.heard_output_transcript == ""
+    assert exchange.playback_completed is False
+    assert exchange.source == "client_interrupt"
+    assert exchange.played_audio_ms == 820
+    assert session.gateway_history_interrupted_turns == 1
+
+
+def test_realtime_gateway_drops_late_audio_for_closed_interrupted_turn():
+    asyncio.run(_assert_realtime_gateway_drops_late_audio_for_closed_interrupted_turn())
+
+
+async def _assert_realtime_gateway_drops_late_audio_for_closed_interrupted_turn():
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-call",
+        session_id="test-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+    )
+    session.closed_output_turn_ids.add(3)
+
+    await server._queue_audio_delta(session, 3, samples_to_pcm_s16le([1000] * 480))
+
+    assert session.playback_queue.empty()
+    assert session.dropped_stale_frames == 1
+
+
+def test_cancelled_closed_turn_is_committed_as_interrupted_history():
+    asyncio.run(_assert_cancelled_closed_turn_is_committed_as_interrupted_history())
+
+
+async def _assert_cancelled_closed_turn_is_committed_as_interrupted_history():
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-call",
+        session_id="test-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+    )
+    session.closed_output_turn_ids.add(3)
+
+    await server._finalize_server_vad_turn(
+        session,
+        RealtimeTurnResult(
+            turn_id=3,
+            input_audio_bytes=640,
+            output_audio_bytes=320,
+            input_transcript="这个费用是什么？",
+            output_transcript="这是三月份的物业费。",
+            event_counts={},
+            first_audio_delta_ms=50,
+            response_done_ms=120,
+            status="cancelled",
+        ),
+    )
+
+    assert session.pending_exchanges == {}
+    assert len(session.committed_exchanges) == 1
+    exchange = session.committed_exchanges[0]
+    assert exchange.status == "interrupted"
+    assert exchange.input_transcript == "这个费用是什么？"
+    assert exchange.output_transcript == "这是三月份的物业费。"
+    assert exchange.playback_completed is False
+    assert session.gateway_history_interrupted_turns == 1
+
+
+def test_delayed_cancelled_turn_transcript_does_not_double_count_abandoned_history():
+    asyncio.run(
+        _assert_delayed_cancelled_turn_transcript_does_not_double_count_abandoned_history()
+    )
+
+
+async def _assert_delayed_cancelled_turn_transcript_does_not_double_count_abandoned_history():
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-call",
+        session_id="test-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+    )
+
+    server._abandon_pending_turn(session, 3, reason="user_interrupt")
+
+    await server._finalize_server_vad_turn(
+        session,
+        RealtimeTurnResult(
+            turn_id=3,
+            input_audio_bytes=640,
+            output_audio_bytes=320,
+            input_transcript="这个费用是什么？",
+            output_transcript="这是三月份的物业费。",
+            event_counts={},
+            first_audio_delta_ms=50,
+            response_done_ms=120,
+            status="cancelled",
+        ),
+    )
+
+    assert session.gateway_history_abandoned_turns == 0
+    assert session.gateway_history_interrupted_turns == 1
+    assert [exchange.status for exchange in session.committed_exchanges] == [
+        "interrupted"
+    ]
+
+
+def test_abandoned_opening_turn_is_not_committed_as_history():
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-call",
+        session_id="test-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+    )
+    session.output_transcripts_by_turn[OPENING_TURN_ID] = "您好，我是物业中心小明。"
+
+    server._abandon_pending_turn(session, OPENING_TURN_ID, reason="user_interrupt")
+
+    assert session.committed_exchanges == []
+    assert session.gateway_history_interrupted_turns == 0
 
 
 def test_realtime_instructions_anchor_opening_confirmation_to_fee_followup():
@@ -152,6 +417,91 @@ def test_realtime_instructions_anchor_opening_confirmation_to_fee_followup():
     assert "不要说“你家”" in instructions
     assert "避免使用“尽快缴纳”“不影响物业服务”" in instructions
     assert "严禁主动切换到化妆" in instructions
+
+
+def test_realtime_dialog_config_uses_committed_history_as_dialog_context():
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-call",
+        session_id="test-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+        prompt_snapshot=PromptSnapshot(
+            scene="fee",
+            version="v1",
+            instructions="完整业务提示词",
+            metadata={"employee_name": "小明"},
+            content_hash="hash-a",
+            loaded_at_ms=123,
+        ),
+    )
+    session.committed_exchanges.extend(
+        [
+            ConversationExchange(
+                turn_id=1,
+                status="completed",
+                input_transcript="你是哪边？",
+                output_transcript="我是物业中心小明。",
+            ),
+            ConversationExchange(
+                turn_id=2,
+                status="interrupted",
+                input_transcript="这个费用是什么？",
+                output_transcript="这是三月份的物业费。",
+            ),
+        ]
+    )
+
+    dialog_config = server._dialog_config_for_realtime_session(session)
+
+    assert [item.role for item in dialog_config.dialog_context] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert [item.text for item in dialog_config.dialog_context] == [
+        "你是哪边？",
+        "我是物业中心小明。",
+        "这个费用是什么？",
+        "这是三月份的物业费。",
+    ]
+
+
+def test_realtime_dialog_context_skips_oversized_older_exchange():
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-call",
+        session_id="test-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+    )
+    session.committed_exchanges.extend(
+        [
+            ConversationExchange(
+                turn_id=1,
+                input_transcript="旧问题",
+                output_transcript="旧回答" * 1000,
+            ),
+            ConversationExchange(
+                turn_id=2,
+                input_transcript="新问题",
+                output_transcript="新回答",
+            ),
+        ]
+    )
+
+    dialog_context = server._dialog_context_for_realtime_session(session)
+
+    assert [item.text for item in dialog_context] == ["新问题", "新回答"]
 
 
 def test_realtime_dialog_config_anchors_postgres_employee_identity():
@@ -360,7 +710,8 @@ async def _assert_realtime_phone_gateway_roundtrip() -> None:
     assert stats.turns_failed == 0
     assert stats.outbound_frames == 1
     assert stats.flushed_tail_frames == 1
-    assert stats.output_transcripts == ["hello from model"]
+    payload = server._build_call_result_payload(stats)
+    assert "output_transcripts" not in payload
     assert stats.gateway_history_committed_turns == 1
     assert stats.gateway_history_abandoned_turns == 0
     assert [item.output_transcript for item in stats.committed_exchanges] == [
@@ -372,6 +723,7 @@ async def _assert_realtime_phone_gateway_interrupts_playback() -> None:
     fake_session = FakeRealtimeSession(
         samples_to_pcm_s16le([1600] * 480 * 20),
         reconnect_delay_seconds=0.05,
+        restart_on_interruption=False,
     )
     fake_playback_control = FakePlaybackControl()
     server = FreeSwitchRealtimeGatewayServer(
@@ -411,22 +763,100 @@ async def _assert_realtime_phone_gateway_interrupts_playback() -> None:
     assert stats.realtime_interrupt_requests == 1
     assert stats.realtime_interrupt_failures == 0
     assert stats.context_repair_requests == 1
-    assert stats.realtime_session_restarts == 1
-    assert stats.gateway_history_committed_turns == 0
-    assert stats.gateway_history_abandoned_turns == 1
-    assert stats.replayed_input_frames > 0
+    assert stats.realtime_session_restarts == 0
+    assert stats.gateway_history_committed_turns == 1
+    assert stats.gateway_history_abandoned_turns == 0
+    assert stats.replayed_input_frames == 0
+    interrupted = [
+        exchange
+        for exchange in stats.committed_exchanges
+        if exchange.status == "interrupted"
+    ]
+    assert interrupted
+    assert interrupted[0].output_transcript == "hello from model"
+    assert interrupted[0].playback_completed is False
     assert fake_playback_control.break_calls == ["test-interrupt-call"]
     assert fake_session.cancel_calls == 1
-    assert fake_session.connect_calls == 2
-    assert fake_session.turn_id_starts == [0, 2]
-    assert fake_session.close_calls >= 1
-    assert any(size > 640 for size in fake_session.append_sizes)
+    assert fake_session.interruption_calls == ["hello from model"]
+    assert fake_session.connect_calls == 1
+    assert fake_session.turn_id_starts == [0]
+    assert fake_session.close_calls == 1
+    assert all(size <= 640 for size in fake_session.append_sizes)
 
 
-async def _assert_realtime_phone_gateway_replays_after_hot_restart() -> None:
+async def _assert_realtime_phone_gateway_interrupts_pending_provider_turn() -> None:
+    fake_session = FakeRealtimeSession(
+        b"",
+        restart_on_interruption=False,
+        auto_provider_events=False,
+    )
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+        realtime_session_factory=fake_session.bind,
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-pending-provider-call",
+        session_id="test-pending-provider-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+    )
+    session.current_capture_turn_id = 4
+    session.turn_speech_started_at[4] = time.monotonic()
+    session.recent_input_frames_16k.append(b"\x01\x00" * 320)
+    server._realtime_sessions[session.session_id] = fake_session
+
+    await server._handle_server_vad_speech_started(session, 5)
+    await _wait_until(lambda: not session.interruption_repair_active)
+
+    assert 5 in session.turn_speech_started_at
+    assert session.current_capture_turn_id == 5
+    assert session.turns_started == 1
+    assert session.interruptions == 1
+    assert session.context_repair_requests == 1
+    assert fake_session.interruption_calls == [None]
+    assert fake_session.cancel_calls == 1
+
+
+async def _assert_realtime_phone_gateway_restart_clears_interrupted_capture() -> None:
+    fake_session = FakeRealtimeSession(
+        b"",
+        restart_on_interruption=True,
+        auto_provider_events=False,
+    )
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+        realtime_session_factory=fake_session.bind,
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-restart-capture-call",
+        session_id="test-restart-capture-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+    )
+    session.current_capture_turn_id = 5
+    session.repair_replay_frames_16k.append(b"\x01\x00" * 320)
+    server._realtime_sessions[session.session_id] = fake_session
+
+    await server._restart_realtime_session_after_interruption(
+        session,
+        fake_session,
+        reason="server_vad_speech_started",
+    )
+
+    assert session.current_capture_turn_id is None
+    assert session.replayed_input_frames == 1
+    assert fake_session.connect_calls == 1
+    assert fake_session.append_sizes == [640]
+
+
+async def _assert_realtime_phone_gateway_replays_after_fallback_hot_restart() -> None:
     fake_session = FakeRealtimeSession(
         samples_to_pcm_s16le([1600] * 480 * 20),
-        restart_on_interruption=False,
+        restart_on_interruption=True,
     )
     fake_playback_control = FakePlaybackControl()
     server = FreeSwitchRealtimeGatewayServer(
@@ -459,15 +889,16 @@ async def _assert_realtime_phone_gateway_replays_after_hot_restart() -> None:
 
     stats = server.completed_sessions[0]
     assert stats.interruptions == 1
-    assert stats.realtime_session_restarts == 0
+    assert stats.realtime_session_restarts == 1
     assert stats.replayed_input_frames > 0
     assert stats.replayed_input_bytes > 0
-    assert fake_session.interruption_calls == ["hello from model"]
-    assert fake_session.connect_calls == 1
+    assert fake_session.interruption_calls == []
+    assert fake_session.connect_calls == 2
+    assert fake_session.close_calls >= 1
     assert any(size > 640 for size in fake_session.append_sizes)
 
 
-async def _assert_realtime_phone_gateway_replays_when_context_repair_fails() -> None:
+async def _assert_realtime_phone_gateway_does_not_replay_when_context_repair_fails() -> None:
     fake_session = FakeRealtimeSession(
         b"",
         restart_on_interruption=False,
@@ -500,9 +931,9 @@ async def _assert_realtime_phone_gateway_replays_when_context_repair_fails() -> 
     )
 
     assert fake_session.interruption_calls == [opening_text]
-    assert session.replayed_input_frames == 2
-    assert session.replayed_input_bytes == 1280
-    assert fake_session.append_sizes == [1280]
+    assert session.replayed_input_frames == 0
+    assert session.replayed_input_bytes == 0
+    assert fake_session.append_sizes == []
     assert list(session.repair_replay_frames_16k) == []
     assert session.realtime_interrupt_failures == 1
 
@@ -539,8 +970,9 @@ async def _assert_realtime_phone_gateway_waits_for_slow_context_repair() -> None
     )
 
     assert fake_session.interruption_calls == [opening_text]
-    assert session.replayed_input_frames == 1
-    assert fake_session.append_sizes == [640]
+    assert session.replayed_input_frames == 0
+    assert fake_session.append_sizes == []
+    assert list(session.repair_replay_frames_16k) == []
     assert session.realtime_interrupt_failures == 0
     assert session.context_repair_requests == 1
 
@@ -1057,6 +1489,15 @@ class RecordingWebSocket:
 
     async def send(self, payload: bytes) -> None:
         self.sent.append(payload)
+
+
+async def _wait_until(predicate: Callable[[], bool], *, timeout: float = 1.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition was not reached before timeout")
 
 
 class FakeRealtimeSession:

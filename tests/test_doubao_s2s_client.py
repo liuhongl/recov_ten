@@ -11,6 +11,7 @@ from app.doubao_s2s_client import (
     COMPRESSION_NONE,
     DEFAULT_REALTIME_APP_KEY,
     DEFAULT_RESOURCE_ID,
+    EVENT_CLIENT_INTERRUPT,
     EVENT_CHAT_RESPONSE,
     EVENT_CONNECTION_STARTED,
     EVENT_START_CONNECTION,
@@ -36,7 +37,7 @@ from app.doubao_s2s_client import (
     _format_handshake_error,
     _redact_provider_error,
 )
-from app.realtime_types import RealtimeDialogConfig
+from app.realtime_types import RealtimeDialogConfig, RealtimeDialogContextItem
 
 
 class _InvalidStatus:
@@ -101,6 +102,30 @@ def test_start_session_payload_includes_dialog_identity_fields():
     assert payload["prompt"]["system"] == "完整业务提示词"
 
 
+def test_start_session_payload_includes_dialog_context():
+    payload = build_start_session_payload(
+        DoubaoS2SSessionConfig(
+            dialog=RealtimeDialogConfig(
+                bot_name="物业中心小明",
+                model="1.2.1.1",
+                dialog_context=(
+                    RealtimeDialogContextItem(role="user", text="你是哪边？"),
+                    RealtimeDialogContextItem(
+                        role="assistant",
+                        text="我是物业中心小明。",
+                    ),
+                ),
+            ),
+        )
+    )
+
+    assert payload["dialog"]["dialog_context"] == [
+        {"role": "user", "text": "你是哪边？"},
+        {"role": "assistant", "text": "我是物业中心小明。"},
+    ]
+    assert payload["dialog"]["extra"] == {"model": "1.2.1.1"}
+
+
 def test_session_config_rejects_too_long_dialog_bot_name():
     config = DoubaoS2SSessionConfig(
         dialog=RealtimeDialogConfig(bot_name="一二三四五六七八九十一二三四五六七八九十一")
@@ -122,6 +147,20 @@ def test_event_frame_roundtrip_with_session_id():
     assert frame.event == EVENT_START_SESSION
     assert frame.session_id == "session-a"
     assert frame.payload_json == {"hello": "world"}
+
+
+def test_client_interrupt_frame_roundtrip_with_session_id():
+    raw = build_json_event_frame(
+        EVENT_CLIENT_INTERRUPT,
+        {"session_id": "session-a"},
+        session_id="session-a",
+    )
+
+    frame = parse_frame(raw)
+
+    assert frame.event == EVENT_CLIENT_INTERRUPT
+    assert frame.session_id == "session-a"
+    assert frame.payload_json == {"session_id": "session-a"}
 
 
 def test_connection_started_frame_roundtrip_with_connect_id():

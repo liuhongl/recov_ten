@@ -242,10 +242,14 @@ def build_business_opening_request(
     speaking_style: object | None = None,
     opening_template: object | None = None,
     voice: str = "female",
+    speaker: str | None = None,
 ) -> OpeningRequest:
-    speaker = VOICE_SPEAKERS.get(voice)
+    if speaker is None:
+        speaker = VOICE_SPEAKERS.get(voice)
     if speaker is None:
         raise OpeningGenerationFailed("opening.voice must be female or male")
+    voice_text = _business_text(voice, "voice", max_length=64)
+    speaker_text = _business_text(speaker, "speaker", max_length=128)
 
     employee_name_text = _business_text(employee_name, "employee_name", max_length=32)
     debtor_name_text = _business_text(debtor_name, "debtor_name", max_length=32)
@@ -270,8 +274,8 @@ def build_business_opening_request(
     }
     rendered = _render_business_opening_template(opening_template, template_values)
     return OpeningRequest(
-        voice=voice,
-        speaker=speaker,
+        voice=voice_text,
+        speaker=speaker_text,
         business=template_values,
         opening_text=rendered,
         opening_text_hash=_text_hash(rendered),

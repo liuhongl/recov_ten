@@ -636,16 +636,8 @@
                   <input id="identityName" name="identityName" value="项目员工" />
                 </label>
                 <label>
-                  指定客服 employeeName
-                  <input id="employeeName" name="employeeName" value="物业中心小明" />
-                </label>
-                <label>
-                  策略 personaId
-                  <input id="personaId" name="personaId" value="7" />
-                </label>
-                <label>
                   债务记录 debtId
-                  <input id="debtId" name="debtId" value="2056563388954320898" />
+                  <input id="debtId" name="debtId" value="2056600544053252097" />
                 </label>
               </div>
               <div class="form-actions">
@@ -920,7 +912,7 @@
           context.scene = payload.metadata_scene;
         }
         delete payload.metadata_scene;
-        for (const key of ["identityName", "employeeName", "personaId", "debtId"]) {
+        for (const key of ["identityName", "debtId"]) {
           if (payload[key]) {
             context[key] = payload[key];
           }

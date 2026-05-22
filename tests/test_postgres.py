@@ -64,12 +64,15 @@ def test_postgres_runtime_pool_failure_does_not_block_startup(monkeypatch):
 
 
 def test_postgres_runtime_success_creates_prompt_store(monkeypatch):
+    captured = {}
+
     class Pool:
         async def close(self):
             pass
 
     class FakeAsyncpg:
         async def create_pool(self, **kwargs):
+            captured.update(kwargs)
             return Pool()
 
     monkeypatch.setenv("TEST_POSTGRES_DSN", "postgresql://example")
@@ -77,10 +80,18 @@ def test_postgres_runtime_success_creates_prompt_store(monkeypatch):
 
     asyncio.run(_assert_runtime_success_creates_prompt_store())
 
+    assert captured["max_inactive_connection_lifetime"] == 0
+    assert captured["server_settings"] == {
+        "application_name": "recov_ten_gateway",
+    }
+
 
 def test_postgres_prompt_store_prepares_business_prompt_from_context():
     class Conn:
         async def fetchrow(self, query, *args):
+            if "from call_voice_config" in query:
+                assert args == ("collector-a", "000000", "女")
+                return None
             if "from call_identity_name" in query:
                 assert args == ("collector-a",)
                 return {"name": "李经理"}
@@ -101,6 +112,8 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
                     "debt_amount": "12.34",
                     "debtor_gender": "女",
                     "debtor_age": 38,
+                    "tenant_id": "000000",
+                    "persona_id": 3,
                 }
             raise AssertionError(query)
 
@@ -110,7 +123,6 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
         store.prepare_business_prompt(
             {
                 "identityName": "collector-a",
-                "personaId": "3",
                 "debtId": "2049810626160668673",
             },
             fallback_instructions="fallback",
@@ -132,7 +144,11 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert "用户只说“好的”“嗯”“你说吧”“什么事”等" in prep.prompt_snapshot.instructions
     assert "不得主动披露具体姓名、地址、房号、待处理金额" in prep.prompt_snapshot.instructions
     assert "身份确认阶段只能使用业主称呼，不得说出完整姓名" in prep.prompt_snapshot.instructions
+    assert "身份未确认时，下一句只能问：请问您是金女士本人，或方便处理这项物业费事项的授权处理人吗？" in prep.prompt_snapshot.instructions
+    assert "这类身份核实句不得夹带地址、房号、待处理金额、欠费明细或费用原因" in prep.prompt_snapshot.instructions
     assert "只能说明“物业费事项”或“费用事项需要核实”" in prep.prompt_snapshot.instructions
+    assert "# 身份确认后才可使用的信息" in prep.prompt_snapshot.instructions
+    assert "以下信息即使系统已知，身份确认前也禁止说出" in prep.prompt_snapshot.instructions
     assert "用户主动询问欠款金额" in prep.prompt_snapshot.instructions
     assert "必须先确认对方是业主本人或授权处理人" in prep.prompt_snapshot.instructions
     assert "可以说明系统记录的待处理金额" in prep.prompt_snapshot.instructions
@@ -159,6 +175,122 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert prep.opening.opening_text.startswith("您好，请问是金女士吗？我是李经理。")
 
 
+def test_postgres_prompt_store_uses_gender_matched_voice_config():
+    class Conn:
+        async def fetchrow(self, query, *args):
+            if "from call_voice_config" in query:
+                assert "male_voice_gender" in query
+                assert "female_voice_gender" in query
+                assert "call_identity_name" in query
+                assert "call_voice_library" in query
+                assert args == ("项目员工", "000000", "女")
+                return {
+                    "gender_match": "1",
+                    "selected_gender": "女",
+                    "selected_voice_id": 1002,
+                    "voice_name": "温和客服女声",
+                    "base_voice_id": "zh_female_xiaohe_jupiter_bigtts",
+                    "employee_name": "物业中心李晓莉",
+                }
+            if "from persona_call_strategy" in query:
+                assert args == ("项目员工", 7)
+                return {
+                    "strategy_core": "先确认本人，再说明费用。",
+                    "speaking_style": "正式但亲切的客服口吻。",
+                    "opening_template": "",
+                }
+            if "from debt_record" in query:
+                assert args == (2056563388954320898,)
+                return {
+                    "debtor_name": "金阳",
+                    "address": "测试小区一号楼",
+                    "debt_amount": "12.34",
+                    "debtor_gender": "女",
+                    "debtor_age": 38,
+                    "tenant_id": "000000",
+                    "persona_id": 7,
+                }
+            if "from call_identity_name" in query:
+                raise AssertionError("voice-matched employee should be used")
+            raise AssertionError(query)
+
+    store = PostgresPromptStore(FakePool(Conn()))
+
+    prep = asyncio.run(
+        store.prepare_business_prompt(
+            {
+                "identityName": "项目员工",
+                "debtId": "2056563388954320898",
+            },
+            fallback_instructions="fallback",
+        )
+    )
+
+    assert prep is not None
+    assert prep.opening.voice == "温和客服女声"
+    assert prep.opening.speaker == "zh_female_xiaohe_jupiter_bigtts"
+    assert prep.prompt_snapshot.metadata["employee_name"] == "物业中心李晓莉"
+    assert prep.prompt_snapshot.metadata["voice_name"] == "温和客服女声"
+    assert prep.prompt_snapshot.metadata["speaker"] == "zh_female_xiaohe_jupiter_bigtts"
+    assert prep.prompt_snapshot.metadata["voice_id"] == "1002"
+    assert prep.prompt_snapshot.metadata["gender_match"] == "1"
+    assert prep.prompt_snapshot.metadata["selected_gender"] == "女"
+
+
+def test_postgres_prompt_store_uses_configured_voice_when_gender_match_disabled():
+    class Conn:
+        async def fetchrow(self, query, *args):
+            if "from call_voice_config" in query:
+                assert args == ("项目员工", "000000", "女")
+                return {
+                    "gender_match": "0",
+                    "selected_gender": "",
+                    "selected_voice_id": 1002,
+                    "voice_name": "温和客服女声",
+                    "base_voice_id": "zh_female_xiaohe_jupiter_bigtts",
+                    "employee_name": "物业中心李晓莉",
+                }
+            if "from persona_call_strategy" in query:
+                assert args == ("项目员工", 7)
+                return {
+                    "strategy_core": "先确认本人，再说明费用。",
+                    "speaking_style": "正式但亲切的客服口吻。",
+                    "opening_template": "",
+                }
+            if "from debt_record" in query:
+                assert args == (2056563388954320898,)
+                return {
+                    "debtor_name": "金阳",
+                    "address": "测试小区一号楼",
+                    "debt_amount": "12.34",
+                    "debtor_gender": "女",
+                    "debtor_age": 38,
+                    "tenant_id": "000000",
+                    "persona_id": 7,
+                }
+            if "from call_identity_name" in query:
+                raise AssertionError("configured voice employee should be used")
+            raise AssertionError(query)
+
+    store = PostgresPromptStore(FakePool(Conn()))
+
+    prep = asyncio.run(
+        store.prepare_business_prompt(
+            {
+                "identityName": "项目员工",
+                "debtId": "2056563388954320898",
+            },
+            fallback_instructions="fallback",
+        )
+    )
+
+    assert prep is not None
+    assert prep.opening.voice == "温和客服女声"
+    assert prep.opening.speaker == "zh_female_xiaohe_jupiter_bigtts"
+    assert prep.prompt_snapshot.metadata["employee_name"] == "物业中心李晓莉"
+    assert prep.prompt_snapshot.metadata["gender_match"] == "0"
+
+
 def test_postgres_prompt_store_returns_none_when_business_context_missing():
     class Conn:
         async def fetchrow(self, query, *args):
@@ -176,13 +308,19 @@ def test_postgres_prompt_store_returns_none_when_business_context_missing():
     assert prep is None
 
 
-def test_postgres_prompt_store_can_pin_employee_name_from_context():
+def test_postgres_prompt_store_derives_persona_and_employee_from_debt_and_voice():
     class Conn:
         async def fetchrow(self, query, *args):
-            if "from call_identity_name" in query:
-                assert "and name = $2" in query
-                assert args == ("项目员工", "物业中心小明")
-                return {"name": "物业中心小明"}
+            if "from call_voice_config" in query:
+                assert args == ("项目员工", "000000", "女")
+                return {
+                    "gender_match": "1",
+                    "selected_gender": "女",
+                    "selected_voice_id": 1002,
+                    "voice_name": "温和客服女声",
+                    "base_voice_id": "zh_female_xiaohe_jupiter_bigtts",
+                    "employee_name": "物业中心李晓莉",
+                }
             if "from persona_call_strategy" in query:
                 assert "speaking_style" in query
                 assert "opening_template" in query
@@ -204,7 +342,11 @@ def test_postgres_prompt_store_can_pin_employee_name_from_context():
                     "debt_amount": "12.34",
                     "debtor_gender": "女",
                     "debtor_age": 38,
+                    "tenant_id": "000000",
+                    "persona_id": 7,
                 }
+            if "from call_identity_name" in query:
+                raise AssertionError("employeeName context should not be required")
             raise AssertionError(query)
 
     store = PostgresPromptStore(FakePool(Conn()))
@@ -213,8 +355,6 @@ def test_postgres_prompt_store_can_pin_employee_name_from_context():
         store.prepare_business_prompt(
             {
                 "identityName": "项目员工",
-                "employeeName": "物业中心小明",
-                "personaId": "7",
                 "debtId": "2056563388954320898",
             },
             fallback_instructions="fallback",
@@ -222,15 +362,16 @@ def test_postgres_prompt_store_can_pin_employee_name_from_context():
     )
 
     assert prep is not None
-    assert prep.prompt_snapshot.metadata["employee_name"] == "物业中心小明"
+    assert prep.prompt_snapshot.metadata["employee_name"] == "物业中心李晓莉"
+    assert prep.prompt_snapshot.metadata["personaId"] == "7"
     assert (
         prep.prompt_snapshot.metadata["speaking_style"]
         == "协调型、熟人式、耐心沟通的物业工作人员口吻。"
     )
     assert prep.opening.speaking_style == "协调型、熟人式、耐心沟通的物业工作人员口吻。"
-    assert "你是物业中心小明" in prep.prompt_snapshot.instructions
+    assert "你是物业中心李晓莉" in prep.prompt_snapshot.instructions
     assert prep.opening.opening_text == (
-        "您好，请问是金女士吗？我是物业中心小明。"
+        "您好，请问是金女士吗？我是物业中心李晓莉。"
         "这边有一项物业费事项需要和您本人核实一下，请问现在方便确认吗？"
     )
 

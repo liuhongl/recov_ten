@@ -13,6 +13,7 @@ from app.doubao_s2s_client import (
     EVENT_ASR_ENDED,
     EVENT_ASR_INFO,
     EVENT_ASR_RESPONSE,
+    EVENT_CLIENT_INTERRUPT,
     EVENT_CHAT_ENDED,
     EVENT_CHAT_RESPONSE,
     EVENT_CONNECTION_STARTED,
@@ -42,8 +43,12 @@ def test_doubao_s2s_server_vad_session_streams_audio_turn():
     asyncio.run(_assert_server_vad_session_streams_audio_turn())
 
 
-def test_doubao_s2s_hot_restarts_session_on_interruption():
-    asyncio.run(_assert_hot_restart_drops_stale_audio())
+def test_doubao_s2s_server_vad_session_sends_client_interrupt_without_restart():
+    asyncio.run(_assert_interruption_sends_client_interrupt_without_restart())
+
+
+def test_doubao_s2s_server_vad_session_prefers_gateway_restart_on_interruption():
+    assert DoubaoS2SServerVadSession.restart_on_interruption is True
 
 
 def test_doubao_s2s_seed_assistant_context_suppresses_audio_callbacks():
@@ -173,14 +178,12 @@ async def _assert_server_vad_session_streams_audio_turn() -> None:
     assert turn_results[0].event_counts[str(EVENT_TTS_FINISHED)] == 1
 
 
-async def _assert_hot_restart_drops_stale_audio() -> None:
+async def _assert_interruption_sends_client_interrupt_without_restart() -> None:
     captured = {"events": [], "session_ids": []}
     initial_audio = _float32_audio(0.25)
-    late_old_audio = _float32_audio(0.75)
-    seed_audio = _float32_audio(0.5)
-    new_audio = _float32_audio(-0.25)
     first_audio = asyncio.Event()
-    second_completed = asyncio.Event()
+    interrupted = asyncio.Event()
+    cancelled = asyncio.Event()
     audio_deltas: list[tuple[int, bytes]] = []
     turn_results: list[RealtimeTurnResult] = []
 
@@ -215,74 +218,26 @@ async def _assert_hot_restart_drops_stale_audio() -> None:
 
             if frame.event == EVENT_TASK_AUDIO:
                 task_audio_count += 1
-                if task_audio_count == 1:
-                    await _send_basic_response_start(
-                        websocket,
-                        frame.session_id,
-                        input_text="old input",
-                        output_text="old output",
-                        audio=initial_audio,
-                    )
-                    continue
-                await _send_complete_response(
+                assert task_audio_count == 1
+                await _send_basic_response_start(
                     websocket,
                     frame.session_id,
-                    input_text="new input",
-                    output_text="new output",
-                    audio=new_audio,
-                )
-                break
-
-            if frame.event == EVENT_FINISH_SESSION:
-                await websocket.send(
-                    _server_audio_frame(
-                        EVENT_TTS_AUDIO_DATA,
-                        late_old_audio,
-                        session_id=frame.session_id,
-                    )
-                )
-                await websocket.send(
-                    _server_json_frame(
-                        EVENT_SESSION_FINISHED,
-                        {"reason": "client_finish"},
-                        session_id=frame.session_id,
-                    )
+                    input_text="old input",
+                    output_text="old output",
+                    audio=initial_audio,
                 )
                 continue
 
-            if frame.event == EVENT_START_SESSION:
-                captured["session_ids"].append(frame.session_id)
-                await websocket.send(
-                    _server_json_frame(
-                        EVENT_SESSION_STARTED,
-                        {"ok": True},
-                        session_id=frame.session_id,
-                    )
-                )
-                continue
-
-            if frame.event == EVENT_SAY_HELLO:
-                await websocket.send(
-                    _server_json_frame(
-                        EVENT_TTS_STARTED,
-                        {},
-                        session_id=frame.session_id,
-                    )
-                )
-                await websocket.send(
-                    _server_audio_frame(
-                        EVENT_TTS_AUDIO_DATA,
-                        seed_audio,
-                        session_id=frame.session_id,
-                    )
-                )
+            if frame.event == EVENT_CLIENT_INTERRUPT:
                 await websocket.send(
                     _server_json_frame(
                         EVENT_TTS_FINISHED,
-                        {"content": "seed done"},
+                        {"content": "interrupted"},
                         session_id=frame.session_id,
                     )
                 )
+                interrupted.set()
+                break
 
     async def on_speech_started(turn_id: int) -> None:
         return None
@@ -294,8 +249,8 @@ async def _assert_hot_restart_drops_stale_audio() -> None:
 
     async def on_turn_completed(result: RealtimeTurnResult) -> None:
         turn_results.append(result)
-        if len(turn_results) >= 2:
-            second_completed.set()
+        if result.status == "cancelled":
+            cancelled.set()
 
     server = await serve(handler, "127.0.0.1", 0)
     try:
@@ -308,15 +263,14 @@ async def _assert_hot_restart_drops_stale_audio() -> None:
             on_turn_completed=on_turn_completed,
         )
         await session.connect()
-        assert session.restart_on_interruption is False
 
         await session.append_audio(b"\x00\x01" * 320)
         await asyncio.wait_for(first_audio.wait(), timeout=3)
         await session.handle_playback_interruption(
             interrupted_output_text="old output"
         )
-        await session.append_audio(b"\x00\x02" * 320)
-        await asyncio.wait_for(second_completed.wait(), timeout=3)
+        await asyncio.wait_for(interrupted.wait(), timeout=3)
+        await asyncio.wait_for(cancelled.wait(), timeout=3)
         await session.close()
     finally:
         server.close()
@@ -326,29 +280,17 @@ async def _assert_hot_restart_drops_stale_audio() -> None:
         EVENT_START_CONNECTION,
         EVENT_START_SESSION,
         EVENT_TASK_AUDIO,
-        EVENT_FINISH_SESSION,
-        EVENT_START_SESSION,
-        EVENT_SAY_HELLO,
-        EVENT_TASK_AUDIO,
+        EVENT_CLIENT_INTERRUPT,
     ]
-    assert len(captured["session_ids"]) == 2
-    assert captured["session_ids"][0] != captured["session_ids"][1]
+    assert EVENT_FINISH_SESSION not in captured["events"]
+    assert captured["events"].count(EVENT_START_SESSION) == 1
+    assert len(captured["session_ids"]) == 1
     assert audio_deltas == [
         (1, float32le_to_pcm_s16le(initial_audio)),
-        (2, float32le_to_pcm_s16le(new_audio)),
     ]
-    assert float32le_to_pcm_s16le(late_old_audio) not in [
-        audio for _, audio in audio_deltas
-    ]
-    assert float32le_to_pcm_s16le(seed_audio) not in [
-        audio for _, audio in audio_deltas
-    ]
-    assert [result.status for result in turn_results] == [
-        "cancelled",
-        "completed",
-    ]
+    assert [result.status for result in turn_results] == ["cancelled"]
     assert turn_results[0].turn_id == 1
-    assert turn_results[1].turn_id == 2
+    assert turn_results[0].output_transcript == "old output"
 
 
 async def _assert_seed_assistant_context_suppresses_audio_callbacks() -> None:

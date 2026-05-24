@@ -105,6 +105,45 @@ class PostgresConfig:
 
 
 @dataclass(frozen=True)
+class FlowCallbackHttpConfig:
+    enabled: bool = False
+    base_url: str = ""
+    path: str = "/system/recov/flow/external/callback"
+    client_id: str = "python-ai-call"
+    secret_env: str = "FLOW_CALLBACK_HMAC_SECRET_AI_CALL"
+    timeout_seconds: float = 10.0
+    max_attempts: int = 1
+    retry_backoff_seconds: float = 0.2
+
+
+@dataclass(frozen=True)
+class FlowCallbackConfig:
+    enabled: bool = False
+    topic: str = "recov-flow-callback"
+    producer_group: str = "recov-ten-gateway"
+    http: FlowCallbackHttpConfig = FlowCallbackHttpConfig()
+
+
+@dataclass(frozen=True)
+class RocketMQAclConfig:
+    enabled: bool = False
+    access_key_env: str = "ROCKETMQ_ACCESS_KEY"
+    secret_key_env: str = "ROCKETMQ_SECRET_KEY"
+    security_token_env: str = "ROCKETMQ_SECURITY_TOKEN"
+
+
+@dataclass(frozen=True)
+class RocketMQConfig:
+    enabled: bool = False
+    endpoint: str = "http://118.89.137.44/"
+    name_server: str = "118.89.137.44:9876"
+    producer_group: str = "recov-ten-gateway"
+    callback_topic: str = "recov-flow-callback"
+    send_timeout_ms: int = 3000
+    acl: RocketMQAclConfig = RocketMQAclConfig()
+
+
+@dataclass(frozen=True)
 class GatewayConfig:
     server: ServerConfig = ServerConfig()
     logging: LoggingConfig = LoggingConfig()
@@ -117,6 +156,8 @@ class GatewayConfig:
     vad: VadConfig = VadConfig()
     features: FeatureConfig = FeatureConfig()
     postgres: PostgresConfig = PostgresConfig()
+    flow_callback: FlowCallbackConfig = FlowCallbackConfig()
+    rocketmq: RocketMQConfig = RocketMQConfig()
 
 
 def load_config(path: str | Path | None = None) -> GatewayConfig:
@@ -442,10 +483,146 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
                 default=PostgresConfig.command_timeout_seconds,
             ),
         ),
+        flow_callback=FlowCallbackConfig(
+            enabled=_get_bool(
+                raw,
+                "flow_callback",
+                "enabled",
+                default=FlowCallbackConfig.enabled,
+            ),
+            topic=_get(
+                raw,
+                "flow_callback",
+                "topic",
+                default=FlowCallbackConfig.topic,
+            ),
+            producer_group=_get(
+                raw,
+                "flow_callback",
+                "producer_group",
+                default=FlowCallbackConfig.producer_group,
+            ),
+            http=FlowCallbackHttpConfig(
+                enabled=_get_bool(
+                    raw,
+                    "flow_callback.http",
+                    "enabled",
+                    default=FlowCallbackHttpConfig.enabled,
+                ),
+                base_url=_get(
+                    raw,
+                    "flow_callback.http",
+                    "base_url",
+                    default=FlowCallbackHttpConfig.base_url,
+                ),
+                path=_get(
+                    raw,
+                    "flow_callback.http",
+                    "path",
+                    default=FlowCallbackHttpConfig.path,
+                ),
+                client_id=_get(
+                    raw,
+                    "flow_callback.http",
+                    "client_id",
+                    default=FlowCallbackHttpConfig.client_id,
+                ),
+                secret_env=_get(
+                    raw,
+                    "flow_callback.http",
+                    "secret_env",
+                    default=FlowCallbackHttpConfig.secret_env,
+                ),
+                timeout_seconds=_get_float(
+                    raw,
+                    "flow_callback.http",
+                    "timeout_seconds",
+                    default=FlowCallbackHttpConfig.timeout_seconds,
+                ),
+                max_attempts=_get_int(
+                    raw,
+                    "flow_callback.http",
+                    "max_attempts",
+                    default=FlowCallbackHttpConfig.max_attempts,
+                ),
+                retry_backoff_seconds=_get_float(
+                    raw,
+                    "flow_callback.http",
+                    "retry_backoff_seconds",
+                    default=FlowCallbackHttpConfig.retry_backoff_seconds,
+                ),
+            ),
+        ),
+        rocketmq=RocketMQConfig(
+            enabled=_get_bool(
+                raw,
+                "rocketmq",
+                "enabled",
+                default=RocketMQConfig.enabled,
+            ),
+            endpoint=_get(
+                raw,
+                "rocketmq",
+                "endpoint",
+                default=RocketMQConfig.endpoint,
+            ),
+            name_server=_get(
+                raw,
+                "rocketmq",
+                "name_server",
+                default=RocketMQConfig.name_server,
+            ),
+            producer_group=_get(
+                raw,
+                "rocketmq",
+                "producer_group",
+                default=RocketMQConfig.producer_group,
+            ),
+            callback_topic=_get(
+                raw,
+                "rocketmq",
+                "callback_topic",
+                default=RocketMQConfig.callback_topic,
+            ),
+            send_timeout_ms=_get_int(
+                raw,
+                "rocketmq",
+                "send_timeout_ms",
+                default=RocketMQConfig.send_timeout_ms,
+            ),
+            acl=RocketMQAclConfig(
+                enabled=_get_bool(
+                    raw,
+                    "rocketmq.acl",
+                    "enabled",
+                    default=RocketMQAclConfig.enabled,
+                ),
+                access_key_env=_get(
+                    raw,
+                    "rocketmq.acl",
+                    "access_key_env",
+                    default=RocketMQAclConfig.access_key_env,
+                ),
+                secret_key_env=_get(
+                    raw,
+                    "rocketmq.acl",
+                    "secret_key_env",
+                    default=RocketMQAclConfig.secret_key_env,
+                ),
+                security_token_env=_get(
+                    raw,
+                    "rocketmq.acl",
+                    "security_token_env",
+                    default=RocketMQAclConfig.security_token_env,
+                ),
+            ),
+        ),
     )
     config = _apply_env_overrides(config)
     _validate_media_contract(config.freeswitch)
     _validate_postgres_config(config.postgres)
+    _validate_flow_callback_config(config.flow_callback)
+    _validate_rocketmq_config(config.rocketmq)
     return config
 
 
@@ -471,7 +648,7 @@ def _get(
     *,
     default: str,
 ) -> str:
-    value = raw.get(section, {}).get(name, default)
+    value = _section(raw, section).get(name, default)
     return str(value)
 
 
@@ -482,7 +659,7 @@ def _get_int(
     *,
     default: int,
 ) -> int:
-    value = raw.get(section, {}).get(name, default)
+    value = _section(raw, section).get(name, default)
     try:
         return int(value)
     except (TypeError, ValueError) as err:
@@ -496,7 +673,7 @@ def _get_float(
     *,
     default: float,
 ) -> float:
-    value = raw.get(section, {}).get(name, default)
+    value = _section(raw, section).get(name, default)
     try:
         return float(value)
     except (TypeError, ValueError) as err:
@@ -510,8 +687,17 @@ def _get_bool(
     *,
     default: bool,
 ) -> bool:
-    value = raw.get(section, {}).get(name, default)
+    value = _section(raw, section).get(name, default)
     return _parse_bool(value, f"{section}.{name}")
+
+
+def _section(raw: dict[str, Any], section: str) -> dict[str, Any]:
+    table: Any = raw
+    for part in section.split("."):
+        if not isinstance(table, dict):
+            return {}
+        table = table.get(part, {})
+    return table if isinstance(table, dict) else {}
 
 
 def _parse_bool(value: Any, name: str) -> bool:
@@ -735,6 +921,89 @@ def _apply_env_overrides(config: GatewayConfig) -> GatewayConfig:
                 config.postgres.command_timeout_seconds,
             ),
         ),
+        flow_callback=FlowCallbackConfig(
+            enabled=_env_bool(
+                "FLOW_CALLBACK_ENABLED",
+                config.flow_callback.enabled,
+            ),
+            topic=os.getenv("FLOW_CALLBACK_TOPIC", config.flow_callback.topic),
+            producer_group=os.getenv(
+                "FLOW_CALLBACK_PRODUCER_GROUP",
+                config.flow_callback.producer_group,
+            ),
+            http=FlowCallbackHttpConfig(
+                enabled=_env_bool(
+                    "FLOW_CALLBACK_HTTP_ENABLED",
+                    config.flow_callback.http.enabled,
+                ),
+                base_url=os.getenv(
+                    "FLOW_CALLBACK_HTTP_BASE_URL",
+                    config.flow_callback.http.base_url,
+                ),
+                path=os.getenv(
+                    "FLOW_CALLBACK_HTTP_PATH",
+                    config.flow_callback.http.path,
+                ),
+                client_id=os.getenv(
+                    "FLOW_CALLBACK_HTTP_CLIENT_ID",
+                    config.flow_callback.http.client_id,
+                ),
+                secret_env=os.getenv(
+                    "FLOW_CALLBACK_HTTP_SECRET_ENV",
+                    config.flow_callback.http.secret_env,
+                ),
+                timeout_seconds=_env_float(
+                    "FLOW_CALLBACK_HTTP_TIMEOUT_SECONDS",
+                    config.flow_callback.http.timeout_seconds,
+                ),
+                max_attempts=_env_int(
+                    "FLOW_CALLBACK_HTTP_MAX_ATTEMPTS",
+                    config.flow_callback.http.max_attempts,
+                ),
+                retry_backoff_seconds=_env_float(
+                    "FLOW_CALLBACK_HTTP_RETRY_BACKOFF_SECONDS",
+                    config.flow_callback.http.retry_backoff_seconds,
+                ),
+            ),
+        ),
+        rocketmq=RocketMQConfig(
+            enabled=_env_bool("ROCKETMQ_ENABLED", config.rocketmq.enabled),
+            endpoint=os.getenv("ROCKETMQ_ENDPOINT", config.rocketmq.endpoint),
+            name_server=os.getenv(
+                "ROCKETMQ_NAME_SERVER",
+                config.rocketmq.name_server,
+            ),
+            producer_group=os.getenv(
+                "ROCKETMQ_PRODUCER_GROUP",
+                config.rocketmq.producer_group,
+            ),
+            callback_topic=os.getenv(
+                "ROCKETMQ_CALLBACK_TOPIC",
+                config.rocketmq.callback_topic,
+            ),
+            send_timeout_ms=_env_int(
+                "ROCKETMQ_SEND_TIMEOUT_MS",
+                config.rocketmq.send_timeout_ms,
+            ),
+            acl=RocketMQAclConfig(
+                enabled=_env_bool(
+                    "ROCKETMQ_ACL_ENABLED",
+                    config.rocketmq.acl.enabled,
+                ),
+                access_key_env=os.getenv(
+                    "ROCKETMQ_ACCESS_KEY_ENV",
+                    config.rocketmq.acl.access_key_env,
+                ),
+                secret_key_env=os.getenv(
+                    "ROCKETMQ_SECRET_KEY_ENV",
+                    config.rocketmq.acl.secret_key_env,
+                ),
+                security_token_env=os.getenv(
+                    "ROCKETMQ_SECURITY_TOKEN_ENV",
+                    config.rocketmq.acl.security_token_env,
+                ),
+            ),
+        ),
     )
 
 
@@ -780,3 +1049,33 @@ def _validate_postgres_config(config: PostgresConfig) -> None:
         raise ValueError("postgres.min_pool_size must not exceed max_pool_size")
     if config.command_timeout_seconds <= 0:
         raise ValueError("postgres.command_timeout_seconds must be positive")
+
+
+def _validate_flow_callback_config(config: FlowCallbackConfig) -> None:
+    http = config.http
+    if http.timeout_seconds <= 0:
+        raise ValueError("flow_callback.http.timeout_seconds must be positive")
+    if http.max_attempts < 1:
+        raise ValueError("flow_callback.http.max_attempts must be positive")
+    if http.retry_backoff_seconds < 0:
+        raise ValueError("flow_callback.http.retry_backoff_seconds must be non-negative")
+    if not http.path.startswith("/"):
+        raise ValueError("flow_callback.http.path must start with /")
+    if http.enabled and not http.base_url.strip():
+        raise ValueError("flow_callback.http.base_url is required when enabled")
+    if http.enabled and not http.client_id.strip():
+        raise ValueError("flow_callback.http.client_id is required when enabled")
+    if http.enabled and not http.secret_env.strip():
+        raise ValueError("flow_callback.http.secret_env is required when enabled")
+
+
+def _validate_rocketmq_config(config: RocketMQConfig) -> None:
+    if config.send_timeout_ms <= 0:
+        raise ValueError("rocketmq.send_timeout_ms must be positive")
+    if config.enabled:
+        if not config.name_server.strip():
+            raise ValueError("rocketmq.name_server is required when enabled")
+        if not config.callback_topic.strip():
+            raise ValueError("rocketmq.callback_topic is required when enabled")
+        if not config.producer_group.strip():
+            raise ValueError("rocketmq.producer_group is required when enabled")

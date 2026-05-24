@@ -80,6 +80,35 @@ def test_load_config_from_toml(tmp_path):
             metrics_enabled = true
             recording_enabled = false
 
+            [flow_callback]
+            enabled = true
+            topic = "recov-flow-callback"
+            producer_group = "recov-ten-gateway"
+
+            [flow_callback.http]
+            enabled = true
+            base_url = "https://flow.example"
+            path = "/system/recov/flow/external/callback"
+            client_id = "python-ai-call"
+            secret_env = "TEST_FLOW_CALLBACK_SECRET"
+            timeout_seconds = 8.5
+            max_attempts = 3
+            retry_backoff_seconds = 0.25
+
+            [rocketmq]
+            enabled = true
+            endpoint = "http://118.89.137.44/"
+            name_server = "118.89.137.44:9876"
+            producer_group = "recov-ten-gateway"
+            callback_topic = "recov-flow-callback"
+            send_timeout_ms = 4500
+
+            [rocketmq.acl]
+            enabled = true
+            access_key_env = "TEST_ROCKETMQ_ACCESS_KEY"
+            secret_key_env = "TEST_ROCKETMQ_SECRET_KEY"
+            security_token_env = "TEST_ROCKETMQ_SECURITY_TOKEN"
+
             [postgres]
             enabled = true
             dsn_env = "TEST_POSTGRES_DSN"
@@ -129,6 +158,27 @@ def test_load_config_from_toml(tmp_path):
     assert config.vad.barge_in_enabled is True
     assert config.features.metrics_enabled is True
     assert config.features.recording_enabled is False
+    assert config.flow_callback.enabled is True
+    assert config.flow_callback.topic == "recov-flow-callback"
+    assert config.flow_callback.producer_group == "recov-ten-gateway"
+    assert config.flow_callback.http.enabled is True
+    assert config.flow_callback.http.base_url == "https://flow.example"
+    assert config.flow_callback.http.path == "/system/recov/flow/external/callback"
+    assert config.flow_callback.http.client_id == "python-ai-call"
+    assert config.flow_callback.http.secret_env == "TEST_FLOW_CALLBACK_SECRET"
+    assert config.flow_callback.http.timeout_seconds == 8.5
+    assert config.flow_callback.http.max_attempts == 3
+    assert config.flow_callback.http.retry_backoff_seconds == 0.25
+    assert config.rocketmq.enabled is True
+    assert config.rocketmq.endpoint == "http://118.89.137.44/"
+    assert config.rocketmq.name_server == "118.89.137.44:9876"
+    assert config.rocketmq.producer_group == "recov-ten-gateway"
+    assert config.rocketmq.callback_topic == "recov-flow-callback"
+    assert config.rocketmq.send_timeout_ms == 4500
+    assert config.rocketmq.acl.enabled is True
+    assert config.rocketmq.acl.access_key_env == "TEST_ROCKETMQ_ACCESS_KEY"
+    assert config.rocketmq.acl.secret_key_env == "TEST_ROCKETMQ_SECRET_KEY"
+    assert config.rocketmq.acl.security_token_env == "TEST_ROCKETMQ_SECURITY_TOKEN"
     assert config.postgres.enabled is True
     assert config.postgres.dsn_env == "TEST_POSTGRES_DSN"
     assert config.postgres.max_pool_size == 7
@@ -161,6 +211,30 @@ def test_environment_overrides(monkeypatch):
     monkeypatch.setenv("VAD_END_SILENCE_MS", "600")
     monkeypatch.setenv("VAD_BARGE_IN_ENABLED", "true")
     monkeypatch.setenv("METRICS_ENABLED", "false")
+    monkeypatch.setenv("FLOW_CALLBACK_ENABLED", "true")
+    monkeypatch.setenv("FLOW_CALLBACK_TOPIC", "env-flow-callback")
+    monkeypatch.setenv("FLOW_CALLBACK_PRODUCER_GROUP", "env-producer")
+    monkeypatch.setenv("FLOW_CALLBACK_HTTP_ENABLED", "true")
+    monkeypatch.setenv("FLOW_CALLBACK_HTTP_BASE_URL", "https://env-flow.example")
+    monkeypatch.setenv(
+        "FLOW_CALLBACK_HTTP_PATH",
+        "/system/recov/flow/external/callback",
+    )
+    monkeypatch.setenv("FLOW_CALLBACK_HTTP_CLIENT_ID", "env-python-ai-call")
+    monkeypatch.setenv("FLOW_CALLBACK_HTTP_SECRET_ENV", "ENV_FLOW_CALLBACK_SECRET")
+    monkeypatch.setenv("FLOW_CALLBACK_HTTP_TIMEOUT_SECONDS", "9.5")
+    monkeypatch.setenv("FLOW_CALLBACK_HTTP_MAX_ATTEMPTS", "4")
+    monkeypatch.setenv("FLOW_CALLBACK_HTTP_RETRY_BACKOFF_SECONDS", "0.75")
+    monkeypatch.setenv("ROCKETMQ_ENABLED", "true")
+    monkeypatch.setenv("ROCKETMQ_ENDPOINT", "http://mq.example/")
+    monkeypatch.setenv("ROCKETMQ_NAME_SERVER", "mq.example:9876")
+    monkeypatch.setenv("ROCKETMQ_PRODUCER_GROUP", "env-mq-producer")
+    monkeypatch.setenv("ROCKETMQ_CALLBACK_TOPIC", "env-flow-callback")
+    monkeypatch.setenv("ROCKETMQ_SEND_TIMEOUT_MS", "4500")
+    monkeypatch.setenv("ROCKETMQ_ACL_ENABLED", "true")
+    monkeypatch.setenv("ROCKETMQ_ACCESS_KEY_ENV", "ENV_ROCKETMQ_ACCESS_KEY")
+    monkeypatch.setenv("ROCKETMQ_SECRET_KEY_ENV", "ENV_ROCKETMQ_SECRET_KEY")
+    monkeypatch.setenv("ROCKETMQ_SECURITY_TOKEN_ENV", "ENV_ROCKETMQ_TOKEN")
     monkeypatch.setenv("POSTGRES_ENABLED", "true")
     monkeypatch.setenv("POSTGRES_DSN_ENV", "LOCAL_POSTGRES_DSN")
     monkeypatch.setenv("POSTGRES_MAX_POOL_SIZE", "9")
@@ -193,6 +267,27 @@ def test_environment_overrides(monkeypatch):
     assert config.vad.end_silence_ms == 600
     assert config.vad.barge_in_enabled is True
     assert config.features.metrics_enabled is False
+    assert config.flow_callback.enabled is True
+    assert config.flow_callback.topic == "env-flow-callback"
+    assert config.flow_callback.producer_group == "env-producer"
+    assert config.flow_callback.http.enabled is True
+    assert config.flow_callback.http.base_url == "https://env-flow.example"
+    assert config.flow_callback.http.path == "/system/recov/flow/external/callback"
+    assert config.flow_callback.http.client_id == "env-python-ai-call"
+    assert config.flow_callback.http.secret_env == "ENV_FLOW_CALLBACK_SECRET"
+    assert config.flow_callback.http.timeout_seconds == 9.5
+    assert config.flow_callback.http.max_attempts == 4
+    assert config.flow_callback.http.retry_backoff_seconds == 0.75
+    assert config.rocketmq.enabled is True
+    assert config.rocketmq.endpoint == "http://mq.example/"
+    assert config.rocketmq.name_server == "mq.example:9876"
+    assert config.rocketmq.producer_group == "env-mq-producer"
+    assert config.rocketmq.callback_topic == "env-flow-callback"
+    assert config.rocketmq.send_timeout_ms == 4500
+    assert config.rocketmq.acl.enabled is True
+    assert config.rocketmq.acl.access_key_env == "ENV_ROCKETMQ_ACCESS_KEY"
+    assert config.rocketmq.acl.secret_key_env == "ENV_ROCKETMQ_SECRET_KEY"
+    assert config.rocketmq.acl.security_token_env == "ENV_ROCKETMQ_TOKEN"
     assert config.postgres.enabled is True
     assert config.postgres.dsn_env == "LOCAL_POSTGRES_DSN"
     assert config.postgres.max_pool_size == 9
@@ -228,4 +323,22 @@ def test_rejects_non_pcma_media_contract(tmp_path):
     )
 
     with pytest.raises(ValueError, match="sample_rate=8000"):
+        load_config(config_file)
+
+
+def test_rejects_invalid_flow_callback_http_path(tmp_path):
+    config_file = tmp_path / "bad.toml"
+    config_file.write_text(
+        textwrap.dedent(
+            """
+            [flow_callback.http]
+            enabled = true
+            base_url = "https://flow.example"
+            path = "system/recov/flow/external/callback"
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="flow_callback.http.path"):
         load_config(config_file)

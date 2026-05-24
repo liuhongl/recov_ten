@@ -107,6 +107,8 @@ class HealthServer:
                                     ),
                                 },
                                 "features": asdict(config.features),
+                                "flow_callback": asdict(config.flow_callback),
+                                "rocketmq": asdict(config.rocketmq),
                                 "outbound": {
                                     "enabled": config.outbound.enabled,
                                     "endpoint_template": (
@@ -212,7 +214,15 @@ class HealthServer:
 
                     self._send_json(
                         HTTPStatus.ACCEPTED,
-                        {"status": "accepted", "call": call},
+                        {
+                            "status": "accepted",
+                            "accepted": True,
+                            "businessId": (
+                                call.get("external_call_id") or call.get("call_id")
+                            ),
+                            "message": "AI外呼任务已受理",
+                            "call": call,
+                        },
                     )
                     return
 

@@ -66,6 +66,35 @@ barge_in_enabled = false
 metrics_enabled = true
 recording_enabled = false
 
+[flow_callback]
+enabled = false
+topic = "recov-flow-callback"
+producer_group = "recov-ten-gateway"
+
+[flow_callback.http]
+enabled = false
+base_url = "http://java-flow.test"
+path = "/system/recov/flow/external/callback"
+client_id = "python-ai-call"
+secret_env = "FLOW_CALLBACK_HMAC_SECRET_AI_CALL"
+timeout_seconds = 10.0
+max_attempts = 1
+retry_backoff_seconds = 0.2
+
+[rocketmq]
+enabled = false
+endpoint = "http://118.89.137.44/"
+name_server = "118.89.137.44:9876"
+producer_group = "recov-ten-gateway"
+callback_topic = "recov-flow-callback"
+send_timeout_ms = 3000
+
+[rocketmq.acl]
+enabled = false
+access_key_env = "ROCKETMQ_ACCESS_KEY"
+secret_key_env = "ROCKETMQ_SECRET_KEY"
+security_token_env = "ROCKETMQ_SECURITY_TOKEN"
+
 [postgres]
 enabled = false
 dsn_env = "POSTGRES_DSN"

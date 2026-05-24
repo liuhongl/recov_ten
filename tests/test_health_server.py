@@ -4,7 +4,12 @@ import json
 import threading
 from urllib.request import Request, urlopen
 
-from app.config import GatewayConfig, ServerConfig
+from app.config import (
+    GatewayConfig,
+    RocketMQAclConfig,
+    RocketMQConfig,
+    ServerConfig,
+)
 from app.health_server import HealthServer
 
 
@@ -47,6 +52,55 @@ def test_ready_endpoint_does_not_expose_api_keys():
         thread.join(timeout=3)
 
 
+def test_ready_endpoint_exposes_rocketmq_non_secret_config():
+    config = GatewayConfig(
+        server=ServerConfig(host="127.0.0.1", port=0),
+        rocketmq=RocketMQConfig(
+            enabled=True,
+            endpoint="http://mq.example/",
+            name_server="mq.example:9876",
+            producer_group="recov-ten-gateway",
+            callback_topic="recov-flow-callback",
+            send_timeout_ms=4500,
+            acl=RocketMQAclConfig(
+                enabled=True,
+                access_key_env="ROCKETMQ_ACCESS_KEY",
+                secret_key_env="ROCKETMQ_SECRET_KEY",
+                security_token_env="ROCKETMQ_SECURITY_TOKEN",
+            ),
+        ),
+    )
+    server = HealthServer(config)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.address
+        with urlopen(f"http://{host}:{port}/ready", timeout=3) as response:
+            body = response.read().decode("utf-8")
+            payload = json.loads(body)
+
+        assert response.status == 200
+        assert payload["config"]["rocketmq"] == {
+            "enabled": True,
+            "endpoint": "http://mq.example/",
+            "name_server": "mq.example:9876",
+            "producer_group": "recov-ten-gateway",
+            "callback_topic": "recov-flow-callback",
+            "send_timeout_ms": 4500,
+            "acl": {
+                "enabled": True,
+                "access_key_env": "ROCKETMQ_ACCESS_KEY",
+                "secret_key_env": "ROCKETMQ_SECRET_KEY",
+                "security_token_env": "ROCKETMQ_SECURITY_TOKEN",
+            },
+        }
+        assert "secret-value" not in body
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
 def test_calls_endpoint_accepts_outbound_request():
     manager = FakeCallManager()
     config = GatewayConfig(server=ServerConfig(host="127.0.0.1", port=0))
@@ -67,6 +121,9 @@ def test_calls_endpoint_accepts_outbound_request():
 
         assert response.status == 202
         assert payload["status"] == "accepted"
+        assert payload["accepted"] is True
+        assert payload["businessId"] == "call-1"
+        assert payload["message"] == "AI外呼任务已受理"
         assert payload["call"]["call_id"] == "call-1"
         assert manager.created_payload == {"destination": "1000"}
     finally:

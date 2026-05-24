@@ -4,9 +4,11 @@ import asyncio
 import json
 
 from app.config import GatewayConfig, PostgresConfig
+from app.flow_callback import FlowCallbackEvent
 from app import postgres
 from app.postgres import (
     BusinessPromptPreparation,
+    PostgresCallDestinationStore,
     PostgresCallResultWriter,
     PostgresCallRecordStore,
     PostgresPromptStore,
@@ -186,6 +188,38 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert "无租客信息时，不得主动假设存在租客" in prep.prompt_snapshot.instructions
     assert "不得建议联系租客" in prep.prompt_snapshot.instructions
     assert prep.opening.opening_text.startswith("您好，请问是金女士吗？我是李经理。")
+
+
+def test_postgres_call_destination_store_resolves_debtor_phone_from_debt_id():
+    class Conn:
+        async def fetchrow(self, query, *args):
+            assert "debtor_phone" in query
+            assert "from debt_record" in query
+            assert args == (2049810626160668673,)
+            return {"debtor_phone": "15800967789"}
+
+    store = PostgresCallDestinationStore(FakePool(Conn()))
+
+    destination = asyncio.run(
+        store.resolve_destination({"debtId": "2049810626160668673"})
+    )
+
+    assert destination == "15800967789"
+
+
+def test_postgres_call_destination_store_returns_none_when_phone_missing():
+    class Conn:
+        async def fetchrow(self, query, *args):
+            assert args == (2049810626160668673,)
+            return {"debtor_phone": ""}
+
+    store = PostgresCallDestinationStore(FakePool(Conn()))
+
+    destination = asyncio.run(
+        store.resolve_destination({"debtId": "2049810626160668673"})
+    )
+
+    assert destination is None
 
 
 def test_postgres_prompt_store_uses_gender_matched_voice_config():
@@ -538,6 +572,91 @@ def test_postgres_call_result_writer_updates_call_record_with_simple_transcript(
                 },
             )
         ]
+
+    asyncio.run(assert_writer())
+
+
+def test_postgres_call_result_writer_emits_success_flow_callback_after_transcript_update():
+    async def assert_writer():
+        flow_events: list[FlowCallbackEvent] = []
+
+        class Store:
+            async def mark_transcript_completed(self, context, transcript_json):
+                return True
+
+        class FakeFlowCallbackWriter:
+            def publish(self, event):
+                flow_events.append(event)
+                return True
+
+        writer = PostgresCallResultWriter(
+            Store(),
+            flow_callback_writer=FakeFlowCallbackWriter(),
+        )
+        writer.start()
+        try:
+            assert writer.enqueue_nowait(
+                {
+                    "call_id": "internal-media-call",
+                    "context": {
+                        "tenantId": "000000",
+                        "taskId": "task-1",
+                        "callId": "990000000000032001",
+                        "debtId": "2049810626160668673",
+                    },
+                    "turns": [{"role": "assistant", "text": "您好"}],
+                }
+            )
+            await asyncio.wait_for(writer.queue.join(), timeout=1.0)
+        finally:
+            await writer.stop()
+
+        assert len(flow_events) == 1
+        assert flow_events[0].status == "SUCCESS"
+        assert flow_events[0].tenant_id == "000000"
+        assert flow_events[0].task_id == "task-1"
+        assert flow_events[0].business_id == "internal-media-call"
+        assert flow_events[0].message == "外呼完成，转写已写入"
+
+    asyncio.run(assert_writer())
+
+
+def test_postgres_call_result_writer_does_not_emit_success_when_transcript_update_noops():
+    async def assert_writer():
+        flow_events: list[FlowCallbackEvent] = []
+
+        class Store:
+            async def mark_transcript_completed(self, context, transcript_json):
+                return False
+
+        class FakeFlowCallbackWriter:
+            def publish(self, event):
+                flow_events.append(event)
+                return True
+
+        writer = PostgresCallResultWriter(
+            Store(),
+            flow_callback_writer=FakeFlowCallbackWriter(),
+        )
+        writer.start()
+        try:
+            assert writer.enqueue_nowait(
+                {
+                    "call_id": "internal-media-call",
+                    "context": {
+                        "tenantId": "000000",
+                        "taskId": "task-1",
+                        "callId": "990000000000032001",
+                        "debtId": "2049810626160668673",
+                    },
+                    "turns": [{"role": "assistant", "text": "您好"}],
+                }
+            )
+            await asyncio.wait_for(writer.queue.join(), timeout=1.0)
+        finally:
+            await writer.stop()
+
+        assert flow_events == []
 
     asyncio.run(assert_writer())
 

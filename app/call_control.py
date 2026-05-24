@@ -10,7 +10,7 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from .config import GatewayConfig, OutboundCallConfig
@@ -19,6 +19,7 @@ from .freeswitch_event_socket import (
     EventSocketError,
     FreeSwitchEventSocketClient,
 )
+from .flow_callback import FlowCallbackWriterProtocol, build_flow_callback_event
 from .opening import (
     OpeningAudioGenerator,
     OpeningAudioStore,
@@ -44,7 +45,7 @@ class CallControlError(ValueError):
 
 @dataclass(frozen=True)
 class CreateCallRequest:
-    destination: str
+    destination: str | None
     external_call_id: str | None = None
     endpoint: str | None = None
     dialplan_extension: str | None = None
@@ -206,6 +207,10 @@ class CallRecordUpdaterProtocol(Protocol):
     def mark_no_answer(self, context: dict[str, Any]) -> bool: ...
 
 
+class CallDestinationResolverProtocol(Protocol):
+    def resolve(self, context: dict[str, Any]) -> str | None: ...
+
+
 class OutboundCallManager:
     def __init__(
         self,
@@ -216,6 +221,8 @@ class OutboundCallManager:
         opening_store: OpeningAudioStore | None = None,
         business_prompt_preparer: BusinessPromptPreparerProtocol | None = None,
         call_record_updater: CallRecordUpdaterProtocol | None = None,
+        flow_callback_writer: FlowCallbackWriterProtocol | None = None,
+        destination_resolver: CallDestinationResolverProtocol | None = None,
     ) -> None:
         self.config = config
         self._dialer_factory = dialer_factory or (lambda: FreeSwitchOutboundDialer(config))
@@ -223,7 +230,10 @@ class OutboundCallManager:
         self._opening_store = opening_store
         self._business_prompt_preparer = business_prompt_preparer
         self._call_record_updater = call_record_updater
+        self._flow_callback_writer = flow_callback_writer
+        self._destination_resolver = destination_resolver
         self._calls: dict[str, OutboundCallRecord] = {}
+        self._external_call_index: dict[str, str] = {}
         self._lock = threading.RLock()
         self._executor = ThreadPoolExecutor(
             max_workers=4,
@@ -254,16 +264,52 @@ class OutboundCallManager:
             )
 
         request = parse_create_call_request(payload)
+        self._validate_flow_callback_context(request.context)
+        request = self._resolve_call_destination(request)
+        idempotency_key = _idempotency_key(request)
+        if idempotency_key is not None:
+            with self._lock:
+                existing = self._record_for_idempotency_key_locked(idempotency_key)
+                if existing is not None:
+                    LOGGER.info(
+                        "outbound_call_idempotent_accept idempotency_key=%s "
+                        "call_id=%s status=%s",
+                        idempotency_key,
+                        existing.call_id,
+                        existing.status,
+                    )
+                    return existing.to_dict()
+
         record = self._build_record(request)
+
         business_opening = self._prepare_business_prompt(record)
         opening = business_opening or request.opening
         if opening is not None:
             self._prepare_opening(record, opening)
 
         with self._lock:
+            if idempotency_key is not None:
+                existing = self._record_for_idempotency_key_locked(idempotency_key)
+                if existing is not None:
+                    LOGGER.info(
+                        "outbound_call_idempotent_accept idempotency_key=%s "
+                        "call_id=%s status=%s",
+                        idempotency_key,
+                        existing.call_id,
+                        existing.status,
+                    )
+                    return existing.to_dict()
             self._calls[record.call_id] = record
+            if idempotency_key is not None:
+                self._external_call_index[idempotency_key] = record.call_id
             self._trim_locked()
 
+        self._publish_flow_callback(
+            record.context,
+            status="ACCEPTED",
+            message="外呼任务已受理",
+            business_id=_business_id(record),
+        )
         self._executor.submit(self._run_originate_worker, record.call_id)
         LOGGER.info(
             "outbound_call_queued call_id=%s destination=%s endpoint=%s",
@@ -306,6 +352,7 @@ class OutboundCallManager:
 
     def handle_channel_event(self, event: ChannelStateEvent) -> None:
         sync_context: dict[str, Any] | None = None
+        sync_business_id: str | None = None
         sync_status: str | None = None
         with self._lock:
             record = self._calls.get(event.call_id)
@@ -315,8 +362,15 @@ class OutboundCallManager:
             self._apply_channel_event_locked(record, event)
             if not was_terminal and _is_terminal_status(record.status):
                 sync_context = dict(record.context)
+                sync_business_id = _business_id(record)
                 sync_status = record.status
-        self._sync_call_record_terminal(sync_context, sync_status)
+        if self._sync_call_record_terminal(sync_context, sync_status):
+            self._publish_flow_callback(
+                sync_context or {},
+                status="FAILED",
+                message="外呼失败",
+                business_id=sync_business_id,
+            )
 
     def mark_media_connected(self, call_id: str) -> None:
         with self._lock:
@@ -349,6 +403,7 @@ class OutboundCallManager:
     def _build_record(self, request: CreateCallRequest) -> OutboundCallRecord:
         outbound = self.config.outbound
         destination = request.destination
+        assert destination is not None
         endpoint = request.endpoint or _render_endpoint_template(
             outbound.endpoint_template,
             destination,
@@ -506,7 +561,14 @@ class OutboundCallManager:
                 self._set_status_locked(record, "failed")
                 self._discard_opening_locked(record.call_id)
                 failed_context = dict(record.context)
-            self._sync_call_record_failed(failed_context)
+                failed_business_id = _business_id(record)
+            if self._sync_call_record_failed(failed_context):
+                self._publish_flow_callback(
+                    failed_context,
+                    status="FAILED",
+                    message="外呼失败",
+                    business_id=failed_business_id,
+                )
             LOGGER.info(
                 "outbound_call_endpoint_resolve_failed call_id=%s endpoint=%s error=%s",
                 call_id,
@@ -535,11 +597,18 @@ class OutboundCallManager:
                 self._set_status_locked(record, "failed")
                 self._discard_opening_locked(record.call_id)
                 failed_context = dict(record.context)
+                failed_business_id = _business_id(record)
             else:
                 if record.status in {"originating", "queued"}:
                     self._set_status_locked(record, "originated")
             record.originate_completed_at_ms = _now_ms()
-        self._sync_call_record_failed(failed_context)
+        if self._sync_call_record_failed(failed_context):
+            self._publish_flow_callback(
+                failed_context or {},
+                status="FAILED",
+                message="外呼失败",
+                business_id=failed_business_id,
+            )
         LOGGER.info(
             "outbound_call_originate_finished call_id=%s status=%s reply=%s",
             call_id,
@@ -569,9 +638,16 @@ class OutboundCallManager:
                     record.completed_at_ms = record.completed_at_ms or _now_ms()
                 self._set_status_locked(record, "hangup_failed")
                 failed_context = dict(record.context)
+                failed_business_id = _business_id(record)
             else:
                 self._set_status_locked(record, "hangup_sent")
-        self._sync_call_record_failed(failed_context)
+        if self._sync_call_record_failed(failed_context):
+            self._publish_flow_callback(
+                failed_context or {},
+                status="FAILED",
+                message="外呼失败",
+                business_id=failed_business_id,
+            )
 
     def _mark_failed(self, call_id: str, error: str) -> None:
         failed_context = None
@@ -584,7 +660,14 @@ class OutboundCallManager:
             self._set_status_locked(record, "failed")
             self._discard_opening_locked(record.call_id)
             failed_context = dict(record.context)
-        self._sync_call_record_failed(failed_context)
+            failed_business_id = _business_id(record)
+        if self._sync_call_record_failed(failed_context):
+            self._publish_flow_callback(
+                failed_context,
+                status="FAILED",
+                message="外呼失败",
+                business_id=failed_business_id,
+            )
 
     def _apply_channel_event_locked(
         self,
@@ -633,54 +716,129 @@ class OutboundCallManager:
         records = sorted(self._calls.values(), key=lambda call: call.created_at_ms)
         for record in records[: len(self._calls) - max_recent_calls]:
             self._calls.pop(record.call_id, None)
+            if record.external_call_id:
+                self._external_call_index.pop(record.external_call_id, None)
+            task_id = _context_text(record.context.get("taskId"))
+            if task_id:
+                self._external_call_index.pop(task_id, None)
             self._discard_opening_locked(record.call_id)
+
+    def _record_for_idempotency_key_locked(
+        self,
+        idempotency_key: str,
+    ) -> OutboundCallRecord | None:
+        call_id = self._external_call_index.get(idempotency_key)
+        if call_id is None:
+            return None
+        return self._calls.get(call_id)
 
     def _discard_opening_locked(self, call_id: str) -> None:
         if self._opening_store is not None:
             self._opening_store.discard(call_id)
 
-    def _sync_call_record_started(self, context: dict[str, Any] | None) -> None:
+    def _sync_call_record_started(self, context: dict[str, Any] | None) -> bool:
         if self._call_record_updater is None or context is None:
-            return
+            return False
         try:
-            self._call_record_updater.mark_started(context)
+            return bool(self._call_record_updater.mark_started(context))
         except Exception:
             LOGGER.warning("call_record_started_sync_failed", exc_info=True)
+            return False
 
-    def _sync_call_record_failed(self, context: dict[str, Any] | None) -> None:
+    def _sync_call_record_failed(self, context: dict[str, Any] | None) -> bool:
         if self._call_record_updater is None or context is None:
-            return
+            return False
         try:
-            self._call_record_updater.mark_failed(context)
+            return bool(self._call_record_updater.mark_failed(context))
         except Exception:
             LOGGER.warning("call_record_failed_sync_failed", exc_info=True)
+            return False
 
-    def _sync_call_record_no_answer(self, context: dict[str, Any] | None) -> None:
+    def _sync_call_record_no_answer(self, context: dict[str, Any] | None) -> bool:
         if self._call_record_updater is None or context is None:
-            return
+            return False
         try:
-            self._call_record_updater.mark_no_answer(context)
+            return bool(self._call_record_updater.mark_no_answer(context))
         except Exception:
             LOGGER.warning("call_record_no_answer_sync_failed", exc_info=True)
+            return False
 
     def _sync_call_record_terminal(
         self,
         context: dict[str, Any] | None,
         status: str | None,
-    ) -> None:
+    ) -> bool:
         if status == "no_answer":
-            self._sync_call_record_no_answer(context)
-            return
+            return self._sync_call_record_no_answer(context)
         if status in {"failed", "busy", "canceled", "hangup_failed"}:
-            self._sync_call_record_failed(context)
+            return self._sync_call_record_failed(context)
+        return False
+
+    def _publish_flow_callback(
+        self,
+        context: dict[str, Any],
+        *,
+        status: str,
+        message: str,
+        business_id: str | None,
+    ) -> None:
+        if self._flow_callback_writer is None:
+            return
+        try:
+            event = build_flow_callback_event(
+                context,
+                status=status,
+                message=message,
+                business_id=business_id,
+            )
+            if event is not None:
+                self._flow_callback_writer.publish(event)
+        except Exception:
+            LOGGER.warning("flow_callback_publish_failed status=%s", status, exc_info=True)
+
+    def _validate_flow_callback_context(self, context: dict[str, Any]) -> None:
+        if not self.config.flow_callback.enabled:
+            return
+        if _context_text(context.get("taskId")) is None:
+            raise CallControlError(
+                "context.taskId is required when flow callback is enabled"
+            )
+
+    def _resolve_call_destination(
+        self,
+        request: CreateCallRequest,
+    ) -> CreateCallRequest:
+        if request.destination is not None:
+            return request
+        if self._destination_resolver is None:
+            status_code = 503 if _context_text(request.context.get("debtId")) else 400
+            raise CallControlError(
+                "destination is required when debt phone resolver is unavailable",
+                status_code=status_code,
+            )
+        try:
+            destination = self._destination_resolver.resolve(request.context)
+        except Exception as err:
+            raise CallControlError(
+                "failed to resolve destination from debtId",
+                status_code=503,
+            ) from err
+        destination_text = _context_text(destination)
+        if destination_text is None:
+            raise CallControlError("debtor phone not found", status_code=400)
+        _require_safe_token(destination_text, "destination")
+        return replace(request, destination=destination_text)
 
 
 def parse_create_call_request(payload: dict[str, Any]) -> CreateCallRequest:
     if not isinstance(payload, dict):
         raise CallControlError("request body must be a JSON object")
 
-    destination = _required_str(payload, "destination")
-    _require_safe_token(destination, "destination")
+    _validate_node_code(payload)
+    context = _normalized_context(payload)
+    destination = _optional_str(payload, "destination")
+    if destination is not None:
+        _require_safe_token(destination, "destination")
 
     endpoint = _optional_str(payload, "endpoint")
     if endpoint is not None:
@@ -698,20 +856,23 @@ def parse_create_call_request(payload: dict[str, Any]) -> CreateCallRequest:
     if timeout is not None and not 1 <= timeout <= 300:
         raise CallControlError("originate_timeout_seconds must be between 1 and 300")
 
-    context = payload.get("context", {})
-    if context is None:
-        context = {}
-    if not isinstance(context, dict):
-        raise CallControlError("context must be a JSON object")
-
     try:
         opening = parse_opening_request(payload.get("opening"))
     except OpeningGenerationFailed as err:
         raise CallControlError(str(err)) from err
 
+    call_id = _optional_safe_str(payload, "callId") or _optional_safe_str(
+        context,
+        "callId",
+    )
+    external_call_id = (
+        _optional_safe_str(payload, "external_call_id")
+        or _optional_safe_str(payload, "businessId")
+        or call_id
+    )
     return CreateCallRequest(
         destination=destination,
-        external_call_id=_optional_safe_str(payload, "external_call_id"),
+        external_call_id=external_call_id,
         endpoint=endpoint,
         dialplan_extension=dialplan_extension,
         dialplan_context=dialplan_context,
@@ -721,6 +882,33 @@ def parse_create_call_request(payload: dict[str, Any]) -> CreateCallRequest:
         context=context,
         opening=opening,
     )
+
+
+def _normalized_context(payload: dict[str, Any]) -> dict[str, Any]:
+    context = payload.get("context", {})
+    if context is None:
+        context = {}
+    if not isinstance(context, dict):
+        raise CallControlError("context must be a JSON object")
+    normalized = dict(context)
+    for key in (
+        "tenantId",
+        "taskId",
+        "callId",
+        "businessId",
+        "nodeCode",
+        "identityName",
+        "debtId",
+    ):
+        if key not in normalized and payload.get(key) is not None:
+            normalized[key] = payload[key]
+    return normalized
+
+
+def _validate_node_code(payload: dict[str, Any]) -> None:
+    node_code = _optional_str(payload, "nodeCode")
+    if node_code is not None and node_code != "ai_call":
+        raise CallControlError("nodeCode must be ai_call")
 
 
 def build_originate_command(record: OutboundCallRecord) -> str:
@@ -989,6 +1177,21 @@ def _terminal_status_for_cause(record: OutboundCallRecord) -> str:
     if cause == "ORIGINATOR_CANCEL":
         return "canceled"
     return "failed"
+
+
+def _business_id(record: OutboundCallRecord) -> str:
+    return record.external_call_id or record.call_id
+
+
+def _idempotency_key(request: CreateCallRequest) -> str | None:
+    return request.external_call_id or _context_text(request.context.get("taskId"))
+
+
+def _context_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _is_terminal_status(status: str) -> bool:

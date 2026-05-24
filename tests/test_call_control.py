@@ -11,7 +11,12 @@ from app.call_control import (
     build_originate_command,
     parse_create_call_request,
 )
-from app.config import EventSocketConfig, GatewayConfig, OutboundCallConfig
+from app.config import (
+    EventSocketConfig,
+    FlowCallbackConfig,
+    GatewayConfig,
+    OutboundCallConfig,
+)
 from app.freeswitch_event_socket import ChannelStateEvent
 from app.opening import (
     OpeningAudio,
@@ -21,6 +26,7 @@ from app.opening import (
     parse_opening_request,
 )
 from app.audio_codec import samples_to_pcm_s16le
+from app.flow_callback import FlowCallbackEvent
 from app.postgres import BusinessPromptPreparation, PromptSnapshot
 
 
@@ -235,6 +241,50 @@ def test_parse_create_call_rejects_unsafe_caller_name():
         )
 
 
+def test_parse_create_call_accepts_java_ai_call_trigger_shape():
+    request = parse_create_call_request(
+        {
+            "schemaVersion": "1.0",
+            "tenantId": "100001",
+            "taskId": "2050000000000100001",
+            "callId": "2050000000000100001",
+            "nodeCode": "ai_call",
+            "identityName": "项目员工",
+            "debtId": "2050000000000200001",
+            "destination": "15800967789",
+            "params": {"timeoutMinutes": 30},
+            "flowContext": {"schemaVersion": "1.0"},
+        }
+    )
+
+    assert request.destination == "15800967789"
+    assert request.external_call_id == "2050000000000100001"
+    assert request.context == {
+        "tenantId": "100001",
+        "taskId": "2050000000000100001",
+        "callId": "2050000000000100001",
+        "nodeCode": "ai_call",
+        "identityName": "项目员工",
+        "debtId": "2050000000000200001",
+    }
+
+
+def test_parse_create_call_accepts_java_ai_call_trigger_without_destination():
+    request = parse_create_call_request(
+        {
+            "tenantId": "100001",
+            "taskId": "2050000000000100001",
+            "callId": "2050000000000100001",
+            "nodeCode": "ai_call",
+            "identityName": "项目员工",
+            "debtId": "2050000000000200001",
+        }
+    )
+
+    assert request.destination is None
+    assert request.context["debtId"] == "2050000000000200001"
+
+
 def test_outbound_manager_originates_in_background():
     commands: list[str] = []
     call_record_events: list[tuple[str, dict]] = []
@@ -303,6 +353,285 @@ def test_outbound_manager_originates_in_background():
         manager.shutdown()
 
 
+def test_outbound_manager_resolves_destination_from_debt_id():
+    commands: list[str] = []
+    resolved_contexts: list[dict] = []
+
+    class FakeDestinationResolver:
+        def resolve(self, context):
+            resolved_contexts.append(context)
+            return "15800967789"
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return endpoint
+
+        async def originate(self, command: str) -> str:
+            commands.append(command)
+            return "+OK call accepted"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="sofia/gateway/demo/{destination}"),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+        destination_resolver=FakeDestinationResolver(),
+    )
+
+    try:
+        call = manager.create_call(
+            {
+                "tenantId": "100001",
+                "taskId": "task-1",
+                "callId": "990000000000032001",
+                "nodeCode": "ai_call",
+                "identityName": "项目员工",
+                "debtId": "2049810626160668673",
+            }
+        )
+
+        final_call = _wait_for_status(manager, call["call_id"], "originated")
+        assert final_call["destination"] == "15800967789"
+        assert "sofia/gateway/demo/15800967789 9199 XML default" in commands[0]
+        assert resolved_contexts == [
+            {
+                "tenantId": "100001",
+                "taskId": "task-1",
+                "callId": "990000000000032001",
+                "nodeCode": "ai_call",
+                "identityName": "项目员工",
+                "debtId": "2049810626160668673",
+            }
+        ]
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_rejects_missing_destination_when_phone_not_found():
+    class EmptyDestinationResolver:
+        def resolve(self, context):
+            return None
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            raise AssertionError("call must be rejected before originate")
+
+        async def originate(self, command: str) -> str:
+            raise AssertionError("call must be rejected before originate")
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(event_socket=EventSocketConfig(enabled=True)),
+        dialer_factory=lambda: FakeDialer(),
+        destination_resolver=EmptyDestinationResolver(),
+    )
+
+    try:
+        with pytest.raises(CallControlError, match="debtor phone") as err:
+            manager.create_call(
+                {
+                    "tenantId": "100001",
+                    "taskId": "task-1",
+                    "callId": "990000000000032001",
+                    "nodeCode": "ai_call",
+                    "identityName": "项目员工",
+                    "debtId": "2049810626160668673",
+                }
+            )
+
+        assert err.value.status_code == 400
+        assert manager.list_calls() == []
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_emits_accepted_flow_callback_after_call_is_queued():
+    flow_events: list[FlowCallbackEvent] = []
+
+    class FakeFlowCallbackWriter:
+        def publish(self, event):
+            flow_events.append(event)
+            return True
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return endpoint
+
+        async def originate(self, command: str) -> str:
+            return "+OK call accepted"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    config = GatewayConfig(
+        event_socket=EventSocketConfig(enabled=True),
+        outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+    )
+    manager = OutboundCallManager(
+        config,
+        dialer_factory=lambda: FakeDialer(),
+        flow_callback_writer=FakeFlowCallbackWriter(),
+    )
+
+    try:
+        call = manager.create_call(
+            {
+                "destination": "1000",
+                "external_call_id": "biz-call-1",
+                "context": {
+                    "tenantId": "000000",
+                    "taskId": "task-1",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            }
+        )
+
+        assert flow_events[0].status == "ACCEPTED"
+        assert flow_events[0].tenant_id == "000000"
+        assert flow_events[0].task_id == "task-1"
+        assert flow_events[0].business_id == "biz-call-1"
+        assert flow_events[0].message == "外呼任务已受理"
+        assert call["status"] == "queued"
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_uses_java_call_id_and_is_idempotent_for_retries():
+    originate_count = 0
+    flow_events: list[FlowCallbackEvent] = []
+
+    class FakeFlowCallbackWriter:
+        def publish(self, event):
+            flow_events.append(event)
+            return True
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return endpoint
+
+        async def originate(self, command: str) -> str:
+            nonlocal originate_count
+            originate_count += 1
+            return "+OK call accepted"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(event_socket=EventSocketConfig(enabled=True)),
+        dialer_factory=lambda: FakeDialer(),
+        flow_callback_writer=FakeFlowCallbackWriter(),
+    )
+
+    payload = {
+        "tenantId": "100001",
+        "taskId": "2050000000000100001",
+        "callId": "2050000000000100001",
+        "nodeCode": "ai_call",
+        "identityName": "项目员工",
+        "debtId": "2050000000000200001",
+        "destination": "15800967789",
+    }
+    try:
+        first = manager.create_call(payload)
+        second = manager.create_call(payload)
+
+        assert first["external_call_id"] == "2050000000000100001"
+        assert second["call_id"] == first["call_id"]
+        _wait_for_status(manager, first["call_id"], "originated")
+        assert originate_count == 1
+        assert [event.status for event in flow_events] == ["ACCEPTED"]
+        assert flow_events[0].business_id == "2050000000000100001"
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_skips_flow_callback_without_task_id():
+    flow_events: list[FlowCallbackEvent] = []
+
+    class FakeFlowCallbackWriter:
+        def publish(self, event):
+            flow_events.append(event)
+            return True
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return endpoint
+
+        async def originate(self, command: str) -> str:
+            return "+OK call accepted"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(event_socket=EventSocketConfig(enabled=True)),
+        dialer_factory=lambda: FakeDialer(),
+        flow_callback_writer=FakeFlowCallbackWriter(),
+    )
+
+    try:
+        manager.create_call(
+            {
+                "destination": "1000",
+                "context": {
+                    "tenantId": "000000",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            }
+        )
+
+        assert flow_events == []
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_requires_task_id_when_flow_callback_enabled():
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            raise AssertionError("call must be rejected before originate")
+
+        async def originate(self, command: str) -> str:
+            raise AssertionError("call must be rejected before originate")
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            flow_callback=FlowCallbackConfig(enabled=True),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+    )
+
+    try:
+        with pytest.raises(CallControlError, match="context.taskId") as err:
+            manager.create_call(
+                {
+                    "destination": "1000",
+                    "context": {
+                        "tenantId": "000000",
+                        "callId": "990000000000032001",
+                        "debtId": "2049810626160668673",
+                    },
+                }
+            )
+
+        assert err.value.status_code == 400
+        assert manager.list_calls() == []
+    finally:
+        manager.shutdown()
+
+
 def test_outbound_manager_syncs_call_record_failed_when_originate_fails():
     call_record_events: list[tuple[str, dict]] = []
 
@@ -364,6 +693,241 @@ def test_outbound_manager_syncs_call_record_failed_when_originate_fails():
                 },
             ),
         ]
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_emits_failed_flow_callback_after_call_record_failure_sync():
+    flow_events: list[FlowCallbackEvent] = []
+
+    class FakeFlowCallbackWriter:
+        def publish(self, event):
+            flow_events.append(event)
+            return True
+
+    class FakeCallRecordUpdater:
+        def mark_started(self, context):
+            return True
+
+        def mark_failed(self, context):
+            return True
+
+        def mark_no_answer(self, context):
+            return True
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return endpoint
+
+        async def originate(self, command: str) -> str:
+            return "-ERR USER_BUSY"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    config = GatewayConfig(
+        event_socket=EventSocketConfig(enabled=True),
+        outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+    )
+    manager = OutboundCallManager(
+        config,
+        dialer_factory=lambda: FakeDialer(),
+        call_record_updater=FakeCallRecordUpdater(),
+        flow_callback_writer=FakeFlowCallbackWriter(),
+    )
+
+    try:
+        call = manager.create_call(
+            {
+                "destination": "1000",
+                "context": {
+                    "tenantId": "000000",
+                    "taskId": "task-1",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            }
+        )
+
+        _wait_for_status(manager, call["call_id"], "failed")
+        assert [event.status for event in flow_events] == ["ACCEPTED", "FAILED"]
+        assert flow_events[-1].task_id == "task-1"
+        assert flow_events[-1].business_id == "990000000000032001"
+        assert flow_events[-1].message == "外呼失败"
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_emits_failed_flow_callback_for_no_answer_event():
+    flow_events: list[FlowCallbackEvent] = []
+
+    class FakeFlowCallbackWriter:
+        def publish(self, event):
+            flow_events.append(event)
+            return True
+
+    class FakeCallRecordUpdater:
+        def mark_started(self, context):
+            return True
+
+        def mark_failed(self, context):
+            return True
+
+        def mark_no_answer(self, context):
+            return True
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return endpoint
+
+        async def originate(self, command: str) -> str:
+            return "+OK call accepted"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(event_socket=EventSocketConfig(enabled=True)),
+        dialer_factory=lambda: FakeDialer(),
+        call_record_updater=FakeCallRecordUpdater(),
+        flow_callback_writer=FakeFlowCallbackWriter(),
+    )
+
+    try:
+        call = manager.create_call(
+            {
+                "destination": "1000",
+                "context": {
+                    "tenantId": "000000",
+                    "taskId": "task-no-answer",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            }
+        )
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+
+        manager.handle_channel_event(
+            ChannelStateEvent(
+                name="CHANNEL_HANGUP_COMPLETE",
+                call_id=call_id,
+                hangup_cause="NO_ANSWER",
+            )
+        )
+
+        assert manager.get_call(call_id)["status"] == "no_answer"
+        assert [event.status for event in flow_events] == ["ACCEPTED", "FAILED"]
+        assert flow_events[-1].task_id == "task-no-answer"
+        assert flow_events[-1].message == "外呼失败"
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_emits_failed_flow_callback_for_busy_event():
+    flow_events: list[FlowCallbackEvent] = []
+
+    class FakeFlowCallbackWriter:
+        def publish(self, event):
+            flow_events.append(event)
+            return True
+
+    class FakeCallRecordUpdater:
+        def mark_started(self, context):
+            return True
+
+        def mark_failed(self, context):
+            return True
+
+        def mark_no_answer(self, context):
+            return True
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return endpoint
+
+        async def originate(self, command: str) -> str:
+            return "+OK call accepted"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(event_socket=EventSocketConfig(enabled=True)),
+        dialer_factory=lambda: FakeDialer(),
+        call_record_updater=FakeCallRecordUpdater(),
+        flow_callback_writer=FakeFlowCallbackWriter(),
+    )
+
+    try:
+        call = manager.create_call(
+            {
+                "destination": "1000",
+                "context": {
+                    "tenantId": "000000",
+                    "taskId": "task-busy",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            }
+        )
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+
+        manager.handle_channel_event(
+            ChannelStateEvent(
+                name="CHANNEL_HANGUP_COMPLETE",
+                call_id=call_id,
+                hangup_cause="USER_BUSY",
+                sip_status="486",
+            )
+        )
+
+        assert manager.get_call(call_id)["status"] == "busy"
+        assert [event.status for event in flow_events] == ["ACCEPTED", "FAILED"]
+        assert flow_events[-1].task_id == "task-busy"
+        assert flow_events[-1].business_id == "990000000000032001"
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_ignores_flow_callback_writer_failure():
+    class BrokenFlowCallbackWriter:
+        def publish(self, event):
+            raise OSError("mq unavailable")
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return endpoint
+
+        async def originate(self, command: str) -> str:
+            return "+OK call accepted"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(event_socket=EventSocketConfig(enabled=True)),
+        dialer_factory=lambda: FakeDialer(),
+        flow_callback_writer=BrokenFlowCallbackWriter(),
+    )
+
+    try:
+        call = manager.create_call(
+            {
+                "destination": "1000",
+                "context": {
+                    "tenantId": "000000",
+                    "taskId": "task-1",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            }
+        )
+
+        assert _wait_for_status(manager, call["call_id"], "originated")["status"] == (
+            "originated"
+        )
     finally:
         manager.shutdown()
 

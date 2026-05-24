@@ -11,6 +11,7 @@ from dataclasses import asdict, replace
 from .call_control import OutboundCallManager
 from .config import load_config
 from .env_loader import load_env_file
+from .flow_callback import HttpFlowCallbackWriter, LoggingFlowCallbackWriter
 from .freeswitch_media import FreeSwitchMediaEchoServer
 from .health_server import HealthServer
 from .logging_config import configure_logging
@@ -81,9 +82,14 @@ def main() -> int:
 
 
 async def _serve(config, *, media_mode: str) -> None:
+    flow_callback_writer = None
+    if config.flow_callback.enabled:
+        flow_callback_writer = _build_flow_callback_writer(config)
+
     postgres_runtime = PostgresRuntime(
         config,
         fallback_instructions=DEFAULT_PHONE_INSTRUCTIONS,
+        flow_callback_writer=flow_callback_writer,
     )
     await postgres_runtime.start()
 
@@ -113,6 +119,8 @@ async def _serve(config, *, media_mode: str) -> None:
         opening_store=opening_store,
         business_prompt_preparer=business_prompt_preparer,
         call_record_updater=postgres_runtime.call_record_updater,
+        flow_callback_writer=flow_callback_writer,
+        destination_resolver=postgres_runtime.call_destination_resolver,
     )
     outbound_manager.start()
     health_server = HealthServer(config, call_manager=outbound_manager)
@@ -205,6 +213,26 @@ def _load_doubao_s2s_credentials(config) -> DoubaoS2SCredentials:
         resource_id=doubao.resource_id,
         websocket_url=doubao.websocket_url,
     )
+
+
+def _build_flow_callback_writer(config):
+    http = config.flow_callback.http
+    if http.enabled:
+        secret = os.getenv(http.secret_env, "")
+        if not secret:
+            raise RuntimeError(
+                "missing flow callback HTTP secret in environment: " + http.secret_env
+            )
+        return HttpFlowCallbackWriter(
+            base_url=http.base_url,
+            path=http.path,
+            client_id=http.client_id,
+            secret=secret,
+            timeout_seconds=http.timeout_seconds,
+            max_attempts=http.max_attempts,
+            retry_backoff_seconds=http.retry_backoff_seconds,
+        )
+    return LoggingFlowCallbackWriter(topic=config.flow_callback.topic)
 
 
 def _system_prompt_for_doubao_session(

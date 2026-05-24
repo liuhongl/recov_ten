@@ -20,6 +20,7 @@ from .business_dialog_style import (
     numbered_business_privacy_disclosure_rules,
 )
 from .config import GatewayConfig
+from .flow_callback import FlowCallbackWriterProtocol, build_flow_callback_event
 from .opening import (
     OpeningGenerationFailed,
     OpeningRequest,
@@ -46,6 +47,13 @@ limit 1
 
 DEBT_RECORD_SQL = """
 select debtor_name, address, debt_amount, debtor_gender, debtor_age, tenant_id, persona_id
+from debt_record
+where id = $1
+limit 1
+"""
+
+DEBT_RECORD_PHONE_SQL = """
+select debtor_phone
 from debt_record
 where id = $1
 limit 1
@@ -425,6 +433,52 @@ class PostgresCallRecordStore:
                 return _execute_updated_row(result)
 
 
+class PostgresCallDestinationStore:
+    def __init__(self, pool: Any) -> None:
+        self.pool = pool
+
+    async def resolve_destination(self, context: Mapping[str, Any]) -> str | None:
+        debt_id = _context_int(context.get("debtId"))
+        if debt_id is None:
+            LOGGER.warning("call_destination_lookup_skipped_missing_debt_id")
+            return None
+
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(DEBT_RECORD_PHONE_SQL, debt_id)
+        if row is None:
+            LOGGER.warning("call_destination_lookup_missing_debt debtId=%s", debt_id)
+            return None
+        phone = _context_text(_row_value(row, "debtor_phone"))
+        if phone is None:
+            LOGGER.warning("call_destination_lookup_missing_phone debtId=%s", debt_id)
+            return None
+        return phone
+
+
+class ThreadsafeCallDestinationResolver:
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        store: PostgresCallDestinationStore,
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        self.loop = loop
+        self.store = store
+        self.timeout_seconds = timeout_seconds
+
+    def resolve(self, context: Mapping[str, Any]) -> str | None:
+        future = asyncio.run_coroutine_threadsafe(
+            self.store.resolve_destination(context),
+            self.loop,
+        )
+        try:
+            return future.result(timeout=self.timeout_seconds)
+        except FutureTimeoutError as err:
+            future.cancel()
+            raise RuntimeError("call_destination_lookup_timeout") from err
+
+
 class ThreadsafeCallRecordUpdater:
     def __init__(
         self,
@@ -465,8 +519,10 @@ class PostgresCallResultWriter:
         store: PostgresCallRecordStore,
         *,
         max_queue_size: int = 100,
+        flow_callback_writer: FlowCallbackWriterProtocol | None = None,
     ) -> None:
         self.store = store
+        self.flow_callback_writer = flow_callback_writer
         self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(
             maxsize=max_queue_size
         )
@@ -511,6 +567,8 @@ class PostgresCallResultWriter:
                         "call_record_transcript_update_noop call_id=%s",
                         payload.get("call_id"),
                     )
+                else:
+                    self._publish_success_callback(payload, context)
             except Exception:
                 LOGGER.warning(
                     "call_record_transcript_update_failed call_id=%s",
@@ -519,6 +577,29 @@ class PostgresCallResultWriter:
                 )
             finally:
                 self.queue.task_done()
+
+    def _publish_success_callback(
+        self,
+        payload: Mapping[str, Any],
+        context: Mapping[str, Any],
+    ) -> None:
+        if self.flow_callback_writer is None:
+            return
+        try:
+            event = build_flow_callback_event(
+                context,
+                status="SUCCESS",
+                message="外呼完成，转写已写入",
+                business_id=_prompt_text(payload.get("call_id")),
+            )
+            if event is not None:
+                self.flow_callback_writer.publish(event)
+        except Exception:
+            LOGGER.warning(
+                "flow_callback_success_publish_failed call_id=%s",
+                payload.get("call_id"),
+                exc_info=True,
+            )
 
 
 def build_call_record_transcript_json(payload: Mapping[str, Any]) -> str:
@@ -574,11 +655,20 @@ class ThreadsafeBusinessPromptPreparer:
 class PostgresRuntime:
     """Owns optional PostgreSQL connectivity for business prompt snapshots."""
 
-    def __init__(self, config: GatewayConfig, *, fallback_instructions: str) -> None:
+    def __init__(
+        self,
+        config: GatewayConfig,
+        *,
+        fallback_instructions: str,
+        flow_callback_writer: FlowCallbackWriterProtocol | None = None,
+    ) -> None:
         self.config = config.postgres
         self.fallback_instructions = fallback_instructions
+        self.flow_callback_writer = flow_callback_writer
         self.pool: Any | None = None
         self.prompt_store: PostgresPromptStore | None = None
+        self.call_destination_store: PostgresCallDestinationStore | None = None
+        self.call_destination_resolver: ThreadsafeCallDestinationResolver | None = None
         self.call_record_store: PostgresCallRecordStore | None = None
         self.call_record_updater: ThreadsafeCallRecordUpdater | None = None
         self.call_result_writer: PostgresCallResultWriter | None = None
@@ -617,13 +707,22 @@ class PostgresRuntime:
             self.config.max_pool_size,
         )
         self.prompt_store = PostgresPromptStore(self.pool)
+        self.call_destination_store = PostgresCallDestinationStore(self.pool)
+        self.call_destination_resolver = ThreadsafeCallDestinationResolver(
+            asyncio.get_running_loop(),
+            self.call_destination_store,
+            timeout_seconds=self.config.command_timeout_seconds,
+        )
         self.call_record_store = PostgresCallRecordStore(self.pool)
         self.call_record_updater = ThreadsafeCallRecordUpdater(
             asyncio.get_running_loop(),
             self.call_record_store,
             timeout_seconds=self.config.command_timeout_seconds,
         )
-        self.call_result_writer = PostgresCallResultWriter(self.call_record_store)
+        self.call_result_writer = PostgresCallResultWriter(
+            self.call_record_store,
+            flow_callback_writer=self.flow_callback_writer,
+        )
         self.call_result_writer.start()
 
     async def stop(self) -> None:
@@ -634,6 +733,8 @@ class PostgresRuntime:
                 await self.pool.close()
         self.pool = None
         self.prompt_store = None
+        self.call_destination_store = None
+        self.call_destination_resolver = None
         self.call_record_store = None
         self.call_record_updater = None
         self.call_result_writer = None

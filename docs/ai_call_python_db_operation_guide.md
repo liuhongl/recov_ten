@@ -4,23 +4,25 @@
 
 ## 1. 文档范围
 
-本文只说明智能外呼 Python 项目如何维护数据库表 `public.call_record`。
+本文主要说明智能外呼 Python 项目如何维护数据库表 `public.call_record`。
+另外，Python 在接收 Java 外呼任务后，会按 `debtId` 只读查询 `debt_record.debtor_phone` 作为被叫号码；该查询不改变 `debt_record`。
 
 本文不包含：
 
 ```text
 Python 接入 MQ。
-Python 通知 Java 节点终态。
 Java 流程推进逻辑。
 语义分析。
 前端查询接口。
 ```
 
+说明：Python 通知 Java 流程节点终态属于流程 callback 集成范围，不在本文展开；对应契约见 `docs/flow_external_callback_integration.md`。
+
 当前职责边界：
 
 ```text
-Java 负责初始化 call_record。
-Python 外呼项目只负责外呼开始后的通话状态和转写结果。
+Java 负责初始化 call_record，并在调用 Python 外呼时传入流程 callback 所需的 taskId。
+Python 外呼项目负责外呼开始后的通话状态、转写结果和流程 callback 触发。
 语义分析由其他模块处理，不属于本文档范围。
 ```
 
@@ -31,6 +33,7 @@ Java 插入 call_record.status = '0'
 Python 更新 status / started_at / finished_at / transcript
 Python 不写 analysis_result
 Python 不维护 analysis_status = '1' / '2' / '3'
+Python 不直接写 Java 流程表
 ```
 
 ## 2. Python 入参
@@ -42,6 +45,8 @@ Python 执行数据库更新时，至少需要拿到以下字段：
 | `callId` | string | 是 | 通话 ID，对应 `call_record.id` |
 | `debtId` | string | 是 | 债务记录 ID，对应 `call_record.debt_id` |
 | `identityName` | string | 是 | 外呼身份名称，例如 `项目员工`、`企业客服` |
+| `taskId` | string | 流程回调开启时必填 | Java 流程节点执行记录 ID，用于 callback 关联节点。 |
+| `tenantId` | string | 建议 | 租户编号，用于 Java 消费 callback 时校验。 |
 
 注意：
 
@@ -49,8 +54,8 @@ Python 执行数据库更新时，至少需要拿到以下字段：
 callId 和 debtId 对外都按字符串处理。
 Python 写数据库时再按 bigint 绑定参数。
 字段名是 debtId，不是 debtld。
-tenantId 不作为 Python 外部入参。
 callId 对应 call_record.id，主键唯一，Python 后续只按 callId 定位记录。
+当 `flow_callback.enabled=true` 时，taskId 缺失会被 Python 拒绝，避免外呼执行后无法推进流程。
 ```
 
 ## 3. 表字段职责
@@ -92,6 +97,8 @@ recov_flow_instance
 recov_node_execution_record
 recov_flow_mq_outbox
 ```
+
+说明：`debt_record` 不由 Python 写入或更新。Python 只允许按 `debtId` 读取 `debtor_phone`，用于解析本次外呼的被叫号码。
 
 ## 4. 通话状态 status
 
@@ -141,7 +148,27 @@ Java 已负责初始化 call_record。
 Python 不要在找不到记录时自行 INSERT，避免绕过 Java 的流程实例和租户上下文。
 ```
 
-## 6. 标准更新 SQL
+## 6. 被叫号码查询
+
+Java 调 Python `/calls` 时不需要传 `destination`。Python 使用 `debtId` 查询债务人的手机号：
+
+```sql
+SELECT debtor_phone
+FROM public.debt_record
+WHERE id = :debt_id
+LIMIT 1;
+```
+
+规则：
+
+```text
+debtId 缺失或不是 bigint：不发起外呼。
+查不到 debt_record：不发起外呼。
+debtor_phone 为空：不发起外呼。
+PostgreSQL 不可用或查询超时：返回外部资源暂时不可用，让 Java 按重试策略处理。
+```
+
+## 7. 标准更新 SQL
 
 以下 SQL 均要求 Python 使用参数化查询，不要拼接 SQL。
 
@@ -153,7 +180,7 @@ id = :call_id
 
 `callId` 对应 `call_record.id`，主键唯一，因此不需要额外带 `tenant_id` 条件。
 
-### 6.1 通话开始
+### 7.1 通话开始
 
 外呼供应商确认开始拨打或通话开始时：
 
@@ -166,7 +193,7 @@ WHERE id = :call_id
   AND status IN ('0', '1');
 ```
 
-### 6.2 外呼失败
+### 7.2 外呼失败
 
 连接供应商失败、号码无效、拨打失败、ASR 无法产出有效转写等无法形成有效通话结果的场景：
 
@@ -181,7 +208,7 @@ WHERE id = :call_id
 
 当前 `call_record` 没有独立的外呼失败原因字段。外呼失败原因不要写入 `analysis_error`，Python 可记录在自己的任务表或日志中。
 
-### 6.3 未接听
+### 7.3 未接听
 
 用户未接听、关机、无人应答、无法产生有效通话内容：
 
@@ -194,7 +221,7 @@ WHERE id = :call_id
   AND status IN ('0', '1');
 ```
 
-### 6.4 转写完成
+### 7.4 转写完成
 
 通话完成且 `transcript` 已生成后：
 
@@ -217,7 +244,7 @@ Python 不要在这里写 analysis_status = '1'。
 Python 不要在这里写 analysis_result。
 ```
 
-## 7. transcript JSON
+## 8. transcript JSON
 
 `transcript` 存储在 `call_record.transcript`，字段类型是 text，内容必须是 JSON 字符串。
 
@@ -258,9 +285,9 @@ text 不为空。
 startMs / endMs 使用毫秒。
 ```
 
-## 8. 事务和幂等
+## 9. 事务和幂等
 
-### 8.1 事务要求
+### 9.1 事务要求
 
 每次状态更新都应在数据库事务中完成。
 
@@ -275,7 +302,7 @@ update_time
 
 以上字段在同一事务中提交。
 
-### 8.2 幂等要求
+### 9.2 幂等要求
 
 Python 必须以 `callId` 做幂等键。
 
@@ -293,7 +320,7 @@ Python 必须以 `callId` 做幂等键。
 
 SQL 更新影响行数为 `0` 时，不要盲目重试覆盖。应重新查询当前记录状态，再决定是否已经终态或状态不允许。
 
-## 9. 最小验收标准
+## 10. 最小验收标准
 
 | 场景 | 表状态 |
 | --- | --- |

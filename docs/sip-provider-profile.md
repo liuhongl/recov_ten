@@ -377,6 +377,64 @@ ptime：20ms
 
 该样本证明当前服务器、主叫号码、SIP/SDP、PCMA/8000、ptime=20 和接通后的媒体网关链路已经具备真实通话能力。
 
+## 9.2 真实线路失败样本
+
+2026-05-24，公网服务器 `111.229.146.182` 使用当前 Python 网关版本发起一通真实 `sip-provider` 外呼，供应商侧返回 `508 / Q.850 cause=31`：
+
+```text
+公网服务器：111.229.146.182
+主叫：037123124845
+被叫：185****8743
+Python callId：7464233794932996429
+FreeSWITCH call_id：7059405b9fcd4db59e760654481b2345
+endpoint：sofia/gateway/sip-provider/185****8743
+发起时间：2026-05-24 16:40:26 CST
+结束时间：2026-05-24 16:40:29 CST
+HTTP 状态：failed
+phase：trunk_or_upstream_failure
+SIP 状态：508
+Q.850 reason：31
+hangup_cause：NORMAL_UNSPECIFIED
+media_connected_at_ms：空
+call_record.status：2
+transcript：空
+```
+
+该失败不是页面沙箱误发。请求实际进入真实 gateway：
+
+```text
+sofia/gateway/sip-provider/185****8743
+```
+
+FreeSWITCH 已发出 INVITE，并收到供应商 `uincall_sbc` 的 `183` 与远端 SDP。双方媒体参数匹配：
+
+```text
+我方 SDP c=IN IP4 111.229.146.182
+我方 m=audio 16468 RTP/AVP 8 0 101
+供应商 SDP c=IN IP4 47.94.86.132
+供应商 m=audio 21696 RTP/AVP 8 101
+Codec：PCMA/8000
+ptime：20
+telephone-event：101
+```
+
+随后供应商侧在 200 接听前终止呼叫：
+
+```text
+terminated [508]
+Remote Reason：31
+Originate Resulted in Error Cause：31 [NORMAL_UNSPECIFIED]
+```
+
+客观结论：
+
+```text
+1. 我方真实线路 endpoint、主叫、号码格式、SDP 公网地址、PCMA/8000 和 ptime=20 已进入供应商 SBC。
+2. 呼叫未进入 200 OK，也没有进入实时媒体网关，因此没有 transcript。
+3. 当前问题应优先交给线路侧按时间、主叫、被叫和 FreeSWITCH call_id 查询 CDR / SBC 路由原因。
+4. 继续重复发起相同号码和主叫，大概率仍返回 508，除非线路侧确认路由或权限已调整。
+```
+
 ## 10. 仍需补充的信息
 
 这些不阻塞第一版沙箱，但会影响逼真度：

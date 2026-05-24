@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import logging
 import os
 import time
@@ -88,6 +89,56 @@ order by random()
 limit 1
 """
 
+CALL_RECORD_SELECT_SQL = """
+select
+  id,
+  debt_id,
+  status,
+  transcript
+from public.call_record
+where id = $1
+limit 1
+"""
+
+CALL_RECORD_START_SQL = """
+update public.call_record
+set status = '1',
+    started_at = current_timestamp,
+    update_time = current_timestamp
+where id = $1
+  and status in ('0', '1')
+"""
+
+CALL_RECORD_FAILED_SQL = """
+update public.call_record
+set status = '2',
+    finished_at = current_timestamp,
+    update_time = current_timestamp
+where id = $1
+  and status in ('0', '1')
+"""
+
+CALL_RECORD_NO_ANSWER_SQL = """
+update public.call_record
+set status = '3',
+    finished_at = current_timestamp,
+    update_time = current_timestamp
+where id = $1
+  and status in ('0', '1')
+"""
+
+CALL_RECORD_TRANSCRIPT_COMPLETED_SQL = """
+update public.call_record
+set status = '4',
+    finished_at = current_timestamp,
+    transcript = $2,
+    update_time = current_timestamp
+where id = $1
+  and status = '1'
+"""
+
+CALL_RECORD_TERMINAL_STATUSES = {"2", "3", "4"}
+
 
 @dataclass(frozen=True)
 class PromptSnapshot:
@@ -123,6 +174,12 @@ class VoiceSelection:
     gender_match: str
     employee_name: str
     selected_gender: str
+
+
+@dataclass(frozen=True)
+class BusinessCallRecordRef:
+    call_id: int
+    debt_id: int
 
 
 class AsyncBusinessPromptStoreProtocol(Protocol):
@@ -284,6 +341,203 @@ class PostgresPromptStore:
         )
 
 
+class PostgresCallRecordStore:
+    def __init__(self, pool: Any) -> None:
+        self.pool = pool
+
+    async def mark_started(self, context: Mapping[str, Any]) -> bool:
+        return await self._update_status(
+            context,
+            sql=CALL_RECORD_START_SQL,
+            allowed_statuses={"0", "1"},
+        )
+
+    async def mark_failed(self, context: Mapping[str, Any]) -> bool:
+        return await self._update_status(
+            context,
+            sql=CALL_RECORD_FAILED_SQL,
+            allowed_statuses={"0", "1"},
+        )
+
+    async def mark_no_answer(self, context: Mapping[str, Any]) -> bool:
+        return await self._update_status(
+            context,
+            sql=CALL_RECORD_NO_ANSWER_SQL,
+            allowed_statuses={"0", "1"},
+        )
+
+    async def mark_transcript_completed(
+        self,
+        context: Mapping[str, Any],
+        transcript_json: str,
+    ) -> bool:
+        params = _business_call_record_params(context)
+        if params is None:
+            LOGGER.warning("call_record_update_skipped_missing_context")
+            return False
+        try:
+            json.loads(transcript_json)
+        except json.JSONDecodeError:
+            LOGGER.warning(
+                "call_record_transcript_update_skipped_invalid_json callId=%s",
+                params.call_id,
+            )
+            return False
+
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(CALL_RECORD_SELECT_SQL, params.call_id)
+                if not _call_record_precheck_passed(
+                    row,
+                    params,
+                    allowed_statuses={"1"},
+                ):
+                    return False
+                result = await conn.execute(
+                    CALL_RECORD_TRANSCRIPT_COMPLETED_SQL,
+                    params.call_id,
+                    transcript_json,
+                )
+                return _execute_updated_row(result)
+
+    async def _update_status(
+        self,
+        context: Mapping[str, Any],
+        *,
+        sql: str,
+        allowed_statuses: set[str],
+    ) -> bool:
+        params = _business_call_record_params(context)
+        if params is None:
+            LOGGER.warning("call_record_update_skipped_missing_context")
+            return False
+
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(CALL_RECORD_SELECT_SQL, params.call_id)
+                if not _call_record_precheck_passed(
+                    row,
+                    params,
+                    allowed_statuses=allowed_statuses,
+                ):
+                    return False
+                result = await conn.execute(sql, params.call_id)
+                return _execute_updated_row(result)
+
+
+class ThreadsafeCallRecordUpdater:
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        store: PostgresCallRecordStore,
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        self.loop = loop
+        self.store = store
+        self.timeout_seconds = timeout_seconds
+
+    def mark_started(self, context: Mapping[str, Any]) -> bool:
+        return self._run(self.store.mark_started(context))
+
+    def mark_failed(self, context: Mapping[str, Any]) -> bool:
+        return self._run(self.store.mark_failed(context))
+
+    def mark_no_answer(self, context: Mapping[str, Any]) -> bool:
+        return self._run(self.store.mark_no_answer(context))
+
+    def _run(self, coro) -> bool:
+        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        try:
+            return bool(future.result(timeout=self.timeout_seconds))
+        except FutureTimeoutError:
+            future.cancel()
+            LOGGER.warning("call_record_update_timeout", exc_info=True)
+            return False
+        except Exception:
+            LOGGER.warning("call_record_update_failed", exc_info=True)
+            return False
+
+
+class PostgresCallResultWriter:
+    def __init__(
+        self,
+        store: PostgresCallRecordStore,
+        *,
+        max_queue_size: int = 100,
+    ) -> None:
+        self.store = store
+        self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(
+            maxsize=max_queue_size
+        )
+        self._task: asyncio.Task | None = None
+
+    def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.create_task(
+                self._run(),
+                name="postgres-call-result-writer",
+            )
+
+    async def stop(self) -> None:
+        if self._task is None:
+            return
+        self._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._task
+        self._task = None
+
+    def enqueue_nowait(self, payload: dict) -> bool:
+        try:
+            self.queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            return False
+        return True
+
+    async def _run(self) -> None:
+        while True:
+            payload = await self.queue.get()
+            try:
+                transcript_json = build_call_record_transcript_json(payload)
+                context = payload.get("context")
+                if not isinstance(context, Mapping):
+                    context = {}
+                updated = await self.store.mark_transcript_completed(
+                    context,
+                    transcript_json,
+                )
+                if not updated:
+                    LOGGER.warning(
+                        "call_record_transcript_update_noop call_id=%s",
+                        payload.get("call_id"),
+                    )
+            except Exception:
+                LOGGER.warning(
+                    "call_record_transcript_update_failed call_id=%s",
+                    payload.get("call_id"),
+                    exc_info=True,
+                )
+            finally:
+                self.queue.task_done()
+
+
+def build_call_record_transcript_json(payload: Mapping[str, Any]) -> str:
+    turns = []
+    raw_turns = payload.get("turns")
+    if isinstance(raw_turns, list):
+        for item in raw_turns:
+            if not isinstance(item, Mapping):
+                continue
+            role = _prompt_text(item.get("role"))
+            if role not in {"assistant", "user"}:
+                continue
+            text = _prompt_text(item.get("text"))
+            if not text:
+                continue
+            turns.append({"role": role, "text": text})
+    return json.dumps({"turns": turns}, ensure_ascii=False)
+
+
 class ThreadsafeBusinessPromptPreparer:
     def __init__(
         self,
@@ -325,7 +579,9 @@ class PostgresRuntime:
         self.fallback_instructions = fallback_instructions
         self.pool: Any | None = None
         self.prompt_store: PostgresPromptStore | None = None
-        self.call_result_writer: None = None
+        self.call_record_store: PostgresCallRecordStore | None = None
+        self.call_record_updater: ThreadsafeCallRecordUpdater | None = None
+        self.call_result_writer: PostgresCallResultWriter | None = None
 
     async def start(self) -> None:
         if not self.config.enabled:
@@ -356,18 +612,31 @@ class PostgresRuntime:
 
         LOGGER.info(
             "postgres_runtime_started min_pool_size=%s max_pool_size=%s "
-            "prompt_query_wiring=enabled call_result_insert_wiring=disabled",
+            "prompt_query_wiring=enabled call_record_update_wiring=enabled",
             self.config.min_pool_size,
             self.config.max_pool_size,
         )
         self.prompt_store = PostgresPromptStore(self.pool)
+        self.call_record_store = PostgresCallRecordStore(self.pool)
+        self.call_record_updater = ThreadsafeCallRecordUpdater(
+            asyncio.get_running_loop(),
+            self.call_record_store,
+            timeout_seconds=self.config.command_timeout_seconds,
+        )
+        self.call_result_writer = PostgresCallResultWriter(self.call_record_store)
+        self.call_result_writer.start()
 
     async def stop(self) -> None:
+        if self.call_result_writer is not None:
+            await self.call_result_writer.stop()
         if self.pool is not None:
             with contextlib.suppress(Exception):
                 await self.pool.close()
         self.pool = None
         self.prompt_store = None
+        self.call_record_store = None
+        self.call_record_updater = None
+        self.call_result_writer = None
 
 
 def fallback_prompt_snapshot(scene: str, instructions: str) -> PromptSnapshot:
@@ -402,6 +671,16 @@ def _business_prompt_params(
     return identity_name, debt_id
 
 
+def _business_call_record_params(
+    context: Mapping[str, Any],
+) -> BusinessCallRecordRef | None:
+    call_id = _context_int(context.get("callId"))
+    debt_id = _context_int(context.get("debtId"))
+    if call_id is None or debt_id is None:
+        return None
+    return BusinessCallRecordRef(call_id=call_id, debt_id=debt_id)
+
+
 def _context_text(value: object) -> str | None:
     if value is None:
         return None
@@ -424,6 +703,50 @@ def _row_value(row: Any, key: str) -> Any:
         return row[key]
     except (KeyError, TypeError, IndexError):
         return getattr(row, key)
+
+
+def _call_record_precheck_passed(
+    row: Any | None,
+    params: BusinessCallRecordRef,
+    *,
+    allowed_statuses: set[str],
+) -> bool:
+    if row is None:
+        LOGGER.warning("call_record_update_skipped_missing callId=%s", params.call_id)
+        return False
+
+    debt_id = _context_int(_row_value(row, "debt_id"))
+    if debt_id != params.debt_id:
+        LOGGER.warning(
+            "call_record_update_skipped_debt_mismatch callId=%s expectedDebtId=%s",
+            params.call_id,
+            params.debt_id,
+        )
+        return False
+
+    status = _prompt_text(_row_value(row, "status"))
+    if status in CALL_RECORD_TERMINAL_STATUSES:
+        LOGGER.warning(
+            "call_record_update_skipped_terminal callId=%s status=%s",
+            params.call_id,
+            status,
+        )
+        return False
+    if status not in allowed_statuses:
+        LOGGER.warning(
+            "call_record_update_skipped_status callId=%s status=%s",
+            params.call_id,
+            status,
+        )
+        return False
+    return True
+
+
+def _execute_updated_row(result: object) -> bool:
+    if not isinstance(result, str):
+        return False
+    parts = result.split()
+    return bool(parts and parts[-1] != "0")
 
 
 def _voice_selection_from_row(row: Any | None) -> VoiceSelection | None:

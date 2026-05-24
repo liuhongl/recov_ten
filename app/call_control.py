@@ -198,6 +198,14 @@ class BusinessPromptPreparerProtocol(Protocol):
     def prepare(self, context: dict[str, Any]) -> BusinessPromptPreparation | None: ...
 
 
+class CallRecordUpdaterProtocol(Protocol):
+    def mark_started(self, context: dict[str, Any]) -> bool: ...
+
+    def mark_failed(self, context: dict[str, Any]) -> bool: ...
+
+    def mark_no_answer(self, context: dict[str, Any]) -> bool: ...
+
+
 class OutboundCallManager:
     def __init__(
         self,
@@ -207,12 +215,14 @@ class OutboundCallManager:
         opening_generator: OpeningAudioGenerator | None = None,
         opening_store: OpeningAudioStore | None = None,
         business_prompt_preparer: BusinessPromptPreparerProtocol | None = None,
+        call_record_updater: CallRecordUpdaterProtocol | None = None,
     ) -> None:
         self.config = config
         self._dialer_factory = dialer_factory or (lambda: FreeSwitchOutboundDialer(config))
         self._opening_generator = opening_generator
         self._opening_store = opening_store
         self._business_prompt_preparer = business_prompt_preparer
+        self._call_record_updater = call_record_updater
         self._calls: dict[str, OutboundCallRecord] = {}
         self._lock = threading.RLock()
         self._executor = ThreadPoolExecutor(
@@ -282,6 +292,11 @@ class OutboundCallManager:
             record = self._calls.get(call_id)
             return None if record is None else record.prompt_snapshot
 
+    def get_call_context(self, call_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            record = self._calls.get(call_id)
+            return None if record is None else dict(record.context)
+
     def is_call_answered(self, call_id: str) -> bool:
         with self._lock:
             record = self._calls.get(call_id)
@@ -290,11 +305,18 @@ class OutboundCallManager:
             return record.answered_at_ms is not None
 
     def handle_channel_event(self, event: ChannelStateEvent) -> None:
+        sync_context: dict[str, Any] | None = None
+        sync_status: str | None = None
         with self._lock:
             record = self._calls.get(event.call_id)
             if record is None:
                 return
+            was_terminal = _is_terminal_status(record.status)
             self._apply_channel_event_locked(record, event)
+            if not was_terminal and _is_terminal_status(record.status):
+                sync_context = dict(record.context)
+                sync_status = record.status
+        self._sync_call_record_terminal(sync_context, sync_status)
 
     def mark_media_connected(self, call_id: str) -> None:
         with self._lock:
@@ -469,6 +491,9 @@ class OutboundCallManager:
             record = self._calls[call_id]
             self._set_status_locked(record, "originating")
             record.started_at_ms = _now_ms()
+            started_context = dict(record.context)
+
+        self._sync_call_record_started(started_context)
 
         dialer = self._dialer_factory()
         try:
@@ -480,6 +505,8 @@ class OutboundCallManager:
                 record.completed_at_ms = _now_ms()
                 self._set_status_locked(record, "failed")
                 self._discard_opening_locked(record.call_id)
+                failed_context = dict(record.context)
+            self._sync_call_record_failed(failed_context)
             LOGGER.info(
                 "outbound_call_endpoint_resolve_failed call_id=%s endpoint=%s error=%s",
                 call_id,
@@ -497,6 +524,7 @@ class OutboundCallManager:
         LOGGER.info("outbound_call_originate_started call_id=%s", call_id)
         reply = await dialer.originate(command)
         stripped = reply.strip()
+        failed_context = None
         with self._lock:
             record = self._calls[call_id]
             record.freeswitch_reply = stripped
@@ -506,10 +534,12 @@ class OutboundCallManager:
                 record.completed_at_ms = _now_ms()
                 self._set_status_locked(record, "failed")
                 self._discard_opening_locked(record.call_id)
+                failed_context = dict(record.context)
             else:
                 if record.status in {"originating", "queued"}:
                     self._set_status_locked(record, "originated")
             record.originate_completed_at_ms = _now_ms()
+        self._sync_call_record_failed(failed_context)
         LOGGER.info(
             "outbound_call_originate_finished call_id=%s status=%s reply=%s",
             call_id,
@@ -527,6 +557,7 @@ class OutboundCallManager:
     async def _hangup(self, call_id: str, *, cause: str) -> None:
         reply = await self._dialer_factory().hangup(call_id, cause=cause)
         stripped = reply.strip()
+        failed_context = None
         with self._lock:
             record = self._calls.get(call_id)
             if record is None:
@@ -537,10 +568,13 @@ class OutboundCallManager:
                 if "No such channel" in stripped:
                     record.completed_at_ms = record.completed_at_ms or _now_ms()
                 self._set_status_locked(record, "hangup_failed")
+                failed_context = dict(record.context)
             else:
                 self._set_status_locked(record, "hangup_sent")
+        self._sync_call_record_failed(failed_context)
 
     def _mark_failed(self, call_id: str, error: str) -> None:
+        failed_context = None
         with self._lock:
             record = self._calls.get(call_id)
             if record is None:
@@ -549,6 +583,8 @@ class OutboundCallManager:
             record.completed_at_ms = record.completed_at_ms or _now_ms()
             self._set_status_locked(record, "failed")
             self._discard_opening_locked(record.call_id)
+            failed_context = dict(record.context)
+        self._sync_call_record_failed(failed_context)
 
     def _apply_channel_event_locked(
         self,
@@ -602,6 +638,41 @@ class OutboundCallManager:
     def _discard_opening_locked(self, call_id: str) -> None:
         if self._opening_store is not None:
             self._opening_store.discard(call_id)
+
+    def _sync_call_record_started(self, context: dict[str, Any] | None) -> None:
+        if self._call_record_updater is None or context is None:
+            return
+        try:
+            self._call_record_updater.mark_started(context)
+        except Exception:
+            LOGGER.warning("call_record_started_sync_failed", exc_info=True)
+
+    def _sync_call_record_failed(self, context: dict[str, Any] | None) -> None:
+        if self._call_record_updater is None or context is None:
+            return
+        try:
+            self._call_record_updater.mark_failed(context)
+        except Exception:
+            LOGGER.warning("call_record_failed_sync_failed", exc_info=True)
+
+    def _sync_call_record_no_answer(self, context: dict[str, Any] | None) -> None:
+        if self._call_record_updater is None or context is None:
+            return
+        try:
+            self._call_record_updater.mark_no_answer(context)
+        except Exception:
+            LOGGER.warning("call_record_no_answer_sync_failed", exc_info=True)
+
+    def _sync_call_record_terminal(
+        self,
+        context: dict[str, Any] | None,
+        status: str | None,
+    ) -> None:
+        if status == "no_answer":
+            self._sync_call_record_no_answer(context)
+            return
+        if status in {"failed", "busy", "canceled", "hangup_failed"}:
+            self._sync_call_record_failed(context)
 
 
 def parse_create_call_request(payload: dict[str, Any]) -> CreateCallRequest:

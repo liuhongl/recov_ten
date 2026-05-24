@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from app.config import GatewayConfig, PostgresConfig
 from app import postgres
 from app.postgres import (
     BusinessPromptPreparation,
+    PostgresCallResultWriter,
+    PostgresCallRecordStore,
     PostgresPromptStore,
     PostgresRuntime,
     ThreadsafeBusinessPromptPreparer,
+    ThreadsafeCallRecordUpdater,
+    build_call_record_transcript_json,
     fallback_prompt_snapshot,
 )
 
@@ -30,6 +35,14 @@ class FakePool:
 
     def acquire(self):
         return FakeAcquire(self.conn)
+
+
+class FakeTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
 
 def test_fallback_prompt_snapshot_captures_prompt_identity():
@@ -308,6 +321,227 @@ def test_postgres_prompt_store_returns_none_when_business_context_missing():
     assert prep is None
 
 
+def test_call_record_transcript_json_uses_existing_simple_turns_shape():
+    transcript_json = build_call_record_transcript_json(
+        {
+            "opening": {"text": "您好，请问是金女士吗？"},
+            "turns": [
+                {"role": "assistant", "text": "您好，请问是金女士吗？"},
+                {"role": "user", "text": "我是，你说吧。"},
+                {"role": "assistant", "text": ""},
+                {"role": "agent", "text": "不应保留非法角色。"},
+            ],
+        }
+    )
+
+    assert json.loads(transcript_json) == {
+        "turns": [
+            {"role": "assistant", "text": "您好，请问是金女士吗？"},
+            {"role": "user", "text": "我是，你说吧。"},
+        ]
+    }
+
+
+def test_postgres_call_record_store_marks_started_after_precheck():
+    class Conn:
+        def __init__(self):
+            self.queries = []
+
+        def transaction(self):
+            return FakeTransaction()
+
+        async def fetchrow(self, query, *args):
+            self.queries.append(("fetchrow", query, args))
+            assert "from public.call_record" in query
+            assert args == (990000000000032001,)
+            return {
+                "id": 990000000000032001,
+                "debt_id": 2049810626160668673,
+                "status": "0",
+                "transcript": None,
+            }
+
+        async def execute(self, query, *args):
+            self.queries.append(("execute", query, args))
+            assert "set status = '1'" in query.lower()
+            assert "started_at = current_timestamp" in query
+            assert "analysis_status" not in query
+            assert args == (990000000000032001,)
+            return "UPDATE 1"
+
+    conn = Conn()
+    store = PostgresCallRecordStore(FakePool(conn))
+
+    updated = asyncio.run(
+        store.mark_started(
+            {
+                "callId": "990000000000032001",
+                "debtId": "2049810626160668673",
+            }
+        )
+    )
+
+    assert updated is True
+    assert [kind for kind, _, _ in conn.queries] == ["fetchrow", "execute"]
+
+
+def test_postgres_call_record_store_does_not_update_when_debt_id_mismatches():
+    class Conn:
+        def transaction(self):
+            return FakeTransaction()
+
+        async def fetchrow(self, query, *args):
+            return {
+                "id": 990000000000032001,
+                "debt_id": 111,
+                "status": "0",
+                "transcript": None,
+            }
+
+        async def execute(self, query, *args):
+            raise AssertionError("mismatched debt_id must not update")
+
+    store = PostgresCallRecordStore(FakePool(Conn()))
+
+    updated = asyncio.run(
+        store.mark_failed(
+            {
+                "callId": "990000000000032001",
+                "debtId": "2049810626160668673",
+            }
+        )
+    )
+
+    assert updated is False
+
+
+def test_postgres_call_record_store_writes_completed_simple_transcript_only_from_running():
+    class Conn:
+        def __init__(self):
+            self.executed_args = None
+
+        def transaction(self):
+            return FakeTransaction()
+
+        async def fetchrow(self, query, *args):
+            return {
+                "id": 990000000000032001,
+                "debt_id": 2049810626160668673,
+                "status": "1",
+                "transcript": None,
+            }
+
+        async def execute(self, query, *args):
+            self.executed_args = args
+            assert "set status = '4'" in query.lower()
+            assert "transcript" in query
+            assert "analysis_status" not in query
+            assert "analysis_result" not in query
+            return "UPDATE 1"
+
+    conn = Conn()
+    store = PostgresCallRecordStore(FakePool(conn))
+
+    updated = asyncio.run(
+        store.mark_transcript_completed(
+            {
+                "callId": "990000000000032001",
+                "debtId": "2049810626160668673",
+            },
+            '{"turns":[{"role":"assistant","text":"您好"}]}',
+        )
+    )
+
+    assert updated is True
+    assert conn.executed_args is not None
+    assert conn.executed_args == (
+        990000000000032001,
+        '{"turns":[{"role":"assistant","text":"您好"}]}',
+    )
+    assert json.loads(conn.executed_args[1]) == {
+        "turns": [{"role": "assistant", "text": "您好"}]
+    }
+
+
+def test_postgres_call_record_store_does_not_overwrite_terminal_status():
+    class Conn:
+        def transaction(self):
+            return FakeTransaction()
+
+        async def fetchrow(self, query, *args):
+            return {
+                "id": 990000000000032001,
+                "debt_id": 2049810626160668673,
+                "status": "4",
+                "transcript": '{"turns":[]}',
+            }
+
+        async def execute(self, query, *args):
+            raise AssertionError("terminal call_record must not be overwritten")
+
+    store = PostgresCallRecordStore(FakePool(Conn()))
+
+    updated = asyncio.run(
+        store.mark_transcript_completed(
+            {
+                "callId": "990000000000032001",
+                "debtId": "2049810626160668673",
+            },
+            '{"turns":[{"role":"assistant","text":"新内容"}]}',
+        )
+    )
+
+    assert updated is False
+
+
+def test_postgres_call_result_writer_updates_call_record_with_simple_transcript():
+    async def assert_writer():
+        calls = []
+
+        class Store:
+            async def mark_transcript_completed(self, context, transcript_json):
+                calls.append((context, json.loads(transcript_json)))
+                return True
+
+        writer = PostgresCallResultWriter(Store())
+        writer.start()
+        try:
+            assert writer.enqueue_nowait(
+                {
+                    "call_id": "internal-media-call",
+                    "context": {
+                        "callId": "990000000000032001",
+                        "debtId": "2049810626160668673",
+                    },
+                    "turns": [
+                        {"role": "assistant", "text": "您好"},
+                        {"role": "user", "text": "我稍后处理"},
+                        {"role": "agent", "text": "非法角色不入库"},
+                    ],
+                }
+            )
+            await asyncio.wait_for(writer.queue.join(), timeout=1.0)
+        finally:
+            await writer.stop()
+
+        assert calls == [
+            (
+                {
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+                {
+                    "turns": [
+                        {"role": "assistant", "text": "您好"},
+                        {"role": "user", "text": "我稍后处理"},
+                    ]
+                },
+            )
+        ]
+
+    asyncio.run(assert_writer())
+
+
 def test_postgres_prompt_store_derives_persona_and_employee_from_debt_and_voice():
     class Conn:
         async def fetchrow(self, query, *args):
@@ -410,6 +644,8 @@ async def _assert_runtime_disabled_does_not_create_store_or_writer() -> None:
 
     assert runtime.pool is None
     assert runtime.prompt_store is None
+    assert runtime.call_record_store is None
+    assert runtime.call_record_updater is None
     assert runtime.call_result_writer is None
 
 
@@ -425,10 +661,16 @@ async def _assert_runtime_success_creates_prompt_store() -> None:
 
     assert runtime.pool is not None
     assert isinstance(runtime.prompt_store, PostgresPromptStore)
-    assert runtime.call_result_writer is None
+    assert isinstance(runtime.call_record_store, PostgresCallRecordStore)
+    assert isinstance(runtime.call_record_updater, ThreadsafeCallRecordUpdater)
+    assert isinstance(runtime.call_result_writer, PostgresCallResultWriter)
 
     await runtime.stop()
     assert runtime.pool is None
+    assert runtime.prompt_store is None
+    assert runtime.call_record_store is None
+    assert runtime.call_record_updater is None
+    assert runtime.call_result_writer is None
 
 
 async def _assert_missing_dsn_does_not_block_startup() -> None:
@@ -444,6 +686,8 @@ async def _assert_missing_dsn_does_not_block_startup() -> None:
 
     assert runtime.pool is None
     assert runtime.prompt_store is None
+    assert runtime.call_record_store is None
+    assert runtime.call_record_updater is None
     assert runtime.call_result_writer is None
 
 
@@ -460,4 +704,6 @@ async def _assert_pool_failure_does_not_block_startup() -> None:
 
     assert runtime.pool is None
     assert runtime.prompt_store is None
+    assert runtime.call_record_store is None
+    assert runtime.call_record_updater is None
     assert runtime.call_result_writer is None

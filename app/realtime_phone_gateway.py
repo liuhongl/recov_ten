@@ -10,8 +10,9 @@ import os
 import time
 import uuid
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 from websockets.exceptions import ConnectionClosed
 from websockets.legacy.server import WebSocketServer, WebSocketServerProtocol, serve
@@ -170,6 +171,7 @@ RealtimeSessionFactory = Callable[
 ]
 CallAnsweredPredicate = Callable[[str], bool]
 PromptSnapshotProvider = Callable[[str], PromptSnapshot | None]
+CallContextProvider = Callable[[str], Mapping[str, Any] | None]
 
 
 @dataclass
@@ -179,6 +181,7 @@ class RealtimePhoneSessionStats:
     connected_at: float
     last_seen_at: float
     expected_frame_bytes: int
+    context: dict[str, Any] = field(default_factory=dict)
     inbound_frames: int = 0
     inbound_bytes: int = 0
     outbound_frames: int = 0
@@ -341,6 +344,7 @@ class FreeSwitchRealtimeGatewayServer:
         opening_store: OpeningAudioStore | None = None,
         is_call_answered: CallAnsweredPredicate | None = None,
         prompt_snapshot_provider: PromptSnapshotProvider | None = None,
+        call_context_provider: CallContextProvider | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("api_key is required")
@@ -410,6 +414,7 @@ class FreeSwitchRealtimeGatewayServer:
         self._on_media_disconnected = on_media_disconnected
         self.opening_store = opening_store
         self._is_call_answered = is_call_answered
+        self.call_context_provider = call_context_provider
 
     @property
     def address(self) -> tuple[str, int]:
@@ -516,12 +521,14 @@ class FreeSwitchRealtimeGatewayServer:
 
         now = time.time()
         opening_audio = self._pop_opening_audio(call_id)
+        context = self._load_call_context(call_id)
         session = RealtimePhoneSessionStats(
             call_id=call_id,
             session_id=uuid.uuid4().hex,
             connected_at=now,
             last_seen_at=now,
             expected_frame_bytes=self.expected_frame_bytes,
+            context=context,
             opening_text=(
                 None if opening_audio is None else opening_audio.opening_text
             ),
@@ -754,6 +761,22 @@ class FreeSwitchRealtimeGatewayServer:
         if self.opening_store is None:
             return None
         return self.opening_store.pop(call_id)
+
+    def _load_call_context(self, call_id: str) -> dict[str, Any]:
+        if self.call_context_provider is None:
+            return {}
+        try:
+            context = self.call_context_provider(call_id)
+        except Exception:
+            LOGGER.warning(
+                "call_context_load_failed call_id=%s",
+                call_id,
+                exc_info=True,
+            )
+            return {}
+        if not isinstance(context, Mapping):
+            return {}
+        return dict(context)
 
     def _schedule_opening_playback(
         self,
@@ -2196,6 +2219,7 @@ class FreeSwitchRealtimeGatewayServer:
             "call_id": session.call_id,
             "session_id": session.session_id,
             "status": "completed",
+            "context": session.context,
             "connected_at_ms": int(session.connected_at * 1000),
             "disconnected_at_ms": int(disconnected_at * 1000),
             "duration_ms": int((disconnected_at - session.connected_at) * 1000),

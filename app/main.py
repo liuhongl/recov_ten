@@ -112,6 +112,7 @@ async def _serve(config, *, media_mode: str) -> None:
         opening_generator=opening_generator,
         opening_store=opening_store,
         business_prompt_preparer=business_prompt_preparer,
+        call_record_updater=postgres_runtime.call_record_updater,
     )
     outbound_manager.start()
     health_server = HealthServer(config, call_manager=outbound_manager)
@@ -162,6 +163,7 @@ async def _serve(config, *, media_mode: str) -> None:
             realtime_session_factory=session_factory,
             prompt_store=postgres_runtime.prompt_store,
             prompt_snapshot_provider=outbound_manager.get_prompt_snapshot,
+            call_context_provider=outbound_manager.get_call_context,
             call_result_writer=postgres_runtime.call_result_writer,
             on_media_connected=outbound_manager.mark_media_connected,
             on_media_disconnected=outbound_manager.mark_media_disconnected,

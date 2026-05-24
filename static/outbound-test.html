@@ -586,6 +586,7 @@
                 <label class="wide">
                   测试场景
                   <select id="scenarioPreset" name="scenario_preset">
+                    <option value="manual-sip-provider" selected>sip-provider 真实线路：手动号码</option>
                     <option value="local-1000">本地软电话 1000</option>
                     <option value="sandbox-answer">sip-provider 沙箱：正常接通</option>
                     <option value="sandbox-progress-answer">sip-provider 沙箱：183 后接通</option>
@@ -631,6 +632,10 @@
                   <input id="metadataScene" name="metadata_scene" value="local-outbound-test" />
                 </label>
                 <div class="form-subtitle">数据库业务参数</div>
+                <label>
+                  通话记录 callId
+                  <input id="callId" name="callId" placeholder="Java 已初始化的 call_record.id" />
+                </label>
                 <label>
                   数字员工身份 identityName
                   <input id="identityName" name="identityName" value="项目员工" />
@@ -695,6 +700,15 @@
       let currentCallId = null;
 
       const scenarioPresets = {
+        "manual-sip-provider": {
+          destination: "",
+          caller: "037123124845",
+          callerName: "037123124845",
+          endpoint: "",
+          endpointMode: "sip-provider",
+          timeout: "30",
+          scene: "real-sip-single-preflight",
+        },
         "local-1000": {
           destination: "1000",
           caller: "9000",
@@ -912,7 +926,7 @@
           context.scene = payload.metadata_scene;
         }
         delete payload.metadata_scene;
-        for (const key of ["identityName", "debtId"]) {
+        for (const key of ["callId", "identityName", "debtId"]) {
           if (payload[key]) {
             context[key] = payload[key];
           }
@@ -933,6 +947,18 @@
         return `${opening.status || "ready"} · ${opening.voice || "-"} · ${hash}`;
       }
 
+      function sipProviderEndpoint(destination) {
+        const text = String(destination || "").trim();
+        return text ? `sofia/gateway/sip-provider/${text}` : "";
+      }
+
+      function syncDynamicEndpoint() {
+        const preset = scenarioPresets[scenarioPreset.value];
+        if (preset?.endpointMode === "sip-provider") {
+          endpointInput.value = sipProviderEndpoint(destinationInput.value);
+        }
+      }
+
       function applyScenarioPreset() {
         const preset = scenarioPresets[scenarioPreset.value];
         if (!preset) return;
@@ -942,11 +968,15 @@
         timeoutInput.value = preset.timeout;
         dialplanExtensionInput.value = "9199";
         dialplanContextInput.value = "default";
-        endpointInput.value = preset.endpoint;
+        endpointInput.value =
+          preset.endpointMode === "sip-provider"
+            ? sipProviderEndpoint(preset.destination)
+            : preset.endpoint;
         metadataSceneInput.value = preset.scene;
       }
 
       scenarioPreset.addEventListener("change", applyScenarioPreset);
+      destinationInput.addEventListener("input", syncDynamicEndpoint);
 
       callForm.addEventListener("submit", async (event) => {
         event.preventDefault();

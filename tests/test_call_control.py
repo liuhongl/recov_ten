@@ -237,6 +237,17 @@ def test_parse_create_call_rejects_unsafe_caller_name():
 
 def test_outbound_manager_originates_in_background():
     commands: list[str] = []
+    call_record_events: list[tuple[str, dict]] = []
+
+    class FakeCallRecordUpdater:
+        def mark_started(self, context):
+            call_record_events.append(("started", context))
+
+        def mark_failed(self, context):
+            call_record_events.append(("failed", context))
+
+        def mark_no_answer(self, context):
+            call_record_events.append(("no_answer", context))
 
     class FakeDialer:
         async def resolve_endpoint(self, endpoint: str) -> str:
@@ -253,7 +264,11 @@ def test_outbound_manager_originates_in_background():
         event_socket=EventSocketConfig(enabled=True),
         outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
     )
-    manager = OutboundCallManager(config, dialer_factory=lambda: FakeDialer())
+    manager = OutboundCallManager(
+        config,
+        dialer_factory=lambda: FakeDialer(),
+        call_record_updater=FakeCallRecordUpdater(),
+    )
 
     try:
         call = manager.create_call(
@@ -261,6 +276,11 @@ def test_outbound_manager_originates_in_background():
                 "destination": "1000",
                 "external_call_id": "biz-1",
                 "caller_id_number": "9000",
+                "context": {
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                    "identityName": "项目员工",
+                },
             }
         )
 
@@ -269,6 +289,81 @@ def test_outbound_manager_originates_in_background():
         assert final_call["freeswitch_reply"] == "+OK call accepted"
         assert commands
         assert "user/1000 9199 XML default" in commands[0]
+        assert call_record_events == [
+            (
+                "started",
+                {
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                    "identityName": "项目员工",
+                },
+            )
+        ]
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_syncs_call_record_failed_when_originate_fails():
+    call_record_events: list[tuple[str, dict]] = []
+
+    class FakeCallRecordUpdater:
+        def mark_started(self, context):
+            call_record_events.append(("started", context))
+
+        def mark_failed(self, context):
+            call_record_events.append(("failed", context))
+
+        def mark_no_answer(self, context):
+            call_record_events.append(("no_answer", context))
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return endpoint
+
+        async def originate(self, command: str) -> str:
+            return "-ERR USER_BUSY"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    config = GatewayConfig(
+        event_socket=EventSocketConfig(enabled=True),
+        outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+    )
+    manager = OutboundCallManager(
+        config,
+        dialer_factory=lambda: FakeDialer(),
+        call_record_updater=FakeCallRecordUpdater(),
+    )
+
+    try:
+        call = manager.create_call(
+            {
+                "destination": "1000",
+                "context": {
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            }
+        )
+
+        _wait_for_status(manager, call["call_id"], "failed")
+        assert call_record_events == [
+            (
+                "started",
+                {
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            ),
+            (
+                "failed",
+                {
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            ),
+        ]
     finally:
         manager.shutdown()
 
@@ -614,6 +709,18 @@ def test_outbound_manager_applies_channel_state_events():
 
 
 def test_outbound_manager_maps_unanswered_hangup_event():
+    call_record_events: list[tuple[str, dict]] = []
+
+    class FakeCallRecordUpdater:
+        def mark_started(self, context):
+            call_record_events.append(("started", context))
+
+        def mark_failed(self, context):
+            call_record_events.append(("failed", context))
+
+        def mark_no_answer(self, context):
+            call_record_events.append(("no_answer", context))
+
     class FakeDialer:
         async def resolve_endpoint(self, endpoint: str) -> str:
             return endpoint
@@ -625,10 +732,22 @@ def test_outbound_manager_maps_unanswered_hangup_event():
             return "+OK hangup accepted"
 
     config = GatewayConfig(event_socket=EventSocketConfig(enabled=True))
-    manager = OutboundCallManager(config, dialer_factory=lambda: FakeDialer())
+    manager = OutboundCallManager(
+        config,
+        dialer_factory=lambda: FakeDialer(),
+        call_record_updater=FakeCallRecordUpdater(),
+    )
 
     try:
-        call = manager.create_call({"destination": "1000"})
+        call = manager.create_call(
+            {
+                "destination": "1000",
+                "context": {
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            }
+        )
         call_id = call["call_id"]
         _wait_for_status(manager, call_id, "originated")
 
@@ -643,6 +762,22 @@ def test_outbound_manager_maps_unanswered_hangup_event():
         assert final_call["status"] == "no_answer"
         assert final_call["phase"] == "no_answer"
         assert final_call["failure_label"] == "无人接听"
+        assert call_record_events == [
+            (
+                "started",
+                {
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            ),
+            (
+                "no_answer",
+                {
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            ),
+        ]
     finally:
         manager.shutdown()
 

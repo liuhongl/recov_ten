@@ -153,6 +153,11 @@ def test_call_result_payload_uses_committed_exchanges_as_authoritative_history()
         connected_at=10.0,
         last_seen_at=10.0,
         expected_frame_bytes=320,
+        context={
+            "callId": "990000000000032001",
+            "debtId": "2049810626160668673",
+            "identityName": "项目员工",
+        },
         opening_text="您好，系统显示您还有物业费未缴。",
         opening_text_hash="hash-opening",
         opening_voice="female",
@@ -185,6 +190,11 @@ def test_call_result_payload_uses_committed_exchanges_as_authoritative_history()
 
     payload = server._build_call_result_payload(session)
 
+    assert payload["context"] == {
+        "callId": "990000000000032001",
+        "debtId": "2049810626160668673",
+        "identityName": "项目员工",
+    }
     assert "input_transcripts" not in payload
     assert "output_transcripts" not in payload
     assert payload["committed_exchanges"] == [

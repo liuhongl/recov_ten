@@ -21,10 +21,13 @@
 - 优先尊重事实。如果测试、日志或代码与预期不一致，以证据为准。
 - 不提交真实密钥、`.env`、运行日志、音频样本、TLS 证书或本地 IDE 文件。
 - 修改后至少运行网关相关测试；涉及 FreeSWITCH 本地运行时时，额外验证 Docker Compose 配置。
+- `freeswitch-local/conf/vars.xml` 可能包含本机 LAN IP，只能视为本地软电话测试配置；部署或提交前必须确认不会用它覆盖公网服务器 SIP/RTP 配置。
+- 涉及数据库、外呼控制、`/outbound-test` 或实时媒体结果落库时，优先运行 `uv run --with pytest pytest -q`。
 
 ## Git 约定
 
 - Commit message 使用 Conventional Commits，例如 `feat: 增加实时语音网关`、`fix: 修复播放尾音丢失`、`chore: 提取独立网关项目`。
+- 提交前按意图拆分 commit，功能、文档、工具清理分开。
 - 不使用 `--no-verify`。
 - 不修改仓库级或全局 `user.name` / `user.email`。
 - 不添加 AI 工具署名或 `Co-Authored-By`。

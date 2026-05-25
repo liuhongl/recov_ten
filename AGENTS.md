@@ -23,6 +23,22 @@
 - 修改后至少运行网关相关测试；涉及 FreeSWITCH 本地运行时时，额外验证 Docker Compose 配置。
 - `freeswitch-local/conf/vars.xml` 可能包含本机 LAN IP，只能视为本地软电话测试配置；部署或提交前必须确认不会用它覆盖公网服务器 SIP/RTP 配置。
 - 涉及数据库、外呼控制、`/outbound-test` 或实时媒体结果落库时，优先运行 `uv run --with pytest pytest -q`。
+- `.env` 可能带 UTF-8 BOM；读取本地环境文件时要兼容 `utf-8-sig`，但不要输出或提交真实密钥。
+
+## 本地软电话与音频排查
+
+- Mac + Docker + Linphone 本地测试环境下，不要随意打开 FreeSWITCH `disable-rtp-auto-adjust=true`；它可能导致 RTP 回包地址不自动修正，表现为电话接通但无声、无回声或 AI 听不到用户。
+- 排查软电话接通无声或 AI 无反应时，优先验证 `9196 echo` 是否有回声，再测真实 AI 外呼；电话能接通不代表 RTP 双向音频一定正常。
+- 音频问题优先按链路排查：Linphone 注册状态、Linphone 输入/输出设备、macOS 麦克风权限、FreeSWITCH profile/RTP、网关 inbound RMS 诊断、模型 turn/transcript。
+- 网关 inbound RMS 诊断应通过 `inbound_rms_diagnostics_enabled` 开关控制，商用默认关闭；只有排查接通无声、AI 听不到用户或本地 RTP 问题时临时打开。
+- `uuid_record` 在 echo 或本地 RTP 转发场景下可能录到静音，不能单独作为“用户没有声音”的核心证据；更可靠的证据是 `9196 echo`、开启诊断后的网关 inbound RMS、FreeSWITCH 通道状态和真实 AI turn/transcript。
+
+## 物业费催收提示词边界
+
+- 数据库催收策略、客户画像策略和客服语气配置不能覆盖全局合规规则；冲突时以身份核实、隐私保护、勿扰终止和法律红线为准。
+- 客户明确要求勿扰、拒绝继续沟通或强烈反感时，应记录并礼貌结束，不再追问原因、付款、回拨时间或费用安排。
+- 工资日、收入情况等个人财务信息遵循最小必要原则；优先问“哪天方便处理”，只有客户主动提到等工资或发工资时，才轻问发薪后哪天方便处理。
+- 法务/律师角色必须有系统明确身份和委托关系支撑；不得冒用律师、律师事务所、公检法或司法机关身份，不得制造“马上起诉、马上执行、影响征信”等司法压力。
 
 ## Git 约定
 

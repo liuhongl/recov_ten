@@ -187,6 +187,36 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert "不掌握该信息" in prep.prompt_snapshot.instructions
     assert "无租客信息时，不得主动假设存在租客" in prep.prompt_snapshot.instructions
     assert "不得建议联系租客" in prep.prompt_snapshot.instructions
+    assert "# 规则优先级" in prep.prompt_snapshot.instructions
+    assert "数据库催收策略、客户画像策略、客服语气配置与以下规则冲突时" in prep.prompt_snapshot.instructions
+    assert "# 物业费场景约束" in prep.prompt_snapshot.instructions
+    assert "没钱、资金困难、等工资" in prep.prompt_snapshot.instructions
+    assert "优先询问方便哪天处理" in prep.prompt_snapshot.instructions
+    assert "不主动追问工资日或收入情况" in prep.prompt_snapshot.instructions
+    assert "延期、分期、部分付款" in prep.prompt_snapshot.instructions
+    assert "不承诺批准、减免或结清" in prep.prompt_snapshot.instructions
+    assert "物业服务问题" in prep.prompt_snapshot.instructions
+    assert "这个问题我先记录并反馈项目核实" in prep.prompt_snapshot.instructions
+    assert "不说“不交影响服务”" in prep.prompt_snapshot.instructions
+    assert "不承诺具体维修安排、处理时间或满意结果" in prep.prompt_snapshot.instructions
+    assert "不列举未提供的部门、师傅或维修方案" in prep.prompt_snapshot.instructions
+    assert "拒付、情绪对抗、要求勿扰" in prep.prompt_snapshot.instructions
+    assert "要求勿扰属于最高优先级" in prep.prompt_snapshot.instructions
+    assert "不再追问原因、付款、回拨时间或费用安排" in prep.prompt_snapshot.instructions
+    assert "账务、金额、收费标准争议" in prep.prompt_snapshot.instructions
+    assert "支付安全、凭证、发票、已转账" in prep.prompt_snapshot.instructions
+    assert "通过物业官方已公示渠道核实和办理" in prep.prompt_snapshot.instructions
+    assert "不编造具体官方渠道名称、账号或缴费方式" in prep.prompt_snapshot.instructions
+    assert "不列举未提供的前台、公众号、缴费机或账户" in prep.prompt_snapshot.instructions
+    assert "不要再补充其他渠道名称" in prep.prompt_snapshot.instructions
+    assert "忙碌、不方便" in prep.prompt_snapshot.instructions
+    assert "不得冒充法院、司法机关、执法人员" in prep.prompt_snapshot.instructions
+    assert "不能判断会不会起诉、影响征信或上门执行" in prep.prompt_snapshot.instructions
+    assert "后续流程以物业方核实和正式通知为准" in prep.prompt_snapshot.instructions
+    assert "法务/律师流程只能中性表述" in prep.prompt_snapshot.instructions
+    assert "不得冒用律师、律师事务所、公检法或司法机关身份" in prep.prompt_snapshot.instructions
+    assert "未明确委托关系时不得自称律师或受律师委托" in prep.prompt_snapshot.instructions
+    assert "缴费意愿、费用处理安排" in prep.prompt_snapshot.instructions
     assert prep.opening.opening_text.startswith("您好，请问是金女士吗？我是李经理。")
 
 

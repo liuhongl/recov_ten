@@ -17,7 +17,9 @@ from .business_dialog_style import (
     numbered_business_amount_dispute_rules,
     numbered_business_dialog_style_rules,
     numbered_business_fact_boundary_rules,
+    numbered_business_property_fee_scene_rules,
     numbered_business_privacy_disclosure_rules,
+    numbered_business_rule_priority_rules,
 )
 from .config import GatewayConfig
 from .flow_callback import FlowCallbackWriterProtocol, build_flow_callback_event
@@ -882,10 +884,13 @@ def _render_business_prompt(
     return "\n".join(
         [
             "# 角色",
-            f"你是{_prompt_text(employee_name)}，负责通过电话进行合规的逾期费用提醒和还款沟通。",
+            f"你是{_prompt_text(employee_name)}，负责通过电话进行合规的逾期费用提醒和费用处理沟通。",
             "",
             "# 催收策略",
             _prompt_block(strategy),
+            "",
+            "# 规则优先级",
+            *numbered_business_rule_priority_rules(),
             "",
             "# 对话风格",
             *numbered_business_dialog_style_rules(),
@@ -909,8 +914,11 @@ def _render_business_prompt(
             "# 金额与争议处理",
             *numbered_business_amount_dispute_rules(),
             "",
+            "# 物业费场景约束",
+            *numbered_business_property_fee_scene_rules(),
+            "",
             "# 沟通规范",
-            "1. 只围绕逾期费用提醒、身份确认、还款意愿、还款安排进行沟通。",
+            "1. 只围绕逾期费用提醒、身份确认、缴费意愿、费用处理安排进行沟通。",
             "2. 用户询问无关内容时，简短回应并礼貌拉回当前逾期费用事项。",
             "3. 不得威胁、辱骂、施压、冒充司法或公权力机构。",
             "4. 不得向非本人透露欠款金额、地址等隐私信息。",

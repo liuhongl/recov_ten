@@ -93,6 +93,7 @@ class VadConfig:
 class FeatureConfig:
     metrics_enabled: bool = True
     recording_enabled: bool = False
+    inbound_rms_diagnostics_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -449,6 +450,12 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
                 "features",
                 "recording_enabled",
                 default=FeatureConfig.recording_enabled,
+            ),
+            inbound_rms_diagnostics_enabled=_get_bool(
+                raw,
+                "features",
+                "inbound_rms_diagnostics_enabled",
+                default=FeatureConfig.inbound_rms_diagnostics_enabled,
             ),
         ),
         postgres=PostgresConfig(
@@ -903,6 +910,10 @@ def _apply_env_overrides(config: GatewayConfig) -> GatewayConfig:
             recording_enabled=_env_bool(
                 "RECORDING_ENABLED",
                 config.features.recording_enabled,
+            ),
+            inbound_rms_diagnostics_enabled=_env_bool(
+                "INBOUND_RMS_DIAGNOSTICS_ENABLED",
+                config.features.inbound_rms_diagnostics_enabled,
             ),
         ),
         postgres=PostgresConfig(

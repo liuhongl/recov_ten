@@ -79,6 +79,7 @@ def test_load_config_from_toml(tmp_path):
             [features]
             metrics_enabled = true
             recording_enabled = false
+            inbound_rms_diagnostics_enabled = true
 
             [flow_callback]
             enabled = true
@@ -158,6 +159,7 @@ def test_load_config_from_toml(tmp_path):
     assert config.vad.barge_in_enabled is True
     assert config.features.metrics_enabled is True
     assert config.features.recording_enabled is False
+    assert config.features.inbound_rms_diagnostics_enabled is True
     assert config.flow_callback.enabled is True
     assert config.flow_callback.topic == "recov-flow-callback"
     assert config.flow_callback.producer_group == "recov-ten-gateway"
@@ -239,6 +241,7 @@ def test_environment_overrides(monkeypatch):
     monkeypatch.setenv("POSTGRES_DSN_ENV", "LOCAL_POSTGRES_DSN")
     monkeypatch.setenv("POSTGRES_MAX_POOL_SIZE", "9")
     monkeypatch.setenv("POSTGRES_COMMAND_TIMEOUT_SECONDS", "2.5")
+    monkeypatch.setenv("INBOUND_RMS_DIAGNOSTICS_ENABLED", "true")
 
     config = load_config()
 
@@ -267,6 +270,7 @@ def test_environment_overrides(monkeypatch):
     assert config.vad.end_silence_ms == 600
     assert config.vad.barge_in_enabled is True
     assert config.features.metrics_enabled is False
+    assert config.features.inbound_rms_diagnostics_enabled is True
     assert config.flow_callback.enabled is True
     assert config.flow_callback.topic == "env-flow-callback"
     assert config.flow_callback.producer_group == "env-producer"
@@ -298,6 +302,7 @@ def test_default_outbound_caller_avoids_local_self_call():
     config = load_config()
 
     assert config.outbound.caller_id_number == "9000"
+    assert config.features.inbound_rms_diagnostics_enabled is False
 
 
 def test_invalid_boolean_env(monkeypatch):

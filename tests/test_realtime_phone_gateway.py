@@ -8,7 +8,13 @@ import pytest
 from websockets.legacy.client import connect
 
 from app.audio_codec import samples_to_pcm_s16le
-from app.config import FreeSwitchConfig, GatewayConfig, PlaybackConfig, VadConfig
+from app.config import (
+    FeatureConfig,
+    FreeSwitchConfig,
+    GatewayConfig,
+    PlaybackConfig,
+    VadConfig,
+)
 from app.freeswitch_event_socket import PlaybackProgressEvent
 from app.opening import OpeningAudioStore, PreparedOpeningAudio
 from app.postgres import PromptSnapshot
@@ -19,6 +25,8 @@ from app.realtime_phone_gateway import (
     OPENING_TURN_ID,
     PlaybackFrame,
     RealtimePhoneSessionStats,
+    _inbound_rms_avg,
+    _record_inbound_audio_rms,
 )
 from app.realtime_types import RealtimeTurnResult
 from app.realtime_types import RealtimeDialogConfig
@@ -140,6 +148,86 @@ def test_realtime_instructions_do_not_reuse_historical_time_question():
         "现在几点？",
         "现在是下午三点。",
     ]
+
+
+def test_realtime_phone_gateway_records_inbound_audio_rms_stats():
+    session = RealtimePhoneSessionStats(
+        call_id="test-call",
+        session_id="test-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+    )
+
+    session.inbound_frames = 1
+    _record_inbound_audio_rms(session, _phone_frame(100), threshold=300)
+    session.inbound_frames = 2
+    _record_inbound_audio_rms(session, _phone_frame(400), threshold=300)
+    session.inbound_frames = 3
+    _record_inbound_audio_rms(session, _phone_frame(0), threshold=300)
+
+    assert session.inbound_rms_min == 0
+    assert session.inbound_rms_max == 400
+    assert session.inbound_rms_last == 0
+    assert _inbound_rms_avg(session) == 167
+    assert session.inbound_high_rms_frames == 1
+    assert session.inbound_first_high_rms_frame == 2
+
+
+def test_realtime_phone_gateway_skips_inbound_audio_rms_when_diagnostics_disabled():
+    asyncio.run(_assert_realtime_phone_gateway_skips_inbound_audio_rms_when_disabled())
+
+
+async def _assert_realtime_phone_gateway_skips_inbound_audio_rms_when_disabled():
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(
+            tail_silence_ms=0,
+            inbound_rms_diagnostics_enabled=False,
+        ),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-call",
+        session_id="test-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=server.expected_frame_bytes,
+    )
+
+    await server._handle_audio_frame(session, _phone_frame(400))
+
+    assert session.inbound_frames == 1
+    assert session.inbound_rms_count == 0
+    assert session.inbound_rms_max is None
+    assert _inbound_rms_avg(session) is None
+
+
+def test_realtime_phone_gateway_records_inbound_audio_rms_when_diagnostics_enabled():
+    asyncio.run(_assert_realtime_phone_gateway_records_inbound_audio_rms_when_enabled())
+
+
+async def _assert_realtime_phone_gateway_records_inbound_audio_rms_when_enabled():
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(
+            tail_silence_ms=0,
+            inbound_rms_diagnostics_enabled=True,
+        ),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-call",
+        session_id="test-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=server.expected_frame_bytes,
+    )
+
+    await server._handle_audio_frame(session, _phone_frame(400))
+
+    assert session.inbound_frames == 1
+    assert session.inbound_rms_count == 1
+    assert session.inbound_rms_max == 400
+    assert session.inbound_high_rms_frames == 1
 
 
 def test_call_result_payload_uses_committed_exchanges_as_authoritative_history():
@@ -1648,6 +1736,7 @@ def _test_config(
     tail_silence_ms: int,
     send_interval_ms: int = 10,
     barge_in_enabled: bool = True,
+    inbound_rms_diagnostics_enabled: bool = False,
 ) -> GatewayConfig:
     return GatewayConfig(
         freeswitch=FreeSwitchConfig(media_host="127.0.0.1", media_port=0),
@@ -1664,6 +1753,9 @@ def _test_config(
             pre_speech_ms=0,
             keep_silence_ms=0,
             barge_in_enabled=barge_in_enabled,
+        ),
+        features=FeatureConfig(
+            inbound_rms_diagnostics_enabled=inbound_rms_diagnostics_enabled,
         ),
     )
 

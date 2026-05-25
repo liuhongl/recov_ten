@@ -213,6 +213,13 @@ class RealtimePhoneSessionStats:
     turns_completed: int = 0
     turns_failed: int = 0
     streamed_input_bytes: int = 0
+    inbound_rms_min: int | None = None
+    inbound_rms_max: int | None = None
+    inbound_rms_last: int | None = None
+    inbound_rms_sum: int = 0
+    inbound_rms_count: int = 0
+    inbound_high_rms_frames: int = 0
+    inbound_first_high_rms_frame: int | None = None
     first_audio_at: float | None = None
     first_playback_at: float | None = None
     playback_last_send_at: float | None = None
@@ -1005,6 +1012,13 @@ class FreeSwitchRealtimeGatewayServer:
                 session.inbound_frames,
             )
             return
+
+        if self.config.features.inbound_rms_diagnostics_enabled:
+            _record_inbound_audio_rms(
+                session,
+                payload,
+                threshold=self.config.vad.speech_rms_threshold,
+            )
 
         frame_16k = resample_pcm_s16le_mono(
             payload,
@@ -2090,6 +2104,9 @@ class FreeSwitchRealtimeGatewayServer:
             "freeswitch_realtime_session_finished call_id=%s session_id=%s "
             "turn_mode=server_vad inbound_frames=%s inbound_bytes=%s "
             "streamed_model_input_bytes=%s outbound_frames=%s outbound_bytes=%s "
+            "inbound_rms_min=%s inbound_rms_max=%s inbound_rms_avg=%s "
+            "inbound_rms_last=%s inbound_high_rms_frames=%s "
+            "inbound_first_high_rms_frame=%s "
             "invalid_frame_count=%s interruptions=%s dropped_playback_frames=%s "
             "dropped_stale_frames=%s playback_underruns=%s "
             "max_playback_queue_frames=%s max_playback_send_gap_ms=%s "
@@ -2120,6 +2137,12 @@ class FreeSwitchRealtimeGatewayServer:
             session.streamed_input_bytes,
             session.outbound_frames,
             session.outbound_bytes,
+            session.inbound_rms_min,
+            session.inbound_rms_max,
+            _inbound_rms_avg(session),
+            session.inbound_rms_last,
+            session.inbound_high_rms_frames,
+            session.inbound_first_high_rms_frame,
             session.invalid_frame_count,
             session.interruptions,
             session.dropped_playback_frames,
@@ -2408,6 +2431,33 @@ class PlaybackReferenceMatch:
     correlation: float | None
     frame_number: int | None
     rms: int | None
+
+
+def _record_inbound_audio_rms(
+    session: RealtimePhoneSessionStats,
+    payload: bytes,
+    *,
+    threshold: int,
+) -> int:
+    rms = pcm_s16le_rms(payload)
+    session.inbound_rms_last = rms
+    session.inbound_rms_sum += rms
+    session.inbound_rms_count += 1
+    if session.inbound_rms_min is None or rms < session.inbound_rms_min:
+        session.inbound_rms_min = rms
+    if session.inbound_rms_max is None or rms > session.inbound_rms_max:
+        session.inbound_rms_max = rms
+    if rms >= threshold:
+        session.inbound_high_rms_frames += 1
+        if session.inbound_first_high_rms_frame is None:
+            session.inbound_first_high_rms_frame = session.inbound_frames
+    return rms
+
+
+def _inbound_rms_avg(session: RealtimePhoneSessionStats) -> int | None:
+    if session.inbound_rms_count <= 0:
+        return None
+    return round(session.inbound_rms_sum / session.inbound_rms_count)
 
 
 def _record_opening_playback_frame(

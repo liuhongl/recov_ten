@@ -171,8 +171,8 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert "必须先确认对方是业主本人或授权处理人" in prep.prompt_snapshot.instructions
     assert "只有本轮提示词明确提供具体金额时才可说明" in prep.prompt_snapshot.instructions
     assert "本轮提示词未提供具体金额时" in prep.prompt_snapshot.instructions
-    assert "数据库策略未明确提供费用减免授权时" in prep.prompt_snapshot.instructions
-    assert "不得自行承诺减免、豁免利息" in prep.prompt_snapshot.instructions
+    assert "不得脱离本轮业务策略自行承诺减免、豁免利息" in prep.prompt_snapshot.instructions
+    assert "以物业公司核实和办理为准" in prep.prompt_snapshot.instructions
     assert "不要确认用户已经还清" in prep.prompt_snapshot.instructions
     assert "安排物业工作人员或财务人员核对" in prep.prompt_snapshot.instructions
     assert prep.prompt_snapshot.metadata["source"] == "postgres"
@@ -207,7 +207,8 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert "不得再次要求身份确认" in prep.prompt_snapshot.instructions
     assert "不得追问近期是否安排处理" in prep.prompt_snapshot.instructions
     assert "部分缴纳或费用减免" in prep.prompt_snapshot.instructions
-    assert "数据库未明确授权时只能记录意向" in prep.prompt_snapshot.instructions
+    assert "不得脱离本轮业务策略自行承诺" in prep.prompt_snapshot.instructions
+    assert "本轮业务策略未给出明确方案时只能记录意向" in prep.prompt_snapshot.instructions
     assert "不得说可以的、交多少都行" in prep.prompt_snapshot.instructions
     assert "用户提出电梯、维修、卫生、服务质量等投诉后" in prep.prompt_snapshot.instructions
     assert "不得在同一回复里继续催缴" in prep.prompt_snapshot.instructions
@@ -230,9 +231,12 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert "不主动追问工资日或收入情况" in prep.prompt_snapshot.instructions
     assert "延期、分期、部分付款" in prep.prompt_snapshot.instructions
     assert "延期、分期、部分付款、费用减免" in prep.prompt_snapshot.instructions
-    assert "数据库策略明确提供授权、条件和范围时，以数据库策略为准" in prep.prompt_snapshot.instructions
-    assert "数据库未明确授权时" in prep.prompt_snapshot.instructions
+    assert "不得脱离本轮业务策略自行新增批准、减免、结清或销账承诺" in prep.prompt_snapshot.instructions
+    assert "引导客户通过物业官方已公示渠道联系物业公司核实" in prep.prompt_snapshot.instructions
     assert "不得自行承诺批准、减免、结清或销账" in prep.prompt_snapshot.instructions
+    assert "部分缴纳未获本轮业务策略明确方案时" in prep.prompt_snapshot.instructions
+    assert "数据库策略明确提供授权、条件和范围时，以数据库策略为准" not in prep.prompt_snapshot.instructions
+    assert "可按授权说明是否可减免" not in prep.prompt_snapshot.instructions
     assert "物业服务问题" in prep.prompt_snapshot.instructions
     assert "我先记录您的诉求，具体以物业核实为准" in prep.prompt_snapshot.instructions
     assert "不说“不交影响服务”" in prep.prompt_snapshot.instructions
@@ -401,9 +405,11 @@ def test_postgres_prompt_store_preserves_database_fee_reduction_authorization():
     assert prep is not None
     assert "可以免除其滞纳金、违约金等附加费用" in prep.prompt_snapshot.instructions
     assert "可以免除其滞纳金、违约金等附加费用" in prep.prompt_snapshot.metadata["strategy_core"]
-    assert "数据库策略明确提供授权、条件和范围时，以数据库策略为准" in prep.prompt_snapshot.instructions
-    assert "数据库未明确授权时" in prep.prompt_snapshot.instructions
+    assert "不得脱离本轮业务策略自行新增批准、减免、结清或销账承诺" in prep.prompt_snapshot.instructions
+    assert "引导客户通过物业官方已公示渠道联系物业公司核实" in prep.prompt_snapshot.instructions
     assert "不得自行承诺批准、减免、结清或销账" in prep.prompt_snapshot.instructions
+    assert "数据库策略明确提供授权、条件和范围时，以数据库策略为准" not in prep.prompt_snapshot.instructions
+    assert "可按授权说明是否可减免" not in prep.prompt_snapshot.instructions
     assert "不承诺批准、减免或结清" not in prep.prompt_snapshot.instructions
     assert "不要承诺减免、豁免利息" not in prep.prompt_snapshot.instructions
 

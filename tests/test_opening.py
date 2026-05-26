@@ -112,6 +112,25 @@ def test_build_business_opening_request_uses_strategy_opening_template():
     assert opening.speaking_style == "协调型、耐心沟通的物业工作人员口吻。"
 
 
+def test_build_business_opening_request_supports_legacy_double_brace_aliases():
+    opening = build_business_opening_request(
+        employee_name="物业中心小明",
+        debtor_name="金阳",
+        debtor_gender="男",
+        debt_amount="1250.50",
+        address="阳光花园一期1栋101室",
+        opening_template=(
+            "您好，请问是{{name}}本人吗？我是{{identity_name}}。"
+            "这边有一项物业费相关事项需要跟您核实。"
+        ),
+    )
+
+    assert opening.opening_text == (
+        "您好，请问是金先生本人吗？我是物业中心小明。"
+        "这边有一项物业费相关事项需要跟您核实。"
+    )
+
+
 def test_build_business_opening_request_ignores_sensitive_strategy_template():
     opening = build_business_opening_request(
         employee_name="物业中心小明",

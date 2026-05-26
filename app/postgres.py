@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import Mapping
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -14,6 +15,7 @@ from decimal import Decimal
 from typing import Any, Protocol
 
 from .business_dialog_style import (
+    BUSINESS_CRITICAL_RUNTIME_RULES,
     numbered_business_amount_dispute_rules,
     numbered_business_dialog_style_rules,
     numbered_business_fact_boundary_rules,
@@ -147,7 +149,149 @@ where id = $1
   and status = '1'
 """
 
+CALL_RECORD_HISTORICAL_SUMMARIES_SQL = """
+select
+  id,
+  finished_at,
+  analysis_result
+from public.call_record
+where debt_id = $1
+  and ($2::text is null or tenant_id = $2)
+  and id <> $3
+  and status = '4'
+  and analysis_status = '2'
+  and analysis_result is not null
+  and btrim(analysis_result) <> ''
+order by finished_at asc nulls last, id asc
+limit 8
+"""
+
 CALL_RECORD_TERMINAL_STATUSES = {"2", "3", "4"}
+HISTORICAL_SUMMARY_MAX_CHARS = 200
+HISTORICAL_SUMMARY_BLOCK_MAX_CHARS = 1500
+CONFLICTING_STRATEGY_MARKERS = (
+    "承诺跟进",
+    "投诉跟进承诺",
+    "跟进周期",
+    "第一时间联系",
+    "主动联系",
+    "主动回电",
+    "回拨",
+    "回电",
+    "等您方便",
+    "再联系",
+    "稍后联系",
+    "下次联系",
+    "处理结果出来后",
+    "处理结果出来",
+    "物业公司总部",
+    "区域管理中心",
+    "督促",
+    "尽快检修",
+    "维修进度",
+    "修复时间",
+    "跟进节点",
+    "绑定到投诉解决时间",
+    "设定期限",
+    "行动窗口",
+    "行动期限",
+    "X 日前",
+    "日前完成缴纳",
+    "本周内完成缴纳",
+    "本周五前",
+    "本月底前",
+    "缴款期限",
+    "给出缴款期限",
+    "租客联系方式",
+    "承租人联系方式",
+    "联系租客",
+    "找租客",
+    "和租客沟通",
+    "提供租客",
+    "提供承租人",
+    "主动询问发薪",
+    "发薪日",
+    "工资日",
+    "收入情况",
+    "物业前台",
+    "前台联系",
+    "公告栏",
+    "单元门口",
+    "运营团队",
+    "单独跟进",
+    "企业管理部门",
+    "管理部门",
+    "投诉程序",
+    "协商解决方案",
+    "行使路径",
+    "移交到",
+    "法律视角",
+    "法律立场",
+    "缴费义务",
+    "义务独立于投诉",
+    "相关法律规定",
+    "相关规定",
+    "民法典",
+    "司法实践",
+    "获得支持",
+    "维权路径",
+    "主管部门",
+    "提起诉讼",
+    "拒缴方式",
+    "拒缴物业费",
+    "不能作为拒缴物业费的理由",
+    "服务质量问题不能作为",
+    "先缴清",
+    "优先跟进",
+    "欠款进入诉讼",
+    "诉讼费",
+    "律师费",
+    "混为一谈",
+    "暂未涉及征信",
+    "不会影响征信",
+    "会影响征信",
+    "法律义务",
+    "合同义务",
+    "相关法律法规",
+    "正式途径来处理",
+    "通过正式途径",
+    "避免不必要的麻烦",
+    "尽快处理",
+    "尽快缴纳",
+    "还得麻烦",
+    "还得麻烦您",
+    "建议您还是处理",
+    "交多少都行",
+    "根据自己的情况安排",
+    "根据自己情况安排",
+    "直接销掉",
+    "销掉记录",
+    "后续若想处理",
+    "后续如果您有缴费意愿",
+    "若之后您想处理",
+    "联系我",
+    "再联系我",
+    "协助您同步",
+    "协助同步",
+    "他们会留意",
+    "保证后续不会再打扰",
+    "记录您的态度",
+    "您的态度反馈",
+    "把您的态度反馈",
+    "将您的态度反馈",
+    "情况反馈给物业",
+)
+ALLOWED_NEGATED_MARKERS = (
+    "不主动",
+    "不得",
+    "不要",
+    "不承诺",
+    "不得承诺",
+    "不支持承诺",
+    "不能承诺",
+    "禁止承诺",
+    "不再",
+)
 
 
 @dataclass(frozen=True)
@@ -190,6 +334,12 @@ class VoiceSelection:
 class BusinessCallRecordRef:
     call_id: int
     debt_id: int
+
+
+@dataclass(frozen=True)
+class HistoricalCallSummary:
+    call_id: str
+    summary: str
 
 
 class AsyncBusinessPromptStoreProtocol(Protocol):
@@ -269,13 +419,23 @@ class PostgresPromptStore:
             )
             return None
 
+        async with self.pool.acquire() as conn:
+            historical_summaries = await _load_historical_call_summaries(
+                conn,
+                context,
+            )
         employee_name = (
             voice_selection.employee_name
             if voice_selection is not None
             else _row_value(identity_row, "name")
         )
-        strategy = _row_value(strategy_row, "strategy_core")
-        speaking_style = _row_value(strategy_row, "speaking_style")
+        strategy = _sanitize_business_strategy_text(
+            _row_value(strategy_row, "strategy_core")
+        )
+        speaking_style = _sanitize_business_strategy_text(
+            _row_value(strategy_row, "speaking_style"),
+            append_note=False,
+        )
         opening_template = _row_value(strategy_row, "opening_template")
         debtor_name = _row_value(debt_row, "debtor_name")
         address = _row_value(debt_row, "address")
@@ -315,6 +475,11 @@ class PostgresPromptStore:
             debtor_age=debtor_age,
             debt_amount=debt_amount,
             address=address,
+            history_summary_block=_render_history_summary_block(
+                historical_summaries,
+                debt_amount=debt_amount,
+                address=address,
+            ),
         )
         metadata = {
             "source": "postgres",
@@ -784,6 +949,129 @@ def _business_call_record_params(
     return BusinessCallRecordRef(call_id=call_id, debt_id=debt_id)
 
 
+def _historical_summary_params(
+    context: Mapping[str, Any],
+) -> tuple[int, str | None, int] | None:
+    debt_id = _context_int(context.get("debtId"))
+    call_id = _context_int(context.get("callId"))
+    if debt_id is None or call_id is None:
+        return None
+    return debt_id, _context_text(context.get("tenantId")), call_id
+
+
+async def _load_historical_call_summaries(
+    conn: Any,
+    context: Mapping[str, Any],
+) -> list[HistoricalCallSummary]:
+    params = _historical_summary_params(context)
+    if params is None:
+        return []
+    debt_id, tenant_id, call_id = params
+    try:
+        rows = await conn.fetch(
+            CALL_RECORD_HISTORICAL_SUMMARIES_SQL,
+            debt_id,
+            tenant_id,
+            call_id,
+        )
+    except Exception:
+        LOGGER.warning("historical_call_summary_lookup_failed", exc_info=True)
+        return []
+
+    summaries: list[HistoricalCallSummary] = []
+    for row in rows:
+        summary = _analysis_result_summary(_row_value(row, "analysis_result"))
+        if not summary:
+            continue
+        summaries.append(
+            HistoricalCallSummary(
+                call_id=_prompt_text(_row_value(row, "id")),
+                summary=_truncate_summary(summary, HISTORICAL_SUMMARY_MAX_CHARS),
+            )
+        )
+    return summaries
+
+
+def _analysis_result_summary(value: object) -> str | None:
+    if isinstance(value, Mapping):
+        data = value
+    else:
+        text = _context_text(value)
+        if text is None:
+            return None
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            LOGGER.warning("historical_call_summary_skipped_invalid_json")
+            return None
+    if not isinstance(data, Mapping):
+        return None
+    return _context_text(data.get("summary"))
+
+
+def _truncate_summary(value: str, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    if max_chars <= 3:
+        return value[:max_chars]
+    return value[: max_chars - 3] + "..."
+
+
+def _render_history_summary_block(
+    summaries: list[HistoricalCallSummary],
+    *,
+    debt_amount: object = None,
+    address: object = None,
+) -> str:
+    if not summaries:
+        return ""
+    header_lines = [
+        "# 历史外呼摘要",
+        "以下内容来自同一债务记录的历史外呼分析，仅作为业务背景。",
+        "这些摘要按历史通话时间排列，不标注历史外呼身份。",
+        "这不代表用户本轮刚刚表达这些内容，也不代表本轮已完成身份核实。",
+        "历史摘要不是用户本轮最新表达的内容来源。",
+        "除非用户在本轮明确重新说出，绝不能把历史摘要里的投诉点、服务问题、费用态度说成用户刚才提到。",
+        "不得说“您刚才提到/您提到电梯、卫生等问题”；只能在用户本轮重新提出相关问题后，再结合历史作为背景回应。",
+        "本轮必须按当前外呼身份和当前阶段策略重新核实身份，再根据用户最新回答推进。",
+        "不得根据历史第几通推断当时外呼身份；历史摘要只用于理解客户过往态度、诉求、承诺和争议点。",
+        "",
+    ]
+    lines = list(header_lines)
+    remaining_chars = HISTORICAL_SUMMARY_BLOCK_MAX_CHARS - len("\n".join(lines))
+    for index, summary in enumerate(summaries, start=1):
+        redacted_summary = _redact_summary_sensitive_details(
+            summary.summary,
+            debt_amount=debt_amount,
+            address=address,
+        )
+        item = f"{index}. 历史第{index}通：{redacted_summary}"
+        if len(item) + 1 > remaining_chars:
+            break
+        lines.append(item)
+        remaining_chars -= len(item) + 1
+    if len(lines) == len(header_lines):
+        return ""
+    return "\n".join(lines)
+
+
+def _redact_summary_sensitive_details(
+    summary: str,
+    *,
+    debt_amount: object = None,
+    address: object = None,
+) -> str:
+    text = summary
+    address_text = _prompt_text(address)
+    if address_text:
+        text = text.replace(address_text, "[地址已隐藏]")
+    amount_text = _prompt_text(debt_amount)
+    if amount_text:
+        text = text.replace(f"{amount_text}元", "[金额已隐藏]")
+        text = text.replace(amount_text, "[金额已隐藏]")
+    return re.sub(r"\d+(?:\.\d+)?\s*元", "[金额已隐藏]", text)
+
+
 def _context_text(value: object) -> str | None:
     if value is None:
         return None
@@ -879,38 +1167,44 @@ def _render_business_prompt(
     debtor_age: object,
     debt_amount: object,
     address: object,
+    history_summary_block: str | None = None,
 ) -> str:
     salutation = _prompt_debtor_salutation(debtor_name, debtor_gender)
-    return "\n".join(
+    lines = [
+        "# 角色",
+        f"你是{_prompt_text(employee_name)}，负责通过电话进行合规的逾期费用提醒和费用处理沟通。",
+        "",
+        "# 催收策略",
+        _prompt_block(strategy),
+        "",
+        "# 规则优先级",
+        *numbered_business_rule_priority_rules(),
+        "",
+        "# 高优先级运行红线",
+        *BUSINESS_CRITICAL_RUNTIME_RULES,
+        "",
+        "# 对话风格",
+        *numbered_business_dialog_style_rules(),
+        "",
+        "# 事实边界",
+        *numbered_business_fact_boundary_rules(),
+        "",
+        "# 身份核实与隐私边界",
+        *numbered_business_privacy_disclosure_rules(),
+        f"7. 身份未确认时，下一句只能问：请问您是{salutation}本人，或方便处理这项物业费事项的授权处理人吗？",
+        "8. 这类身份核实句不得夹带地址、房号、待处理金额、欠费明细或费用原因。",
+        "9. 用户抱怨啰嗦、要求直接说、追问什么事但仍未确认身份时，只能说明“为保护信息安全，确认本人或授权处理人后才能说明具体内容”，不得披露具体信息。",
+        "",
+        "# 身份确认后的信息边界",
+        "具体金额和地址不写入本轮对话提示词，防止未确认身份时被模型误说出。",
+        "确认身份后也不得编造本提示词未提供的具体金额、地址或明细；用户追问时，只能说明以物业系统或官方已公示渠道核实为准。",
+        f"业主称呼：{salutation}",
+        "",
+    ]
+    if history_summary_block:
+        lines.extend([history_summary_block, ""])
+    lines.extend(
         [
-            "# 角色",
-            f"你是{_prompt_text(employee_name)}，负责通过电话进行合规的逾期费用提醒和费用处理沟通。",
-            "",
-            "# 催收策略",
-            _prompt_block(strategy),
-            "",
-            "# 规则优先级",
-            *numbered_business_rule_priority_rules(),
-            "",
-            "# 对话风格",
-            *numbered_business_dialog_style_rules(),
-            "",
-            "# 事实边界",
-            *numbered_business_fact_boundary_rules(),
-            "",
-            "# 身份核实与隐私边界",
-            *numbered_business_privacy_disclosure_rules(),
-            f"7. 身份未确认时，下一句只能问：请问您是{salutation}本人，或方便处理这项物业费事项的授权处理人吗？",
-            "8. 这类身份核实句不得夹带地址、房号、待处理金额、欠费明细或费用原因。",
-            "",
-            "# 身份确认后才可使用的信息",
-            "以下信息即使系统已知，身份确认前也禁止说出；只有用户明确确认本人或授权处理人后才可用于沟通。",
-            f"业主称呼：{salutation}",
-            f"性别：{_prompt_text(debtor_gender)}",
-            f"年龄：{_prompt_text(debtor_age)}",
-            f"系统记录待处理金额：{_prompt_text(debt_amount)}",
-            f"地址：{_prompt_text(address)}",
-            "",
             "# 金额与争议处理",
             *numbered_business_amount_dispute_rules(),
             "",
@@ -925,10 +1219,52 @@ def _render_business_prompt(
             "5. 如果用户表示不是本人，应先确认是否方便转告，不得继续披露债务细节。",
         ]
     )
+    return "\n".join(lines)
 
 
 def _prompt_block(value: object) -> str:
     return str(value or "").strip()
+
+
+def _sanitize_business_strategy_text(value: object, *, append_note: bool = True) -> str:
+    text = _prompt_block(value)
+    if not text:
+        return ""
+
+    kept: list[str] = []
+    removed = False
+    for unit in _business_strategy_units(text):
+        if _business_strategy_unit_conflicts(unit):
+            removed = True
+            continue
+        kept.append(unit)
+
+    if kept:
+        if removed and append_note:
+            kept.append("已忽略与全局业务红线冲突的策略内容。")
+        return "\n".join(kept)
+    if append_note:
+        return "已忽略与全局业务红线冲突的策略内容。"
+    return ""
+
+
+def _business_strategy_units(text: str) -> list[str]:
+    units: list[str] = []
+    for line in text.splitlines():
+        line = " ".join(line.split())
+        if not line:
+            continue
+        for unit in re.split(r"(?<=[。；;])\s*", line):
+            unit = unit.strip()
+            if unit:
+                units.append(unit)
+    return units
+
+
+def _business_strategy_unit_conflicts(unit: str) -> bool:
+    if any(marker in unit for marker in ALLOWED_NEGATED_MARKERS):
+        return False
+    return any(marker in unit for marker in CONFLICTING_STRATEGY_MARKERS)
 
 
 def _prompt_text(value: object) -> str:

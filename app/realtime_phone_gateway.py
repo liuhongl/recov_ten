@@ -24,6 +24,7 @@ from .audio_codec import (
     resample_pcm_s16le_mono,
 )
 from .business_dialog_style import (
+    BUSINESS_CRITICAL_RUNTIME_RULES,
     BUSINESS_DIALOG_SPEAKING_STYLE,
     BUSINESS_DIALOG_STYLE_RULES,
 )
@@ -74,6 +75,7 @@ OPENING_BUSINESS_GUARD = "\n".join(
         "这是待缴费用确认电话，不是闲聊。",
         "如果用户最新一句是在确认身份，例如“是的”“对”“嗯”“我是”“在的”，"
         "必须继续围绕待缴费用确认，简短询问是否方便现在处理或确认这笔费用。",
+        *BUSINESS_CRITICAL_RUNTIME_RULES,
         *BUSINESS_DIALOG_STYLE_RULES,
         "严禁主动切换到化妆、天气、时间、学习知识、闲聊等无关话题。",
         "如果用户指出你跑题了，先简短道歉，然后立刻回到待缴费用确认。",
@@ -2504,7 +2506,7 @@ def _business_identity_role(identity_name: str) -> str:
         return "是物业客服中心工作人员。"
     if identity_name == "企业法务":
         return "是物业公司法务部工作人员。"
-    if identity_name == "第三方律师":
+    if identity_name in {"律师", "第三方律师"}:
         return "是受物业公司委托的法律事务联系人。"
     return "是物业服务工作人员。"
 

@@ -34,6 +34,10 @@ BUSINESS_OPENING_TEMPLATE = (
     "您好，请问是{salutation}吗？我是{employee_name}。"
     "这边有一项物业费事项需要和您本人核实一下，请问现在方便确认吗？"
 )
+LEGACY_BUSINESS_OPENING_TEMPLATE_ALIASES = {
+    "{{name}}": "{name}",
+    "{{identity_name}}": "{identity_name}",
+}
 OPENING_TTS_PREFIX = "请严格朗读以下开场白，不要添加、删减或改写："
 DEFAULT_OPENING_TIMEOUT_SECONDS = 60
 VOICE_SPEAKERS = {
@@ -263,7 +267,7 @@ def build_business_opening_request(
         "speaking_style",
         max_length=500,
     )
-    template_values = {
+    business_values = {
         "employee_name": employee_name_text,
         "debtor_name": debtor_name_text,
         "debtor_gender": gender_text,
@@ -272,11 +276,16 @@ def build_business_opening_request(
         "title": title,
         "salutation": salutation,
     }
+    template_values = {
+        **business_values,
+        "name": salutation,
+        "identity_name": employee_name_text,
+    }
     rendered = _render_business_opening_template(opening_template, template_values)
     return OpeningRequest(
         voice=voice_text,
         speaker=speaker_text,
-        business=template_values,
+        business=business_values,
         opening_text=rendered,
         opening_text_hash=_text_hash(rendered),
         speaking_style=speaking_style_text,
@@ -403,6 +412,7 @@ def _render_business_opening_template(
     template_text = " ".join(str(opening_template).split())
     if not template_text:
         return default_text
+    template_text = _normalize_business_opening_template(template_text)
 
     try:
         rendered = template_text.format(**values)
@@ -415,6 +425,12 @@ def _render_business_opening_template(
         LOGGER.warning("business_opening_template_contains_sensitive_details")
         return default_text
     return rendered or default_text
+
+
+def _normalize_business_opening_template(template_text: str) -> str:
+    for legacy_token, format_token in LEGACY_BUSINESS_OPENING_TEMPLATE_ALIASES.items():
+        template_text = template_text.replace(legacy_token, format_token)
+    return template_text
 
 
 def _contains_pre_identity_sensitive_details(

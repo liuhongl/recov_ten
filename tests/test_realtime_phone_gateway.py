@@ -514,6 +514,32 @@ def test_realtime_instructions_anchor_opening_confirmation_to_fee_followup():
     assert "全程使用“您”" in instructions
     assert "不要说“你家”" in instructions
     assert "避免使用“尽快缴纳”“不影响物业服务”" in instructions
+    assert "要求勿扰后必须礼貌结束" in instructions
+    assert "不得承诺回拨或约定回拨时间" in instructions
+    assert "不得再询问付款时间、缴费计划或租客联系方式" in instructions
+    assert "即使用户主动提到租客" in instructions
+    assert "用户只说没钱" in instructions
+    assert "不得主动询问发薪日" in instructions
+    assert "不得列举前台、公告栏、单元门口" in instructions
+    assert "用户提到起诉、法院、律师、征信或上门时" in instructions
+    assert "不得评价起诉是否为合法权利" in instructions
+    assert "不得说暂未涉及征信" in instructions
+    assert "不得说为避免不必要的麻烦" in instructions
+    assert "不得使用尽快处理" in instructions
+    assert "用户已明确拒缴后" in instructions
+    assert "回答发票、渠道、明细、征信、起诉等直接问题后必须继续收口" in instructions
+    assert "部分缴纳只能记录意向" in instructions
+    assert "不得说可以的、交多少都行" in instructions
+    assert "用户提出电梯、维修、卫生、服务质量等投诉后" in instructions
+    assert "不得在同一回复里继续催缴" in instructions
+    assert "不得说还得麻烦您尽快处理" in instructions
+    assert "用户已明确拒缴或拒绝联系后，只允许收口一次" in instructions
+    assert "不得反复附带后续若想处理" in instructions
+    assert "记录反馈时只说记录您的反馈或诉求" in instructions
+    assert "不得说记录您的态度" in instructions
+    assert "用户否认本人后" in instructions
+    assert "不得再次要求身份确认" in instructions
+    assert "用户抱怨啰嗦、要求直接说、追问什么事但仍未确认身份时" in instructions
     assert "严禁主动切换到化妆" in instructions
 
 
@@ -644,6 +670,37 @@ def test_realtime_dialog_config_anchors_postgres_employee_identity():
     assert "完整业务提示词" in dialog_config.system_role
     assert "不能当作本轮用户的新问题" in dialog_config.system_role
     assert dialog_config.speaking_style == "协调型、熟人式、耐心沟通的物业工作人员口吻。"
+
+
+def test_realtime_dialog_config_treats_lawyer_identity_as_legal_contact():
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-call",
+        session_id="test-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+        prompt_snapshot=PromptSnapshot(
+            scene="律师:7",
+            version="postgres",
+            instructions="律师阶段业务提示词",
+            content_hash="hash-prompt",
+            loaded_at_ms=123,
+            metadata={
+                "source": "postgres",
+                "identityName": "律师",
+                "employee_name": "律师赵敏",
+            },
+        ),
+    )
+
+    dialog_config = server._dialog_config_for_realtime_session(session)
+
+    assert "律师赵敏" in dialog_config.system_role
+    assert "受物业公司委托的法律事务联系人" in dialog_config.system_role
 
 
 def test_realtime_dialog_config_warns_when_dialog_prompt_is_too_long(caplog):

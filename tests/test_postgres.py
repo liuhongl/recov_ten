@@ -152,7 +152,9 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert "先确认本人，再说明费用。" in prep.prompt_snapshot.instructions
     assert "业主称呼：金女士" in prep.prompt_snapshot.instructions
     assert "业主姓名：金阳" not in prep.prompt_snapshot.instructions
-    assert "系统记录待处理金额：12.34" in prep.prompt_snapshot.instructions
+    assert "系统记录待处理金额：12.34" not in prep.prompt_snapshot.instructions
+    assert "地址：测试小区一号楼" not in prep.prompt_snapshot.instructions
+    assert "具体金额和地址不写入本轮对话提示词" in prep.prompt_snapshot.instructions
     assert "# 金额与争议处理" in prep.prompt_snapshot.instructions
     assert "# 身份核实与隐私边界" in prep.prompt_snapshot.instructions
     assert "业主本人或该费用事项的授权处理人" in prep.prompt_snapshot.instructions
@@ -161,12 +163,14 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert "身份确认阶段只能使用业主称呼，不得说出完整姓名" in prep.prompt_snapshot.instructions
     assert "身份未确认时，下一句只能问：请问您是金女士本人，或方便处理这项物业费事项的授权处理人吗？" in prep.prompt_snapshot.instructions
     assert "这类身份核实句不得夹带地址、房号、待处理金额、欠费明细或费用原因" in prep.prompt_snapshot.instructions
+    assert "用户抱怨啰嗦、要求直接说、追问什么事但仍未确认身份时" in prep.prompt_snapshot.instructions
     assert "只能说明“物业费事项”或“费用事项需要核实”" in prep.prompt_snapshot.instructions
-    assert "# 身份确认后才可使用的信息" in prep.prompt_snapshot.instructions
-    assert "以下信息即使系统已知，身份确认前也禁止说出" in prep.prompt_snapshot.instructions
+    assert "# 身份确认后的信息边界" in prep.prompt_snapshot.instructions
+    assert "确认身份后也不得编造本提示词未提供的具体金额、地址或明细" in prep.prompt_snapshot.instructions
     assert "用户主动询问欠款金额" in prep.prompt_snapshot.instructions
     assert "必须先确认对方是业主本人或授权处理人" in prep.prompt_snapshot.instructions
-    assert "可以说明系统记录的待处理金额" in prep.prompt_snapshot.instructions
+    assert "只有本轮提示词明确提供具体金额时才可说明" in prep.prompt_snapshot.instructions
+    assert "本轮提示词未提供具体金额时" in prep.prompt_snapshot.instructions
     assert "不要承诺减免、豁免利息" in prep.prompt_snapshot.instructions
     assert "不要确认用户已经还清" in prep.prompt_snapshot.instructions
     assert "安排物业工作人员或财务人员核对" in prep.prompt_snapshot.instructions
@@ -185,10 +189,33 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert "避免使用“尽快缴纳”“不影响物业服务”" in prep.prompt_snapshot.instructions
     assert "不得编造或猜测天气、新闻、时间" in prep.prompt_snapshot.instructions
     assert "不掌握该信息" in prep.prompt_snapshot.instructions
-    assert "无租客信息时，不得主动假设存在租客" in prep.prompt_snapshot.instructions
+    assert "无论用户是否主动提到租客" in prep.prompt_snapshot.instructions
+    assert "不得索要租客联系方式" in prep.prompt_snapshot.instructions
     assert "不得建议联系租客" in prep.prompt_snapshot.instructions
+    assert "# 高优先级运行红线" in prep.prompt_snapshot.instructions
+    assert "不得再询问付款时间、缴费计划或租客联系方式" in prep.prompt_snapshot.instructions
+    assert "不得主动询问发薪日" in prep.prompt_snapshot.instructions
+    assert "不得列举前台、公告栏、单元门口" in prep.prompt_snapshot.instructions
+    assert "不得说暂未涉及征信" in prep.prompt_snapshot.instructions
+    assert "不得说为避免不必要的麻烦" in prep.prompt_snapshot.instructions
+    assert "不得使用尽快处理" in prep.prompt_snapshot.instructions
+    assert "用户已明确拒缴后" in prep.prompt_snapshot.instructions
+    assert "回答发票、渠道、明细、征信、起诉等直接问题后必须继续收口" in prep.prompt_snapshot.instructions
+    assert "不得再追问什么时候处理" in prep.prompt_snapshot.instructions
+    assert "部分缴纳只能记录意向" in prep.prompt_snapshot.instructions
+    assert "不得说可以的、交多少都行" in prep.prompt_snapshot.instructions
+    assert "用户提出电梯、维修、卫生、服务质量等投诉后" in prep.prompt_snapshot.instructions
+    assert "不得在同一回复里继续催缴" in prep.prompt_snapshot.instructions
+    assert "不得说还得麻烦您尽快处理" in prep.prompt_snapshot.instructions
+    assert "用户已明确拒缴或拒绝联系后，只允许收口一次" in prep.prompt_snapshot.instructions
+    assert "不得反复附带后续若想处理" in prep.prompt_snapshot.instructions
+    assert "记录反馈时只说记录您的反馈或诉求" in prep.prompt_snapshot.instructions
+    assert "不得说记录您的态度" in prep.prompt_snapshot.instructions
+    assert "用户否认本人后" in prep.prompt_snapshot.instructions
+    assert "不得再次要求身份确认" in prep.prompt_snapshot.instructions
     assert "# 规则优先级" in prep.prompt_snapshot.instructions
-    assert "数据库催收策略、客户画像策略、客服语气配置与以下规则冲突时" in prep.prompt_snapshot.instructions
+    assert "数据库催收策略、客户画像策略、客服语气配置优先决定沟通方式" in prep.prompt_snapshot.instructions
+    assert "不得突破身份核实、隐私保护、勿扰终止、支付安全、事实边界和法律红线" in prep.prompt_snapshot.instructions
     assert "# 物业费场景约束" in prep.prompt_snapshot.instructions
     assert "没钱、资金困难、等工资" in prep.prompt_snapshot.instructions
     assert "优先询问方便哪天处理" in prep.prompt_snapshot.instructions
@@ -199,17 +226,25 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert "这个问题我先记录并反馈项目核实" in prep.prompt_snapshot.instructions
     assert "不说“不交影响服务”" in prep.prompt_snapshot.instructions
     assert "不承诺具体维修安排、处理时间或满意结果" in prep.prompt_snapshot.instructions
+    assert "不承诺维修进度、修复时间、上门时间或回访时间" in prep.prompt_snapshot.instructions
     assert "不列举未提供的部门、师傅或维修方案" in prep.prompt_snapshot.instructions
     assert "拒付、情绪对抗、要求勿扰" in prep.prompt_snapshot.instructions
     assert "要求勿扰属于最高优先级" in prep.prompt_snapshot.instructions
     assert "不再追问原因、付款、回拨时间或费用安排" in prep.prompt_snapshot.instructions
+    assert "后续只允许回答用户直接提出的必要问题" in prep.prompt_snapshot.instructions
     assert "账务、金额、收费标准争议" in prep.prompt_snapshot.instructions
     assert "支付安全、凭证、发票、已转账" in prep.prompt_snapshot.instructions
     assert "通过物业官方已公示渠道核实和办理" in prep.prompt_snapshot.instructions
     assert "不编造具体官方渠道名称、账号或缴费方式" in prep.prompt_snapshot.instructions
+    assert "不得编造公众号、缴费入口、物业前台位置、发票开具规则或维修进度" in prep.prompt_snapshot.instructions
     assert "不列举未提供的前台、公众号、缴费机或账户" in prep.prompt_snapshot.instructions
     assert "不要再补充其他渠道名称" in prep.prompt_snapshot.instructions
     assert "忙碌、不方便" in prep.prompt_snapshot.instructions
+    assert "业务不支持承诺回拨或约定回拨时间" in prep.prompt_snapshot.instructions
+    assert "不得承诺财务、项目人员或客服会在某个具体时间回电" in prep.prompt_snapshot.instructions
+    assert "询问方便回拨时间" not in prep.prompt_snapshot.instructions
+    assert "安排物业工作人员回拨" not in prep.prompt_snapshot.instructions
+    assert "已确认本人或授权处理人后，不得反复要求同一身份确认" in prep.prompt_snapshot.instructions
     assert "不得冒充法院、司法机关、执法人员" in prep.prompt_snapshot.instructions
     assert "不能判断会不会起诉、影响征信或上门执行" in prep.prompt_snapshot.instructions
     assert "后续流程以物业方核实和正式通知为准" in prep.prompt_snapshot.instructions
@@ -218,6 +253,388 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert "未明确委托关系时不得自称律师或受律师委托" in prep.prompt_snapshot.instructions
     assert "缴费意愿、费用处理安排" in prep.prompt_snapshot.instructions
     assert prep.opening.opening_text.startswith("您好，请问是金女士吗？我是李经理。")
+
+
+def test_postgres_prompt_store_sanitizes_strategy_conflicts_with_business_rules():
+    class Conn:
+        async def fetchrow(self, query, *args):
+            if "from call_voice_config" in query:
+                return None
+            if "from call_identity_name" in query:
+                return {"name": "李经理"}
+            if "from persona_call_strategy" in query:
+                return {
+                    "strategy_core": (
+                        "策略概述：企业客服接受投诉、承诺跟进；"
+                        "另一方面说明缴费义务不因服务争议而自动解除。\n"
+                        "正常保留：先记录客户服务投诉，再说明费用事项仍需核实。\n"
+                        "明确告知投诉跟进周期，并约定“处理结果出来后我会第一时间联系您”。\n"
+                        "将问题反馈给物业公司总部和区域管理中心，督促他们尽快检修。\n"
+                        "设定期限：给出法律合规的行动窗口，请您在 X 日前完成缴纳。\n"
+                        "如果业主提到房子出租，要求其提供租客联系方式并联系租客。\n"
+                        "客户说没钱时，主动询问发薪日后哪天处理。\n"
+                        "投诉事宜会由运营团队单独跟进，并移交到企业管理部门走投诉程序。"
+                    ),
+                    "speaking_style": (
+                        "企业客服需要接受投诉、承诺跟进；"
+                        "温和说明缴费义务不自动解除。"
+                        "引导用户提供租客联系方式。"
+                    ),
+                    "opening_template": "",
+                }
+            if "from debt_record" in query:
+                return {
+                    "debtor_name": "金阳",
+                    "address": "测试小区一号楼",
+                    "debt_amount": "12.34",
+                    "debtor_gender": "女",
+                    "debtor_age": 38,
+                    "tenant_id": "000000",
+                    "persona_id": 3,
+                }
+            raise AssertionError(query)
+
+    store = PostgresPromptStore(FakePool(Conn()))
+
+    prep = asyncio.run(
+        store.prepare_business_prompt(
+            {
+                "identityName": "企业客服",
+                "debtId": "2049810626160668673",
+            },
+            fallback_instructions="fallback",
+        )
+    )
+
+    assert prep is not None
+    assert "正常保留：先记录客户服务投诉" in prep.prompt_snapshot.instructions
+    for forbidden in (
+        "承诺跟进",
+        "缴费义务",
+        "跟进周期",
+        "处理结果出来后",
+        "第一时间联系",
+        "物业公司总部",
+        "区域管理中心",
+        "督促他们尽快检修",
+        "设定期限",
+        "X 日前",
+        "行动窗口",
+        "租客联系方式",
+        "联系租客",
+        "主动询问发薪日",
+        "运营团队",
+        "单独跟进",
+        "企业管理部门",
+        "投诉程序",
+    ):
+        assert forbidden not in prep.prompt_snapshot.metadata["strategy_core"]
+        assert forbidden not in prep.prompt_snapshot.metadata["speaking_style"]
+        assert forbidden not in (prep.opening.speaking_style or "")
+    for forbidden_instruction in (
+        "要求其提供租客联系方式并联系租客",
+        "主动询问发薪日后哪天处理",
+        "给出法律合规的行动窗口",
+        "请您在 X 日前完成缴纳",
+        "投诉事宜会由运营团队单独跟进",
+        "移交到企业管理部门走投诉程序",
+    ):
+        assert forbidden_instruction not in prep.prompt_snapshot.instructions
+
+
+def test_postgres_prompt_store_includes_historical_analysis_summaries():
+    class Conn:
+        async def fetchrow(self, query, *args):
+            if "from call_voice_config" in query:
+                return None
+            if "from call_identity_name" in query:
+                return {"name": "李经理"}
+            if "from persona_call_strategy" in query:
+                return {
+                    "strategy_core": "先确认本人，再说明费用。",
+                    "speaking_style": "正式但亲切的客服口吻。",
+                    "opening_template": "",
+                }
+            if "from debt_record" in query:
+                return {
+                    "debtor_name": "金阳",
+                    "address": "测试小区一号楼",
+                    "debt_amount": "12.34",
+                    "debtor_gender": "女",
+                    "debtor_age": 38,
+                    "tenant_id": "000000",
+                    "persona_id": 3,
+                }
+            raise AssertionError(query)
+
+        async def fetch(self, query, *args):
+            assert "analysis_result" in query
+            assert "from public.call_record" in query
+            assert "id <> $3" in query
+            assert args == (2049810626160668673, "tenant-a", 990000000000032001)
+            return [
+                {
+                    "id": 1,
+                    "analysis_result": json.dumps(
+                        {
+                            "summary": (
+                                "用户表示测试小区一号楼12.34元物业费资金紧张，"
+                                "承诺月底前处理。"
+                            )
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+                {
+                    "id": 2,
+                    "analysis_result": json.dumps(
+                        {"summary": "用户希望先核对费用明细。"},
+                        ensure_ascii=False,
+                    ),
+                },
+                {"id": 3, "analysis_result": '{"summary": ""}'},
+                {"id": 4, "analysis_result": "not-json"},
+            ]
+
+    store = PostgresPromptStore(FakePool(Conn()))
+
+    prep = asyncio.run(
+        store.prepare_business_prompt(
+            {
+                "identityName": "collector-a",
+                "tenantId": "tenant-a",
+                "debtId": "2049810626160668673",
+                "callId": "990000000000032001",
+            },
+            fallback_instructions="fallback",
+        )
+    )
+
+    assert prep is not None
+    instructions = prep.prompt_snapshot.instructions
+    assert "# 历史外呼摘要" in instructions
+    assert "历史第1通：用户表示[地址已隐藏][金额已隐藏]物业费资金紧张，承诺月底前处理。" in instructions
+    assert "12.34元" not in instructions
+    assert "测试小区一号楼" not in instructions
+    assert "历史第2通：用户希望先核对费用明细。" in instructions
+    assert "历史第3通" not in instructions
+    assert "not-json" not in instructions
+    assert "这些摘要按历史通话时间排列，不标注历史外呼身份" in instructions
+    assert "不得根据历史第几通推断当时外呼身份" in instructions
+
+
+def test_postgres_prompt_store_prevents_historical_summary_as_current_utterance():
+    class Conn:
+        async def fetchrow(self, query, *args):
+            if "from call_voice_config" in query:
+                return None
+            if "from call_identity_name" in query:
+                return {"name": "李经理"}
+            if "from persona_call_strategy" in query:
+                return {
+                    "strategy_core": "根据客户最新表达推进沟通。",
+                    "speaking_style": "自然礼貌。",
+                    "opening_template": "",
+                }
+            if "from debt_record" in query:
+                return {
+                    "debtor_name": "金阳",
+                    "address": "测试小区一号楼",
+                    "debt_amount": "12.34",
+                    "debtor_gender": "女",
+                    "debtor_age": 38,
+                    "tenant_id": "000000",
+                    "persona_id": 3,
+                }
+            raise AssertionError(query)
+
+        async def fetch(self, query, *args):
+            return [
+                {
+                    "id": 1,
+                    "analysis_result": json.dumps(
+                        {
+                            "summary": (
+                                "用户曾反馈电梯常坏、卫生不佳，要求先处理服务问题。"
+                            )
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ]
+
+    store = PostgresPromptStore(FakePool(Conn()))
+
+    prep = asyncio.run(
+        store.prepare_business_prompt(
+            {
+                "identityName": "企业法务",
+                "tenantId": "000000",
+                "debtId": "2049810626160668673",
+                "callId": "990000000000032001",
+            },
+            fallback_instructions="fallback",
+        )
+    )
+
+    assert prep is not None
+    instructions = prep.prompt_snapshot.instructions
+    assert "历史摘要不是用户本轮最新表达的内容来源" in instructions
+    assert "不得说“您刚才提到/您提到电梯、卫生等问题”" in instructions
+    assert "除非用户在本轮明确重新说出" in instructions
+
+
+def test_postgres_prompt_store_sanitizes_legal_pressure_and_callback_style():
+    class Conn:
+        async def fetchrow(self, query, *args):
+            if "from call_voice_config" in query:
+                return None
+            if "from call_identity_name" in query:
+                return {"name": "李经理"}
+            if "from persona_call_strategy" in query:
+                return {
+                    "strategy_core": (
+                        "核心是厘清法律义务，强调缴费是合同义务；"
+                        "后续物业可能会通过正式途径来处理相关事宜。"
+                        "正常保留：先确认身份，再说明费用事项需要核实。"
+                    ),
+                    "speaking_style": (
+                        "语气正式，引用相关法律法规。"
+                        "用户忙时说等您方便的时候我们再联系。"
+                    ),
+                    "opening_template": "",
+                }
+            if "from debt_record" in query:
+                return {
+                    "debtor_name": "金阳",
+                    "address": "测试小区一号楼",
+                    "debt_amount": "12.34",
+                    "debtor_gender": "女",
+                    "debtor_age": 38,
+                    "tenant_id": "000000",
+                    "persona_id": 3,
+                }
+            raise AssertionError(query)
+
+        async def fetch(self, query, *args):
+            return []
+
+    store = PostgresPromptStore(FakePool(Conn()))
+
+    prep = asyncio.run(
+        store.prepare_business_prompt(
+            {
+                "identityName": "企业法务",
+                "tenantId": "000000",
+                "debtId": "2049810626160668673",
+                "callId": "990000000000032001",
+            },
+            fallback_instructions="fallback",
+        )
+    )
+
+    assert prep is not None
+    sanitized_sources = "\n".join(
+        [
+            prep.prompt_snapshot.metadata["strategy_core"],
+            prep.prompt_snapshot.metadata["speaking_style"],
+            prep.opening.speaking_style or "",
+        ]
+    )
+    for forbidden in (
+        "厘清法律义务",
+        "合同义务",
+        "正式途径来处理",
+        "相关法律法规",
+        "等您方便的时候我们再联系",
+    ):
+        assert forbidden not in sanitized_sources
+    assert "正常保留：先确认身份" in prep.prompt_snapshot.instructions
+
+
+def test_postgres_prompt_store_sanitizes_lawyer_legal_pressure_strategy():
+    class Conn:
+        async def fetchrow(self, query, *args):
+            if "from call_voice_config" in query:
+                return None
+            if "from call_identity_name" in query:
+                return {"name": "律师赵敏"}
+            if "from persona_call_strategy" in query:
+                return {
+                    "strategy_core": (
+                        "策略概述：律师联系投诉挂钩型业主时，需以法律视角厘清投诉权利与缴费义务的关系，"
+                        "不进入服务质量的实质争论。"
+                        "◆ 法律立场阐明：义务独立于投诉。"
+                        "说明按照物业管理相关法律规定（如《民法典》合同编相关规定），"
+                        "以服务质量不满为由拒缴物业费，在司法实践中通常难以获得支持。"
+                        "告知业主正确的维权路径：向物业投诉→向主管部门投诉→提起诉讼，"
+                        "而非以拒缴方式对抗。"
+                        "若欠款进入诉讼，还需要承担诉讼费、律师费等费用。"
+                        "正常保留：确认身份后，说明受物业委托核实物业费事项。"
+                    ),
+                    "speaking_style": (
+                        "律师联系时以法律视角厘清投诉权利与缴费义务，"
+                        "提醒用户服务问题不能作为拒缴物业费的理由。"
+                    ),
+                    "opening_template": "",
+                }
+            if "from debt_record" in query:
+                return {
+                    "debtor_name": "金阳",
+                    "address": "测试小区一号楼",
+                    "debt_amount": "12.34",
+                    "debtor_gender": "女",
+                    "debtor_age": 38,
+                    "tenant_id": "000000",
+                    "persona_id": 3,
+                }
+            raise AssertionError(query)
+
+        async def fetch(self, query, *args):
+            return []
+
+    store = PostgresPromptStore(FakePool(Conn()))
+
+    prep = asyncio.run(
+        store.prepare_business_prompt(
+            {
+                "identityName": "律师",
+                "tenantId": "000000",
+                "debtId": "2049810626160668673",
+                "callId": "990000000000032001",
+            },
+            fallback_instructions="fallback",
+        )
+    )
+
+    assert prep is not None
+    sanitized_sources = "\n".join(
+        [
+            prep.prompt_snapshot.metadata["strategy_core"],
+            prep.prompt_snapshot.metadata["speaking_style"],
+            prep.opening.speaking_style or "",
+        ]
+    )
+    for forbidden in (
+        "法律视角",
+        "缴费义务",
+        "法律立场",
+        "相关法律规定",
+        "民法典",
+        "司法实践",
+        "维权路径",
+        "主管部门",
+        "提起诉讼",
+        "协商解决方案",
+        "给出行动期限",
+        "欠款进入诉讼",
+        "诉讼费",
+        "律师费",
+        "不能作为拒缴物业费的理由",
+    ):
+        assert forbidden not in sanitized_sources
+    assert "正常保留：确认身份后" in prep.prompt_snapshot.instructions
+    assert "法务或律师身份下也必须保持中性服务沟通" in prep.prompt_snapshot.instructions
 
 
 def test_postgres_call_destination_store_resolves_debtor_phone_from_debt_id():

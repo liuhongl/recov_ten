@@ -528,7 +528,8 @@ def test_realtime_instructions_anchor_opening_confirmation_to_fee_followup():
     assert "不得使用尽快处理" in instructions
     assert "用户已明确拒缴后" in instructions
     assert "回答发票、渠道、明细、征信、起诉等直接问题后必须继续收口" in instructions
-    assert "部分缴纳只能记录意向" in instructions
+    assert "部分缴纳或费用减免" in instructions
+    assert "数据库未明确授权时只能记录意向" in instructions
     assert "不得说可以的、交多少都行" in instructions
     assert "用户提出电梯、维修、卫生、服务质量等投诉后" in instructions
     assert "不得在同一回复里继续催缴" in instructions

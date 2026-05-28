@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 import uuid
 from collections import deque
@@ -70,11 +71,14 @@ LATEST_UTTERANCE_GUARD = (
     "不要因为历史里问过时间、日期或其他问题，就在本轮继续回答这些旧问题；"
     "除非用户最新一句明确询问时间，否则不要主动报时。"
 )
+SPOKEN_AMOUNT_RE = re.compile(r"\d+(?:\.\d+)?\s*元")
 OPENING_BUSINESS_GUARD = "\n".join(
     [
         "这是待缴费用确认电话，不是闲聊。",
-        "如果用户最新一句是在确认身份，例如“是的”“对”“嗯”“我是”“在的”，"
-        "必须继续围绕待缴费用确认，简短询问是否方便现在处理或确认这笔费用。",
+        "开场白后，只有用户明确说自己是业主本人、授权处理人，或明确表示自己可以处理该费用事项，才视为身份已确认。",
+        "用户只说“方便”“可以”“好的”“嗯”“对”“是的”“在的”“你说吧”等短句时，不能视为已确认身份。",
+        "无论是否确认身份，都不得在通话中说出具体金额，也不得复述用户提到的金额。",
+        "未确认身份前不得披露地址、房号或费用明细；只能继续确认本人或授权处理人身份。",
         *BUSINESS_CRITICAL_RUNTIME_RULES,
         *BUSINESS_DIALOG_STYLE_RULES,
         "严禁主动切换到化妆、天气、时间、学习知识、闲聊等无关话题。",
@@ -530,6 +534,16 @@ class FreeSwitchRealtimeGatewayServer:
 
         now = time.time()
         opening_audio = self._pop_opening_audio(call_id)
+        if (
+            opening_audio is not None
+            and _contains_spoken_amount(opening_audio.opening_text)
+        ):
+            LOGGER.warning(
+                "opening_playback_skipped_sensitive_amount call_id=%s text_hash=%s",
+                call_id,
+                opening_audio.opening_text_hash,
+            )
+            opening_audio = None
         context = self._load_call_context(call_id)
         session = RealtimePhoneSessionStats(
             call_id=call_id,
@@ -738,9 +752,17 @@ class FreeSwitchRealtimeGatewayServer:
             block_len = len(user_text) + len(assistant_text)
             if block_len > remaining_chars:
                 continue
-            items.append(RealtimeDialogContextItem(role="user", text=user_text))
             items.append(
-                RealtimeDialogContextItem(role="assistant", text=assistant_text)
+                RealtimeDialogContextItem(
+                    role="user",
+                    text=_redact_spoken_amounts(user_text),
+                )
+            )
+            items.append(
+                RealtimeDialogContextItem(
+                    role="assistant",
+                    text=_redact_spoken_amounts(assistant_text),
+                )
             )
             remaining_chars -= block_len
         return tuple(items)
@@ -761,7 +783,7 @@ class FreeSwitchRealtimeGatewayServer:
                 "",
                 "本通话开始时，系统已经向用户播放了以下开场白。"
                 "用户接下来的简短回答可能是在回应这段开场白：",
-                f"客服：{session.opening_text}",
+                f"客服：{_redact_spoken_amounts(session.opening_text)}",
             ]
 
         return "\n".join([instructions, "", LATEST_UTTERANCE_GUARD, *opening_lines])
@@ -2559,6 +2581,14 @@ def _dialog_text(value: object) -> str:
     if value is None:
         return ""
     return " ".join(str(value).split())
+
+
+def _redact_spoken_amounts(text: str) -> str:
+    return SPOKEN_AMOUNT_RE.sub("[金额已隐藏]", text)
+
+
+def _contains_spoken_amount(text: str) -> bool:
+    return SPOKEN_AMOUNT_RE.search(text) is not None
 
 
 def _best_playback_reference_match(

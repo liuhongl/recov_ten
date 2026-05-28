@@ -506,9 +506,19 @@ def test_realtime_instructions_anchor_opening_confirmation_to_fee_followup():
     instructions = server._instructions_for_realtime_session(session)
 
     assert "待缴费用确认电话" in instructions
-    assert "如果用户最新一句是在确认身份" in instructions
-    assert "必须继续围绕待缴费用确认" in instructions
-    assert "以已播放开场白为语气参照" in instructions
+    assert "只有用户明确说自己是业主本人、授权处理人，或明确表示自己可以处理该费用事项，才视为身份已确认" in instructions
+    assert "用户只说“方便”“可以”“好的”“嗯”“对”“是的”“在的”“你说吧”等短句时，不能视为已确认身份" in instructions
+    assert "无论是否确认身份，都不得在通话中说出具体金额" in instructions
+    assert "未确认身份前不得披露地址、房号或费用明细" in instructions
+    assert "12.34元" not in instructions
+    assert "[金额已隐藏]" in instructions
+    assert "如果用户最新一句是在确认身份，例如" not in instructions
+    assert "例如“是的”“对”“嗯”“我是”“在的”" not in instructions
+    assert "数据库催收策略决定业务目标、推进方向和可表达的信息范围" in instructions
+    assert "客服语气配置决定表达风格、正式程度和语气强弱" in instructions
+    assert "不得让开场白反向覆盖数据库策略" in instructions
+    assert "不得因策略阶段升级而忽略客服语气配置" in instructions
+    assert "以已播放开场白为语气参照" not in instructions
     assert "保持相同的身份、称呼方式、语气基调和沟通边界" in instructions
     assert "不要突然变得更强硬、更随意" in instructions
     assert "全程使用“您”" in instructions
@@ -526,6 +536,9 @@ def test_realtime_instructions_anchor_opening_confirmation_to_fee_followup():
     assert "不得说暂未涉及征信" in instructions
     assert "不得说为避免不必要的麻烦" in instructions
     assert "不得使用尽快处理" in instructions
+    assert "不得使用正式催告、法律跟进阶段、可能面临诉讼等法律施压表达" in instructions
+    assert "不得编造X日、X日承诺缴纳、未实际到账等系统未明确提供的事实" in instructions
+    assert "用户提到起诉、法院、律师、征信或上门时，本轮回复只能中性收口" in instructions
     assert "用户已明确拒缴后" in instructions
     assert "回答发票、渠道、明细、征信、起诉等直接问题后必须继续收口" in instructions
     assert "部分缴纳或费用减免" in instructions
@@ -576,8 +589,8 @@ def test_realtime_dialog_config_uses_committed_history_as_dialog_context():
             ConversationExchange(
                 turn_id=2,
                 status="interrupted",
-                input_transcript="这个费用是什么？",
-                output_transcript="这是三月份的物业费。",
+                input_transcript="我刚才说的5200.75元是什么？",
+                output_transcript="具体是5200.75元的物业费。",
             ),
         ]
     )
@@ -593,8 +606,8 @@ def test_realtime_dialog_config_uses_committed_history_as_dialog_context():
     assert [item.text for item in dialog_config.dialog_context] == [
         "你是哪边？",
         "我是物业中心小明。",
-        "这个费用是什么？",
-        "这是三月份的物业费。",
+        "我刚才说的[金额已隐藏]是什么？",
+        "具体是[金额已隐藏]的物业费。",
     ]
 
 
@@ -1235,7 +1248,7 @@ async def _assert_realtime_phone_gateway_does_not_emit_silence_on_lag() -> None:
 
 
 async def _assert_realtime_phone_gateway_plays_opening_audio() -> None:
-    opening_text = "您好，请问是测试业主吗？系统显示您当前有12.34元待缴费用，想和您确认一下。"
+    opening_text = "您好，请问是测试业主吗？这边有一项物业费事项想和您本人核实一下。"
     store = OpeningAudioStore()
     store.put(
         PreparedOpeningAudio(
@@ -1277,6 +1290,52 @@ async def _assert_realtime_phone_gateway_plays_opening_audio() -> None:
     assert stats.opening_playback_interrupted is False
     assert opening_text in fake_session.instructions[0]
     assert store.pop("test-opening-call") is None
+
+
+def test_realtime_phone_gateway_skips_opening_audio_with_amount():
+    asyncio.run(_assert_realtime_phone_gateway_skips_opening_audio_with_amount())
+
+
+async def _assert_realtime_phone_gateway_skips_opening_audio_with_amount() -> None:
+    store = OpeningAudioStore()
+    store.put(
+        PreparedOpeningAudio(
+            call_id="test-sensitive-opening-call",
+            opening_text="您好，系统显示您当前有12.34元待缴费用。",
+            opening_text_hash="hash-sensitive",
+            voice="female",
+            speaker="zh_female_vv_jupiter_bigtts",
+            phone_frames=[_phone_frame(800)],
+            source_sample_rate=24000,
+            source_audio_bytes=960,
+            generation_ms=1200,
+        )
+    )
+    fake_session = FakeRealtimeSession(samples_to_pcm_s16le([1600] * 240))
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+        realtime_session_factory=fake_session.bind,
+        opening_store=store,
+    )
+    await server.start()
+    try:
+        host, port = server.address
+        async with connect(
+            f"ws://{host}:{port}/media/fs/test-sensitive-opening-call",
+            ping_interval=None,
+        ) as ws:
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(ws.recv(), timeout=0.1)
+    finally:
+        await server.stop()
+
+    stats = server.completed_sessions[0]
+    assert stats.opening_text_hash is None
+    assert stats.opening_playback_frames == 0
+    assert fake_session.instructions
+    assert "12.34元" not in fake_session.instructions[0]
+    assert store.pop("test-sensitive-opening-call") is None
 
 
 async def _assert_realtime_phone_gateway_waits_for_answer_before_opening_audio() -> None:
@@ -1332,7 +1391,7 @@ async def _assert_realtime_phone_gateway_waits_for_answer_before_opening_audio()
 
 
 async def _assert_realtime_phone_gateway_interrupts_opening_audio() -> None:
-    opening_text = "您好，请问是测试业主吗？系统显示您当前有12.34元待缴费用，想和您确认一下。"
+    opening_text = "您好，请问是测试业主吗？这边有一项物业费事项想和您本人核实一下。"
     store = OpeningAudioStore()
     store.put(
         PreparedOpeningAudio(
@@ -1381,7 +1440,7 @@ async def _assert_realtime_phone_gateway_interrupts_opening_audio() -> None:
 
 
 async def _assert_realtime_phone_gateway_locally_interrupts_opening() -> None:
-    opening_text = "您好，请问是测试业主吗？系统显示您当前有12.34元待缴费用，想和您确认一下。"
+    opening_text = "您好，请问是测试业主吗？这边有一项物业费事项想和您本人核实一下。"
     store = OpeningAudioStore()
     store.put(
         PreparedOpeningAudio(
@@ -1439,7 +1498,7 @@ async def _assert_realtime_phone_gateway_locally_interrupts_opening() -> None:
 
 
 async def _assert_realtime_phone_gateway_ignores_opening_barge_in_before_playback_starts() -> None:
-    opening_text = "您好，请问是测试业主吗？系统显示您当前有12.34元待缴费用，想和您确认一下。"
+    opening_text = "您好，请问是测试业主吗？这边有一项物业费事项想和您本人核实一下。"
     server = FreeSwitchRealtimeGatewayServer(
         _test_config(tail_silence_ms=0),
         api_key="test-key",
@@ -1482,7 +1541,7 @@ async def _assert_realtime_phone_gateway_ignores_opening_barge_in_before_playbac
 
 
 async def _assert_realtime_phone_gateway_does_not_locally_interrupt_opening() -> None:
-    opening_text = "您好，请问是测试业主吗？系统显示您当前有12.34元待缴费用，想和您确认一下。"
+    opening_text = "您好，请问是测试业主吗？这边有一项物业费事项想和您本人核实一下。"
     store = OpeningAudioStore()
     store.put(
         PreparedOpeningAudio(
@@ -1534,7 +1593,7 @@ async def _assert_realtime_phone_gateway_does_not_locally_interrupt_opening() ->
 
 
 async def _assert_realtime_phone_gateway_uses_opening_speaker() -> None:
-    opening_text = "您好，请问是测试业主吗？系统显示您当前有12.34元待缴费用，想和您确认一下。"
+    opening_text = "您好，请问是测试业主吗？这边有一项物业费事项想和您本人核实一下。"
     opening_speaker = "zh_male_yunzhou_jupiter_bigtts"
     store = OpeningAudioStore()
     store.put(
@@ -1593,7 +1652,7 @@ async def _assert_realtime_phone_gateway_uses_opening_speaker() -> None:
 
 
 async def _assert_realtime_phone_gateway_seeds_opening_context() -> None:
-    opening_text = "您好，请问是测试业主吗？系统显示您当前有12.34元待缴费用，想和您确认一下。"
+    opening_text = "您好，请问是测试业主吗？这边有一项物业费事项想和您本人核实一下。"
     store = OpeningAudioStore()
     store.put(
         PreparedOpeningAudio(

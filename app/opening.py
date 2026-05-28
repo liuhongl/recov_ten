@@ -27,8 +27,7 @@ from .realtime_types import RealtimeDialogConfig
 LOGGER = logging.getLogger(__name__)
 
 OPENING_TEMPLATE = (
-    "您好，请问是{owner_name}吗？系统显示您当前有{arrears_amount}元待缴费用，"
-    "想和您确认一下。"
+    "您好，请问是{owner_name}吗？这边有一项物业费事项想和您本人核实一下。"
 )
 BUSINESS_OPENING_TEMPLATE = (
     "您好，请问是{salutation}吗？我是{employee_name}。"
@@ -37,6 +36,7 @@ BUSINESS_OPENING_TEMPLATE = (
 LEGACY_BUSINESS_OPENING_TEMPLATE_ALIASES = {
     "{{name}}": "{name}",
     "{{identity_name}}": "{identity_name}",
+    "{{identityName}}": "{identityName}",
 }
 OPENING_TTS_PREFIX = "请严格朗读以下开场白，不要添加、删减或改写："
 DEFAULT_OPENING_TIMEOUT_SECONDS = 60
@@ -280,6 +280,7 @@ def build_business_opening_request(
         **business_values,
         "name": salutation,
         "identity_name": employee_name_text,
+        "identityName": employee_name_text,
     }
     rendered = _render_business_opening_template(opening_template, template_values)
     return OpeningRequest(

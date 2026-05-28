@@ -16,7 +16,9 @@ from typing import Any, Protocol
 
 from .business_dialog_style import (
     BUSINESS_CRITICAL_RUNTIME_RULES,
+    BUSINESS_DIALOG_SPEAKING_STYLE,
     numbered_business_amount_dispute_rules,
+    numbered_business_communication_norms_rules,
     numbered_business_dialog_style_rules,
     numbered_business_fact_boundary_rules,
     numbered_business_property_fee_scene_rules,
@@ -169,6 +171,7 @@ limit 8
 CALL_RECORD_TERMINAL_STATUSES = {"2", "3", "4"}
 HISTORICAL_SUMMARY_MAX_CHARS = 200
 HISTORICAL_SUMMARY_BLOCK_MAX_CHARS = 1500
+PROMPT_AMOUNT_RE = re.compile(r"\d+(?:\.\d+)?\s*元")
 CONFLICTING_STRATEGY_MARKERS = (
     "承诺跟进",
     "投诉跟进承诺",
@@ -263,6 +266,17 @@ CONFLICTING_STRATEGY_MARKERS = (
     "相关法律法规",
     "正式途径来处理",
     "通过正式途径",
+    "正式催告",
+    "法律跟进",
+    "法律跟进阶段",
+    "可能面临诉讼",
+    "可能会面临诉讼",
+    "面临诉讼",
+    "承诺缴纳",
+    "承诺缴费",
+    "未实际到账",
+    "X日",
+    "X 日",
     "避免不必要的麻烦",
     "尽快处理",
     "尽快缴纳",
@@ -478,6 +492,7 @@ class PostgresPromptStore:
         instructions = _render_business_prompt(
             employee_name=employee_name,
             strategy=strategy,
+            speaking_style=speaking_style,
             debtor_name=debtor_name,
             debtor_gender=debtor_gender,
             debtor_age=debtor_age,
@@ -1170,6 +1185,7 @@ def _render_business_prompt(
     *,
     employee_name: object,
     strategy: object,
+    speaking_style: object = None,
     debtor_name: object,
     debtor_gender: object,
     debtor_age: object,
@@ -1178,12 +1194,16 @@ def _render_business_prompt(
     history_summary_block: str | None = None,
 ) -> str:
     salutation = _prompt_debtor_salutation(debtor_name, debtor_gender)
+    speaking_style_text = _prompt_block(speaking_style) or BUSINESS_DIALOG_SPEAKING_STYLE
     lines = [
         "# 角色",
         f"你是{_prompt_text(employee_name)}，负责通过电话进行合规的逾期费用提醒和费用处理沟通。",
         "",
         "# 催收策略",
         _prompt_block(strategy),
+        "",
+        "# 客服语气配置",
+        speaking_style_text,
         "",
         "# 规则优先级",
         *numbered_business_rule_priority_rules(),
@@ -1199,13 +1219,15 @@ def _render_business_prompt(
         "",
         "# 身份核实与隐私边界",
         *numbered_business_privacy_disclosure_rules(),
-        f"7. 身份未确认时，下一句只能问：请问您是{salutation}本人，或方便处理这项物业费事项的授权处理人吗？",
+        f"7. 身份未确认时，下一句只能问：请问您是{salutation}本人，或者是这项物业费事项的授权处理人吗？",
         "8. 这类身份核实句不得夹带地址、房号、待处理金额、欠费明细或费用原因。",
         "9. 用户抱怨啰嗦、要求直接说、追问什么事但仍未确认身份时，只能说明“为保护信息安全，确认本人或授权处理人后才能说明具体内容”，不得披露具体信息。",
         "",
         "# 身份确认后的信息边界",
-        "具体金额和地址不写入本轮对话提示词，防止未确认身份时被模型误说出。",
-        "确认身份后也不得编造本提示词未提供的具体金额、地址或明细；用户追问时，只能说明以物业系统或官方已公示渠道核实为准。",
+        "具体金额不写入本轮对话提示词；无论身份是否确认，均不得在通话中说出具体金额。",
+        "用户询问欠款金额、差多少钱或待处理金额时，不得说出系统记录金额，不得复述用户提到的金额；只能说明具体金额以物业系统或官方已公示渠道核实为准。",
+        "地址、房号和费用明细不写入本轮对话提示词；用户追问地址、房号或费用构成明细时，只能说明以物业系统或官方已公示渠道核实为准。",
+        "回答金额相关问题后直接收口；不得追问近期是否安排处理、是否有缴费计划或处理计划。",
         f"业主称呼：{salutation}",
         "",
     ]
@@ -1220,11 +1242,7 @@ def _render_business_prompt(
             *numbered_business_property_fee_scene_rules(),
             "",
             "# 沟通规范",
-            "1. 只围绕逾期费用提醒、身份确认、缴费意愿、费用处理安排进行沟通。",
-            "2. 用户询问无关内容时，简短回应并礼貌拉回当前逾期费用事项。",
-            "3. 不得威胁、辱骂、施压、冒充司法或公权力机构。",
-            "4. 不得向非本人透露欠款金额、地址等隐私信息。",
-            "5. 如果用户表示不是本人，应先确认是否方便转告，不得继续披露债务细节。",
+            *numbered_business_communication_norms_rules(),
         ]
     )
     return "\n".join(lines)
@@ -1250,10 +1268,14 @@ def _sanitize_business_strategy_text(value: object, *, append_note: bool = True)
     if kept:
         if removed and append_note:
             kept.append("已忽略与全局业务红线冲突的策略内容。")
-        return "\n".join(kept)
+        return _redact_prompt_amounts("\n".join(kept))
     if append_note:
         return "已忽略与全局业务红线冲突的策略内容。"
     return ""
+
+
+def _redact_prompt_amounts(text: str) -> str:
+    return PROMPT_AMOUNT_RE.sub("[金额已隐藏]", text)
 
 
 def _business_strategy_units(text: str) -> list[str]:

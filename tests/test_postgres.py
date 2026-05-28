@@ -152,25 +152,30 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert "先确认本人，再说明费用。" in prep.prompt_snapshot.instructions
     assert "业主称呼：金女士" in prep.prompt_snapshot.instructions
     assert "业主姓名：金阳" not in prep.prompt_snapshot.instructions
+    assert "12.34元" not in prep.prompt_snapshot.instructions
     assert "系统记录待处理金额：12.34" not in prep.prompt_snapshot.instructions
     assert "地址：测试小区一号楼" not in prep.prompt_snapshot.instructions
-    assert "具体金额和地址不写入本轮对话提示词" in prep.prompt_snapshot.instructions
+    assert "无论身份是否确认，均不得在通话中说出具体金额" in prep.prompt_snapshot.instructions
+    assert "地址、房号和费用明细不写入本轮对话提示词" in prep.prompt_snapshot.instructions
     assert "# 金额与争议处理" in prep.prompt_snapshot.instructions
     assert "# 身份核实与隐私边界" in prep.prompt_snapshot.instructions
     assert "业主本人或该费用事项的授权处理人" in prep.prompt_snapshot.instructions
-    assert "用户只说“好的”“嗯”“你说吧”“什么事”等" in prep.prompt_snapshot.instructions
+    assert "用户只说“方便”“可以”“好的”“嗯”“对”“是的”“在的”“你说吧”“什么事”等短句，不能视为已确认本人或授权处理人" in prep.prompt_snapshot.instructions
+    assert "必须等用户明确说自己是业主本人、业主本人在接听、授权处理人，或明确表示自己可以处理该费用事项" in prep.prompt_snapshot.instructions
     assert "不得主动披露具体姓名、地址、房号、待处理金额" in prep.prompt_snapshot.instructions
     assert "身份确认阶段只能使用业主称呼，不得说出完整姓名" in prep.prompt_snapshot.instructions
-    assert "身份未确认时，下一句只能问：请问您是金女士本人，或方便处理这项物业费事项的授权处理人吗？" in prep.prompt_snapshot.instructions
+    assert "身份未确认时，下一句只能问：请问您是金女士本人，或者是这项物业费事项的授权处理人吗？" in prep.prompt_snapshot.instructions
+    assert "身份未确认时，下一句只能问：请问您是金女士本人，或方便处理这项物业费事项的授权处理人吗？" not in prep.prompt_snapshot.instructions
     assert "这类身份核实句不得夹带地址、房号、待处理金额、欠费明细或费用原因" in prep.prompt_snapshot.instructions
     assert "用户抱怨啰嗦、要求直接说、追问什么事但仍未确认身份时" in prep.prompt_snapshot.instructions
     assert "只能说明“物业费事项”或“费用事项需要核实”" in prep.prompt_snapshot.instructions
     assert "# 身份确认后的信息边界" in prep.prompt_snapshot.instructions
-    assert "确认身份后也不得编造本提示词未提供的具体金额、地址或明细" in prep.prompt_snapshot.instructions
+    assert "用户询问欠款金额、差多少钱或待处理金额时" in prep.prompt_snapshot.instructions
+    assert "不得说出系统记录金额" in prep.prompt_snapshot.instructions
     assert "用户主动询问欠款金额" in prep.prompt_snapshot.instructions
     assert "必须先确认对方是业主本人或授权处理人" in prep.prompt_snapshot.instructions
-    assert "只有本轮提示词明确提供具体金额时才可说明" in prep.prompt_snapshot.instructions
-    assert "本轮提示词未提供具体金额时" in prep.prompt_snapshot.instructions
+    assert "确认后也不得在通话中说出具体金额" in prep.prompt_snapshot.instructions
+    assert "不得复述用户提到的金额" in prep.prompt_snapshot.instructions
     assert "不得脱离本轮业务策略自行承诺减免、豁免利息" in prep.prompt_snapshot.instructions
     assert "以物业公司核实和办理为准" in prep.prompt_snapshot.instructions
     assert "不要确认用户已经还清" in prep.prompt_snapshot.instructions
@@ -181,8 +186,14 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert prep.prompt_snapshot.metadata["debtId"] == "2049810626160668673"
     assert prep.prompt_snapshot.metadata["strategy_core"] == "先确认本人，再说明费用。"
     assert prep.prompt_snapshot.metadata["speaking_style"] == "正式但亲切的客服口吻。"
+    assert "# 客服语气配置" in prep.prompt_snapshot.instructions
+    assert "正式但亲切的客服口吻。" in prep.prompt_snapshot.instructions
     assert "# 对话风格" in prep.prompt_snapshot.instructions
-    assert "以已播放开场白为语气参照" in prep.prompt_snapshot.instructions
+    assert "数据库催收策略决定业务目标、推进方向和可表达的信息范围" in prep.prompt_snapshot.instructions
+    assert "客服语气配置决定表达风格、正式程度和语气强弱" in prep.prompt_snapshot.instructions
+    assert "不得让开场白反向覆盖数据库策略" in prep.prompt_snapshot.instructions
+    assert "不得因策略阶段升级而忽略客服语气配置" in prep.prompt_snapshot.instructions
+    assert "以已播放开场白为语气参照" not in prep.prompt_snapshot.instructions
     assert "保持相同的身份、称呼方式、语气基调和沟通边界" in prep.prompt_snapshot.instructions
     assert "不要突然变得更强硬、更随意" in prep.prompt_snapshot.instructions
     assert "全程使用“您”" in prep.prompt_snapshot.instructions
@@ -206,6 +217,22 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert "已确认身份后用户询问金额" in prep.prompt_snapshot.instructions
     assert "不得再次要求身份确认" in prep.prompt_snapshot.instructions
     assert "不得追问近期是否安排处理" in prep.prompt_snapshot.instructions
+    assert "用户已确认身份后又问你是谁、你找我干什么" in prep.prompt_snapshot.instructions
+    assert "只能回答身份与受托核实事项" in prep.prompt_snapshot.instructions
+    assert "用户明确拒缴、说不想交、不交了或近期没有处理计划后" in prep.prompt_snapshot.instructions
+    assert "不得附带后续处理入口、官方渠道办理、联系本人或处理计划" in prep.prompt_snapshot.instructions
+    assert "固定回复“好的，我先记录您的反馈，就不再打扰您了。”" in prep.prompt_snapshot.instructions
+    assert "用户表示已处理、已缴、已转账或已付款时，只能说明以物业系统或财务核对结果为准" in prep.prompt_snapshot.instructions
+    assert "不得说我会反馈给物业核实、我反馈给物业、会反馈给物业" in prep.prompt_snapshot.instructions
+    assert "用户表示先解决服务诉求再缴费、解决完再说、服务不好不交或类似条件拒缴时" in prep.prompt_snapshot.instructions
+    assert "固定回复“好的，我先记录您的诉求，具体以物业核实为准。”" in prep.prompt_snapshot.instructions
+    assert "用户问跟你有什么关系、为什么由你联系、你凭什么联系时" in prep.prompt_snapshot.instructions
+    assert "只能说明“我是受物业公司委托，来核实物业费相关事项的。”" in prep.prompt_snapshot.instructions
+    assert "法务或律师身份下，用户问为什么委托律师、怎么还委托律师、为什么找法务或怎么找上律师时" in prep.prompt_snapshot.instructions
+    assert "不得说更正式的方式、及时处理、正式提醒或升级处理" in prep.prompt_snapshot.instructions
+    assert "不得使用跟进、回访、后续联系等表述作为付款推进或记录理由" in prep.prompt_snapshot.instructions
+    assert "不得说以便我们更好地跟进" in prep.prompt_snapshot.instructions
+    assert "说明客服或物业身份时不得使用算是、应该是、差不多这类含糊措辞" in prep.prompt_snapshot.instructions
     assert "部分缴纳或费用减免" in prep.prompt_snapshot.instructions
     assert "不得脱离本轮业务策略自行承诺" in prep.prompt_snapshot.instructions
     assert "本轮业务策略未给出明确方案时只能记录意向" in prep.prompt_snapshot.instructions
@@ -486,7 +513,9 @@ def test_postgres_prompt_store_includes_historical_analysis_summaries():
     instructions = prep.prompt_snapshot.instructions
     assert "# 历史外呼摘要" in instructions
     assert "历史第1通：用户表示[地址已隐藏][金额已隐藏]物业费资金紧张，承诺月底前处理。" in instructions
-    assert "12.34元" not in instructions
+    assert "用户表示测试小区一号楼12.34元物业费资金紧张" not in instructions
+    assert "系统记录待处理金额：12.34元" not in instructions
+    assert "无论身份是否确认，均不得在通话中说出具体金额" in instructions
     assert "测试小区一号楼" not in instructions
     assert "历史第2通：用户希望先核对费用明细。" in instructions
     assert "历史第3通" not in instructions
@@ -568,10 +597,14 @@ def test_postgres_prompt_store_sanitizes_legal_pressure_and_callback_style():
                     "strategy_core": (
                         "核心是厘清法律义务，强调缴费是合同义务；"
                         "后续物业可能会通过正式途径来处理相关事宜。"
+                        "确认身份后做正式催告，说明账款已经进入法律跟进阶段。"
+                        "记录显示客户曾于X日、X日两次承诺缴纳但未实际到账。"
+                        "告知客户后续可能会面临诉讼。"
                         "正常保留：先确认身份，再说明费用事项需要核实。"
                     ),
                     "speaking_style": (
                         "语气正式，引用相关法律法规。"
+                        "用正式催告口吻提醒客户尽快处理。"
                         "用户忙时说等您方便的时候我们再联系。"
                     ),
                     "opening_template": "",
@@ -617,11 +650,21 @@ def test_postgres_prompt_store_sanitizes_legal_pressure_and_callback_style():
         "厘清法律义务",
         "合同义务",
         "正式途径来处理",
+        "正式催告",
+        "法律跟进阶段",
+        "X日",
+        "承诺缴纳",
+        "未实际到账",
+        "可能会面临诉讼",
         "相关法律法规",
+        "尽快处理",
         "等您方便的时候我们再联系",
     ):
         assert forbidden not in sanitized_sources
     assert "正常保留：先确认身份" in prep.prompt_snapshot.instructions
+    assert "不得使用正式催告、法律跟进阶段、可能面临诉讼等法律施压表达" in prep.prompt_snapshot.instructions
+    assert "不得编造X日、X日承诺缴纳、未实际到账等系统未明确提供的事实" in prep.prompt_snapshot.instructions
+    assert "用户提到起诉、法院、律师、征信或上门时，本轮回复只能中性收口" in prep.prompt_snapshot.instructions
 
 
 def test_postgres_prompt_store_sanitizes_lawyer_legal_pressure_strategy():
@@ -755,10 +798,18 @@ def test_postgres_prompt_store_prevents_repeat_identity_and_payment_push_after_r
     instructions = prep.prompt_snapshot.instructions
     assert "已确认身份后用户询问金额" in instructions
     assert "不得再次要求身份确认" in instructions
-    assert "本轮提示词未提供金额时" in instructions
-    assert "直接说明以物业系统或官方已公示渠道核实为准" in instructions
+    assert "系统记录待处理金额：12.34元" not in instructions
+    assert "可按系统记录待处理金额回答" not in instructions
+    assert "不得说出系统记录金额" in instructions
+    assert "不得复述用户提到的金额" in instructions
     assert "不得追问近期是否安排处理" in instructions
     assert "不得询问是否有缴费计划或处理计划" in instructions
+    assert "用户已确认身份后又问你是谁、你找我干什么" in instructions
+    assert "只能回答身份与受托核实事项" in instructions
+    assert "不得使用跟进、回访、后续联系等表述作为付款推进或记录理由" in instructions
+    assert "说明客服或物业身份时不得使用算是、应该是、差不多这类含糊措辞" in instructions
+    assert "用户明确拒缴、说不想交、不交了或近期没有处理计划后" in instructions
+    assert "固定回复“好的，我先记录您的反馈，就不再打扰您了。”" in instructions
     assert "请问您近期是否有安排处理这笔费用的计划" not in instructions
 
 
@@ -817,6 +868,8 @@ def test_postgres_prompt_store_uses_non_committal_service_feedback_wording():
         ]
     )
     assert "我先记录您的诉求，具体以物业核实为准" in combined
+    assert "服务投诉同时伴随拒缴、不想交或没有处理计划时" in combined
+    assert "不得追问其他处理想法" in combined
     for forbidden in (
         "反馈给物业相关部门核实处理",
         "反馈给项目核实处理",
@@ -1359,6 +1412,7 @@ def test_postgres_prompt_store_derives_persona_and_employee_from_debt_and_voice(
     )
     assert prep.opening.speaking_style == "协调型、熟人式、耐心沟通的物业工作人员口吻。"
     assert "你是物业中心李晓莉" in prep.prompt_snapshot.instructions
+    assert "协调型、熟人式、耐心沟通的物业工作人员口吻。" in prep.prompt_snapshot.instructions
     assert prep.opening.opening_text == (
         "您好，请问是金女士吗？我是物业中心李晓莉。"
         "这边有一项物业费事项需要和您本人核实一下，请问现在方便确认吗？"

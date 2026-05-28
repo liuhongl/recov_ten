@@ -33,8 +33,10 @@ def test_parse_opening_request_renders_fixed_template_and_hashes_text():
     assert opening.speaker == "zh_female_vv_jupiter_bigtts"
     assert (
         opening.opening_text
-        == "您好，请问是测试业主吗？系统显示您当前有12.34元待缴费用，想和您确认一下。"
+        == "您好，请问是测试业主吗？这边有一项物业费事项想和您本人核实一下。"
     )
+    assert "12.34" not in opening.opening_text
+    assert "元" not in opening.opening_text
     assert len(opening.opening_text_hash) == 64
 
 
@@ -128,6 +130,25 @@ def test_build_business_opening_request_supports_legacy_double_brace_aliases():
     assert opening.opening_text == (
         "您好，请问是金先生本人吗？我是物业中心小明。"
         "这边有一项物业费相关事项需要跟您核实。"
+    )
+
+
+def test_build_business_opening_request_supports_camel_case_identity_alias():
+    opening = build_business_opening_request(
+        employee_name="物业中心小明",
+        debtor_name="金阳",
+        debtor_gender="男",
+        debt_amount="1250.50",
+        address="阳光花园一期1栋101室",
+        opening_template=(
+            "您好，请问是{{name}} 本人吗？我是{{identityName}} 。"
+            "这边有一项物业费相关事项需要跟您核实，方便先确认一下身份吗？"
+        ),
+    )
+
+    assert opening.opening_text == (
+        "您好，请问是金先生 本人吗？我是物业中心小明 。"
+        "这边有一项物业费相关事项需要跟您核实，方便先确认一下身份吗？"
     )
 
 

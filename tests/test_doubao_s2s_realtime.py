@@ -59,6 +59,10 @@ def test_doubao_s2s_cancelled_context_seed_suppresses_late_audio_callbacks():
     asyncio.run(_assert_cancelled_context_seed_suppresses_late_audio_callbacks())
 
 
+def test_doubao_s2s_missing_asr_end_does_not_leave_stale_response_turn():
+    asyncio.run(_assert_missing_asr_end_does_not_leave_stale_response_turn())
+
+
 async def _assert_server_vad_session_streams_audio_turn() -> None:
     captured = {"events": [], "headers": None}
     output_audio = _float32_audio(0.25, -0.25)
@@ -291,6 +295,123 @@ async def _assert_interruption_sends_client_interrupt_without_restart() -> None:
     assert [result.status for result in turn_results] == ["cancelled"]
     assert turn_results[0].turn_id == 1
     assert turn_results[0].output_transcript == "old output"
+
+
+async def _assert_missing_asr_end_does_not_leave_stale_response_turn() -> None:
+    output_audio = _float32_audio(0.25)
+    completed = asyncio.Event()
+    turn_results: list[RealtimeTurnResult] = []
+
+    async def handler(websocket):
+        frame = parse_frame(await websocket.recv())
+        assert frame.event == EVENT_START_CONNECTION
+        await websocket.send(
+            _server_json_frame(
+                EVENT_CONNECTION_STARTED,
+                {"ok": True},
+                connect_id="conn-server",
+            )
+        )
+
+        frame = parse_frame(await websocket.recv())
+        assert frame.event == EVENT_START_SESSION
+        await websocket.send(
+            _server_json_frame(
+                EVENT_SESSION_STARTED,
+                {"ok": True},
+                session_id=frame.session_id,
+            )
+        )
+
+        async for raw_message in websocket:
+            frame = parse_frame(raw_message)
+            if frame.event != EVENT_TASK_AUDIO:
+                continue
+            await websocket.send(
+                _server_json_frame(
+                    EVENT_ASR_INFO,
+                    {"status": "started"},
+                    session_id=frame.session_id,
+                )
+            )
+            await websocket.send(
+                _server_json_frame(
+                    EVENT_ASR_RESPONSE,
+                    {"results": [{"text": "hello", "is_interim": False}]},
+                    session_id=frame.session_id,
+                )
+            )
+            await websocket.send(
+                _server_json_frame(
+                    EVENT_TTS_STARTED,
+                    {},
+                    session_id=frame.session_id,
+                )
+            )
+            await websocket.send(
+                _server_json_frame(
+                    EVENT_CHAT_RESPONSE,
+                    {"content": "assistant hello"},
+                    session_id=frame.session_id,
+                )
+            )
+            await websocket.send(
+                _server_audio_frame(
+                    EVENT_TTS_AUDIO_DATA,
+                    output_audio,
+                    session_id=frame.session_id,
+                )
+            )
+            await websocket.send(
+                _server_json_frame(
+                    EVENT_TTS_FINISHED,
+                    {"content": "audio done"},
+                    session_id=frame.session_id,
+                )
+            )
+            await asyncio.sleep(0.05)
+            await websocket.send(
+                _server_json_frame(
+                    EVENT_TTS_STARTED,
+                    {"content": "late provider event"},
+                    session_id=frame.session_id,
+                )
+            )
+            async for _ in websocket:
+                pass
+
+    async def on_speech_started(turn_id: int) -> None:
+        return None
+
+    async def on_audio_delta(turn_id: int, audio: bytes) -> None:
+        return None
+
+    async def on_turn_completed(result: RealtimeTurnResult) -> None:
+        turn_results.append(result)
+        completed.set()
+
+    server = await serve(handler, "127.0.0.1", 0)
+    try:
+        port = server.sockets[0].getsockname()[1]
+        session = DoubaoS2SServerVadSession(
+            _credentials(websocket_url=f"ws://127.0.0.1:{port}/dialogue"),
+            DoubaoS2SSessionConfig(),
+            on_speech_started=on_speech_started,
+            on_audio_delta=on_audio_delta,
+            on_turn_completed=on_turn_completed,
+        )
+        await session.connect()
+        await session.append_audio(b"\x00\x01" * 320)
+        await asyncio.wait_for(completed.wait(), timeout=3)
+        await asyncio.sleep(0.1)
+        await session.close()
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert [result.turn_id for result in turn_results] == [1]
+    assert turn_results[0].input_transcript == "hello"
+    assert turn_results[0].output_transcript == "assistant hello"
 
 
 async def _assert_seed_assistant_context_suppresses_audio_callbacks() -> None:

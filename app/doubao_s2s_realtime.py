@@ -592,11 +592,33 @@ class DoubaoS2SServerVadSession:
         if state is not None:
             return state
 
-        if self._awaiting_response_turn_ids:
+        while self._awaiting_response_turn_ids:
             turn_id = self._awaiting_response_turn_ids.popleft()
-        elif self._active_input_turn_id is not None:
+            state = self._turns.get(turn_id)
+            if state is not None:
+                self._active_response_turn_id = turn_id
+                return state
+            LOGGER.warning(
+                "doubao_s2s_stale_awaiting_response_turn_skipped turn_id=%s",
+                turn_id,
+            )
+
+        if self._active_input_turn_id is not None:
             turn_id = self._active_input_turn_id
-            self._mark_input_finished(turn_id)
+            state = self._turns.get(turn_id)
+            self._active_input_turn_id = None
+            if state is not None:
+                self._active_response_turn_id = turn_id
+                return state
+            LOGGER.warning(
+                "doubao_s2s_active_input_turn_missing_for_response turn_id=%s",
+                turn_id,
+            )
+            self._turns[turn_id] = _DoubaoTurnState(
+                turn_id=turn_id,
+                started_at=time.monotonic(),
+                event_counts=Counter(),
+            )
         else:
             self._next_turn_id += 1
             turn_id = self._next_turn_id

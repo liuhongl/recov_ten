@@ -637,6 +637,10 @@
                   <input id="callId" name="callId" placeholder="Java 已初始化的 call_record.id" />
                 </label>
                 <label>
+                  流程任务 taskId
+                  <input id="taskId" name="taskId" placeholder="flow callback 必填；手工测试可临时与 callId 相同" />
+                </label>
+                <label>
                   数字员工身份 identityName
                   <input id="identityName" name="identityName" value="项目员工" />
                 </label>
@@ -926,7 +930,7 @@
           context.scene = payload.metadata_scene;
         }
         delete payload.metadata_scene;
-        for (const key of ["callId", "identityName", "debtId"]) {
+        for (const key of ["callId", "taskId", "identityName", "debtId"]) {
           if (payload[key]) {
             context[key] = payload[key];
           }

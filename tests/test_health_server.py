@@ -187,6 +187,9 @@ def test_outbound_test_page_is_served():
         assert 'id="callId"' in body
         assert 'name="callId"' in body
         assert "通话记录 callId" in body
+        assert 'id="taskId"' in body
+        assert 'name="taskId"' in body
+        assert "流程任务 taskId" in body
         assert 'id="identityName"' in body
         assert 'name="identityName"' in body
         assert 'value="项目员工"' in body
@@ -206,7 +209,7 @@ def test_outbound_test_page_is_served():
         assert 'id="ownerName"' not in body
         assert 'id="arrearsAmount"' not in body
         assert "const context = {};" in body
-        assert 'for (const key of ["callId", "identityName", "debtId"])' in body
+        assert 'for (const key of ["callId", "taskId", "identityName", "debtId"])' in body
         assert "payload.context = context;" in body
         assert 'payload.opening = {' not in body
         assert 'delete payload.opening_enabled' not in body

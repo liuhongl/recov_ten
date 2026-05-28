@@ -8,6 +8,7 @@ import os
 import threading
 from dataclasses import asdict, replace
 
+from .browser_prompt_test import BrowserPromptTestStore
 from .call_control import OutboundCallManager
 from .config import load_config
 from .env_loader import load_env_file
@@ -105,7 +106,7 @@ async def _serve(config, *, media_mode: str) -> None:
         )
 
     business_prompt_preparer = None
-    if postgres_runtime.prompt_store is not None and opening_generator is not None:
+    if postgres_runtime.prompt_store is not None:
         business_prompt_preparer = ThreadsafeBusinessPromptPreparer(
             asyncio.get_running_loop(),
             postgres_runtime.prompt_store,
@@ -113,6 +114,12 @@ async def _serve(config, *, media_mode: str) -> None:
             timeout_seconds=config.postgres.command_timeout_seconds,
         )
 
+    browser_prompt_store = BrowserPromptTestStore(
+        business_prompt_preparer=business_prompt_preparer,
+        opening_generator=opening_generator,
+        opening_store=opening_store,
+        config=config,
+    )
     outbound_manager = OutboundCallManager(
         config,
         opening_generator=opening_generator,
@@ -123,7 +130,11 @@ async def _serve(config, *, media_mode: str) -> None:
         destination_resolver=postgres_runtime.call_destination_resolver,
     )
     outbound_manager.start()
-    health_server = HealthServer(config, call_manager=outbound_manager)
+    health_server = HealthServer(
+        config,
+        call_manager=outbound_manager,
+        browser_prompt_store=browser_prompt_store,
+    )
     health_thread = threading.Thread(
         target=health_server.serve_forever,
         name="gateway-health-server",
@@ -170,7 +181,10 @@ async def _serve(config, *, media_mode: str) -> None:
             model_output_sample_rate=config.doubao_s2s.output_sample_rate,
             realtime_session_factory=session_factory,
             prompt_store=postgres_runtime.prompt_store,
-            prompt_snapshot_provider=outbound_manager.get_prompt_snapshot,
+            prompt_snapshot_provider=_browser_first_prompt_snapshot_provider(
+                browser_prompt_store,
+                outbound_manager.get_prompt_snapshot,
+            ),
             call_context_provider=outbound_manager.get_call_context,
             call_result_writer=postgres_runtime.call_result_writer,
             on_media_connected=outbound_manager.mark_media_connected,
@@ -242,6 +256,19 @@ def _system_prompt_for_doubao_session(
     if getattr(dialog_config, "system_role", None):
         return DOUBAO_DIALOG_FIELD_COMPAT_SYSTEM_PROMPT
     return instructions
+
+
+def _browser_first_prompt_snapshot_provider(
+    browser_prompt_store,
+    outbound_provider,
+):
+    def provider(call_id: str):
+        snapshot = browser_prompt_store.get(call_id)
+        if snapshot is not None:
+            return snapshot
+        return outbound_provider(call_id)
+
+    return provider
 
 
 if __name__ == "__main__":

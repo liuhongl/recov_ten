@@ -11,6 +11,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .browser_prompt_test import (
+    BrowserPromptDatabasePreview,
+    BrowserPromptRegistration,
+    BrowserPromptTestStore,
+    browser_public_constraint_defaults,
+)
 from .call_control import CallControlError, OutboundCallManager
 from .config import GatewayConfig
 
@@ -39,6 +45,19 @@ DOCS = {
     },
 }
 
+PERSONA_TYPE_BY_ID = {
+    "1": "疏忽遗忘型",
+    "2": "暂时困难型",
+    "3": "投诉挂钩型",
+    "4": "习惯性拖延/博弈型",
+    "5": "房屋空置型",
+    "6": "产权纠纷型",
+    "7": "租赁推诿型",
+    "8": "历史遗留问题型",
+    "9": "信息失联型",
+    "10": "恶意对抗型",
+}
+
 
 class HealthServer:
     def __init__(
@@ -46,10 +65,16 @@ class HealthServer:
         config: GatewayConfig,
         *,
         call_manager: OutboundCallManager | None = None,
+        browser_prompt_store: BrowserPromptTestStore | None = None,
     ):
         self.config = config
         self.call_manager = call_manager
-        handler = self._make_handler(config, call_manager=call_manager)
+        self.browser_prompt_store = browser_prompt_store
+        handler = self._make_handler(
+            config,
+            call_manager=call_manager,
+            browser_prompt_store=browser_prompt_store,
+        )
         self._server = ThreadingHTTPServer(
             (config.server.host, config.server.port),
             handler,
@@ -74,6 +99,7 @@ class HealthServer:
         config: GatewayConfig,
         *,
         call_manager: OutboundCallManager | None = None,
+        browser_prompt_store: BrowserPromptTestStore | None = None,
     ) -> type[BaseHTTPRequestHandler]:
         class Handler(BaseHTTPRequestHandler):
             server_version = "SipRealtimeVoiceGateway/0.1"
@@ -133,6 +159,22 @@ class HealthServer:
                     self._send_html(HTTPStatus.OK, _load_outbound_test_html())
                     return
 
+                if parsed.path == "/browser-realtime-test":
+                    self._send_html(HTTPStatus.OK, _load_browser_realtime_test_html())
+                    return
+
+                if parsed.path == "/browser-test-prompts/defaults":
+                    defaults = (
+                        browser_prompt_store.public_constraint_defaults()
+                        if browser_prompt_store is not None
+                        else browser_public_constraint_defaults()
+                    )
+                    self._send_json(
+                        HTTPStatus.OK,
+                        {"status": "ok", **defaults},
+                    )
+                    return
+
                 if parsed.path == "/docs":
                     self._send_redirect("/docs/handoff")
                     return
@@ -190,6 +232,72 @@ class HealthServer:
 
             def do_POST(self) -> None:
                 parsed = urlparse(self.path)
+                if parsed.path == "/browser-test-prompts/database-preview":
+                    if browser_prompt_store is None:
+                        self._send_json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {
+                                "status": "unavailable",
+                                "error": "browser prompt test store disabled",
+                            },
+                        )
+                        return
+                    try:
+                        preview = browser_prompt_store.preview_database(
+                            self._read_json_body()
+                        )
+                    except ValueError as err:
+                        self._send_json(
+                            HTTPStatus.BAD_REQUEST,
+                            {"status": "error", "error": str(err)},
+                        )
+                        return
+                    except json.JSONDecodeError:
+                        self._send_json(
+                            HTTPStatus.BAD_REQUEST,
+                            {"status": "error", "error": "invalid JSON body"},
+                        )
+                        return
+
+                    self._send_json(
+                        HTTPStatus.OK,
+                        _browser_prompt_database_preview_payload(preview),
+                    )
+                    return
+
+                if parsed.path == "/browser-test-prompts":
+                    if browser_prompt_store is None:
+                        self._send_json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {
+                                "status": "unavailable",
+                                "error": "browser prompt test store disabled",
+                            },
+                        )
+                        return
+                    try:
+                        registration = browser_prompt_store.register(
+                            self._read_json_body()
+                        )
+                    except ValueError as err:
+                        self._send_json(
+                            HTTPStatus.BAD_REQUEST,
+                            {"status": "error", "error": str(err)},
+                        )
+                        return
+                    except json.JSONDecodeError:
+                        self._send_json(
+                            HTTPStatus.BAD_REQUEST,
+                            {"status": "error", "error": "invalid JSON body"},
+                        )
+                        return
+
+                    self._send_json(
+                        HTTPStatus.OK,
+                        _browser_prompt_registration_payload(registration),
+                    )
+                    return
+
                 if parsed.path == "/calls":
                     if call_manager is None:
                         self._send_json(
@@ -363,6 +471,84 @@ def _load_outbound_test_html() -> str:
     return html_path.read_text(encoding="utf-8")
 
 
+def _load_browser_realtime_test_html() -> str:
+    html_path = (
+        Path(__file__).resolve().parent.parent
+        / "static"
+        / "browser-realtime-test.html"
+    )
+    return html_path.read_text(encoding="utf-8")
+
+
+def _browser_prompt_registration_payload(
+    registration: BrowserPromptRegistration,
+) -> dict[str, Any]:
+    snapshot = registration.prompt_snapshot
+    persona_type = _persona_type_from_metadata(snapshot.metadata)
+    return {
+        "status": "ok",
+        "call_id": registration.call_id,
+        "mode": registration.mode,
+        "persona_profile": snapshot.metadata.get("strategy_core") or "",
+        "persona_type": persona_type,
+        "prompt": {
+            "scene": snapshot.scene,
+            "version": snapshot.version,
+            "content_hash": snapshot.content_hash,
+            "loaded_at_ms": snapshot.loaded_at_ms,
+            "metadata": snapshot.metadata,
+            "preview": snapshot.instructions,
+        },
+        "sensitive_summary": registration.sensitive_summary,
+        "opening": registration.opening,
+        "warnings": registration.warnings,
+        "expires_in_seconds": registration.expires_in_seconds,
+    }
+
+
+def _browser_prompt_database_preview_payload(
+    preview: BrowserPromptDatabasePreview,
+) -> dict[str, Any]:
+    snapshot = preview.prompt_snapshot
+    metadata = snapshot.metadata
+    persona_type = _persona_type_from_metadata(metadata)
+    return {
+        "status": "ok",
+        "mode": "database",
+        "identityName": metadata.get("identityName"),
+        "personaId": metadata.get("personaId"),
+        "debtId": metadata.get("debtId"),
+        "persona_profile": metadata.get("strategy_core") or "",
+        "persona_type": persona_type,
+        "speaking_style": metadata.get("speaking_style") or "",
+        "prompt": {
+            "scene": snapshot.scene,
+            "version": snapshot.version,
+            "content_hash": snapshot.content_hash,
+            "loaded_at_ms": snapshot.loaded_at_ms,
+            "metadata": metadata,
+        },
+        "sensitive_summary": preview.sensitive_summary,
+        "opening": preview.opening,
+    }
+
+
+def _persona_type_from_metadata(metadata: dict[str, Any]) -> str:
+    explicit_type = _payload_text(
+        metadata.get("persona_type") or metadata.get("personaType")
+    )
+    if explicit_type:
+        return explicit_type
+    persona_id = _payload_text(metadata.get("personaId"))
+    if persona_id:
+        return PERSONA_TYPE_BY_ID.get(persona_id, "")
+    return ""
+
+
+def _payload_text(value: object) -> str:
+    return str(value or "").strip()
+
+
 def _load_doc_html(doc_id: str) -> str:
     metadata = DOCS[doc_id]
     doc_path = (
@@ -386,6 +572,7 @@ def _document_shell(
 ) -> str:
     nav_items = [
         ("/outbound-test", "外呼测试", None),
+        ("/browser-realtime-test", "浏览器对话", None),
         ("/docs/handoff", "交接文档", "handoff"),
         ("/docs/notes", "学习笔记", "notes"),
         ("/docs/mac-softphone", "Mac 接入指导", "mac-softphone"),

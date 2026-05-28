@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import threading
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from app.browser_prompt_test import BrowserPromptTestStore
 from app.config import (
     GatewayConfig,
     RocketMQAclConfig,
@@ -11,6 +13,7 @@ from app.config import (
     ServerConfig,
 )
 from app.health_server import HealthServer
+from app.postgres import BusinessPromptPreparation, PromptSnapshot
 
 
 def test_health_endpoint_returns_ok():
@@ -215,11 +218,13 @@ def test_outbound_test_page_is_served():
         assert 'delete payload.opening_enabled' not in body
         assert "ready 表示页面接口可用" not in body
         assert "外呼测试" in body
+        assert "浏览器对话" in body
         assert "交接文档" in body
         assert "学习笔记" in body
         assert "Mac 接入指导" in body
         assert "推荐AGENT.md" in body
         assert 'href="/outbound-test"' in body
+        assert 'href="/browser-realtime-test"' in body
         assert 'nav class="nav" aria-label="主导航"' in body
         assert "width: min(1360px, calc(100% - 24px))" in body
         assert "width: min(100% - 16px, 1360px)" in body
@@ -229,11 +234,280 @@ def test_outbound_test_page_is_served():
         assert 'href="/docs/mac-softphone"' in body
         assert 'href="/docs/agent-readme"' in body
         assert body.count('href="/docs/handoff"') == 1
+        assert body.count('href="/browser-realtime-test"') == 1
         assert body.count('href="/docs/notes"') == 1
         assert body.count('href="/docs/mac-softphone"') == 1
         assert body.count('href="/docs/agent-readme"') == 1
         assert "项目文档" not in body
         assert "文档入口" not in body
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
+def test_browser_realtime_test_page_is_served():
+    config = GatewayConfig(server=ServerConfig(host="127.0.0.1", port=0))
+    server = HealthServer(config, call_manager=FakeCallManager())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.address
+        with urlopen(
+            f"http://{host}:{port}/browser-realtime-test",
+            timeout=3,
+        ) as response:
+            body = response.read().decode("utf-8")
+
+        assert response.status == 200
+        assert "浏览器对话测试" in body
+        assert "Prompt Lab" in body
+        assert "/browser-test-prompts" in body
+        assert "/browser-test-prompts/defaults" in body
+        assert "/browser-test-prompts/database-preview" in body
+        assert 'location.protocol === "file:" ? "http://127.0.0.1:19100" : ""' in body
+        assert 'fetch(apiUrl("/browser-test-prompts/defaults")' in body
+        assert 'fetch(apiUrl("/ready")' in body
+        assert "mediaWebSocketUrl" in body
+        assert 'if (location.protocol === "https:")' in body
+        assert 'return `wss://${location.host}/media/${callId}`;' in body
+        assert "loadDatabaseSpeakingStyle" in body
+        assert "ws://127.0.0.1:9101/media/" in body
+        assert "最终 Prompt 预览" in body
+        assert "浏览器会话 ID" in body
+        assert "数据库通话记录 callId（可选）" in body
+        assert "debtId（必填）" in body
+        assert 'id="debtId" value="2058923748267257858"' in body
+        assert "<select id=\"identityName\">" in body
+        assert '<option value="项目员工" selected>项目员工</option>' in body
+        assert '<option value="企业客服">企业客服</option>' in body
+        assert '<option value="企业法务">企业法务</option>' in body
+        assert '<option value="律师">律师</option>' in body
+        assert "第三方律师" not in body
+        assert '<input id="identityName"' not in body
+        assert "通话中禁止说金额" in body
+        assert "非电话链路验证" in body
+        assert 'id="personaId"' not in body
+        assert "程序默认公共约束" in body
+        assert "用户画像" in body
+        assert "画像类型" in body
+        assert 'id="personaProfile"' in body
+        assert 'id="personaTypeValue"' in body
+        assert 'id="personaProfileText"' in body
+        assert "来自数据库 persona 策略" in body
+        assert "只发送改动过的约束" in body
+        assert 'class="constraint-field wide speaking-style-field"' in body
+        assert "用于配置模型对话风格" in body
+        assert "你说话偏向林黛玉" in body
+        assert "你口吻拽拽的" in body
+        assert ".speaking-style-field textarea" in body
+        assert "min-height: 86px" in body
+        assert 'class="constraint-grid"' in body
+        assert 'class="constraint-field tall"' in body
+        assert 'class="constraint-field wide"' in body
+        assert 'data-section="communication_norms"' in body
+        assert "沟通规范" in body
+        assert '"communication_norms"' in body
+        assert "let registeringPrompt = false;" in body
+        assert 'if (registeringPrompt) return;' in body
+        assert 'registerButton.disabled = true;' in body
+        assert 'registerButton.textContent = "创建中...";' in body
+        assert "playbackWorkletUrl" in body
+        assert 'registerProcessor("playback-processor"' in body
+        assert 'new AudioWorkletNode(audioContext, "playback-processor",' in body
+        assert "createBufferSource" not in body
+        assert 'class="check-line"' in body
+        assert 'href="/outbound-test"' in body
+        assert 'class="active" href="/browser-realtime-test" aria-current="page"' in body
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
+def test_browser_test_prompt_defaults_endpoint_exposes_current_program_rules():
+    config = GatewayConfig(server=ServerConfig(host="127.0.0.1", port=0))
+    server = HealthServer(config, call_manager=FakeCallManager())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.address
+        with urlopen(
+            f"http://{host}:{port}/browser-test-prompts/defaults",
+            timeout=3,
+        ) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+        assert response.status == 200
+        assert payload["status"] == "ok"
+        assert "电话客服口吻" in payload["speaking_style"]
+        assert "数据库催收策略决定业务目标、推进方向和可表达的信息范围" in payload["sections"]["dialog_style"]
+        assert "要求勿扰后必须礼貌结束" in payload["sections"]["critical_runtime"]
+        assert "用户主动询问欠款金额" in payload["sections"]["amount_dispute"]
+        assert "只围绕逾期费用提醒" in payload["sections"]["communication_norms"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
+def test_browser_test_prompts_endpoint_registers_prompt_snapshot_with_preview():
+    prompt_store = BrowserPromptTestStore(ttl_seconds=1800, now=lambda: 100.0)
+    config = GatewayConfig(server=ServerConfig(host="127.0.0.1", port=0))
+    server = HealthServer(
+        config,
+        call_manager=FakeCallManager(),
+        browser_prompt_store=prompt_store,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.address
+        request = Request(
+            f"http://{host}:{port}/browser-test-prompts",
+            data=json.dumps(
+                {
+                    "call_id": "browser-http-test",
+                    "mode": "manual",
+                    "employee_name": "测试员工",
+                    "identityName": "项目员工",
+                    "strategy_core": "先确认本人。",
+                    "debt_amount": "12.34",
+                    "debtor_name": "金阳",
+                    "debtor_gender": "女",
+                    "sections": {"extra": ["HTTP 测试规则。"]},
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=3) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+        assert response.status == 200
+        assert payload["status"] == "ok"
+        assert payload["call_id"] == "browser-http-test"
+        assert payload["prompt"]["version"] == "browser-test"
+        assert "HTTP 测试规则。" in payload["prompt"]["preview"]
+        assert payload["sensitive_summary"]["amount_in_prompt"] is False
+        assert payload["sensitive_summary"]["amount_disclosure_forbidden"] is True
+        snapshot = prompt_store.get("browser-http-test")
+        assert snapshot is not None
+        assert "HTTP 测试规则。" in snapshot.instructions
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
+def test_browser_test_prompt_database_preview_returns_database_speaking_style():
+    class Preparer:
+        def __init__(self):
+            self.contexts = []
+
+        def prepare(self, context):
+            self.contexts.append(context)
+            return BusinessPromptPreparation(
+                prompt_snapshot=PromptSnapshot(
+                    scene="企业法务:4",
+                    version="postgres",
+                    instructions=(
+                        "# 客服语气配置\n数据库法务语气。\n"
+                        "具体金额不写入本轮对话提示词；"
+                        "无论身份是否确认，均不得在通话中说出具体金额。"
+                    ),
+                    content_hash="database-hash",
+                    loaded_at_ms=123,
+                    metadata={
+                        "source": "postgres",
+                        "identityName": "企业法务",
+                        "personaId": "4",
+                        "debtId": "2058923748267257858",
+                        "strategy_core": "画像策略：强沟通意愿，先确认身份再推进。",
+                        "speaking_style": "数据库法务语气。",
+                    },
+                ),
+                opening=None,
+            )
+
+    preparer = Preparer()
+    prompt_store = BrowserPromptTestStore(business_prompt_preparer=preparer)
+    config = GatewayConfig(server=ServerConfig(host="127.0.0.1", port=0))
+    server = HealthServer(
+        config,
+        call_manager=FakeCallManager(),
+        browser_prompt_store=prompt_store,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.address
+        request = Request(
+            f"http://{host}:{port}/browser-test-prompts/database-preview",
+            data=json.dumps(
+                {
+                    "context": {
+                        "identityName": "企业法务",
+                        "debtId": "2058923748267257858",
+                    }
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=3) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+        assert response.status == 200
+        assert payload["status"] == "ok"
+        assert payload["speaking_style"] == "数据库法务语气。"
+        assert payload["personaId"] == "4"
+        assert payload["persona_type"] == "习惯性拖延/博弈型"
+        assert payload["identityName"] == "企业法务"
+        assert payload["debtId"] == "2058923748267257858"
+        assert payload["persona_profile"] == "画像策略：强沟通意愿，先确认身份再推进。"
+        assert payload["prompt"]["content_hash"] == "database-hash"
+        assert payload["sensitive_summary"]["amount_in_prompt"] is False
+        assert payload["sensitive_summary"]["amount_disclosure_forbidden"] is True
+        assert preparer.contexts == [
+            {"identityName": "企业法务", "debtId": "2058923748267257858"}
+        ]
+        assert prompt_store.get("browser-preview") is None
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
+def test_browser_test_prompts_endpoint_rejects_non_browser_call_id():
+    prompt_store = BrowserPromptTestStore(ttl_seconds=1800)
+    config = GatewayConfig(server=ServerConfig(host="127.0.0.1", port=0))
+    server = HealthServer(
+        config,
+        call_manager=FakeCallManager(),
+        browser_prompt_store=prompt_store,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.address
+        request = Request(
+            f"http://{host}:{port}/browser-test-prompts",
+            data=json.dumps({"call_id": "real-call-id", "mode": "manual"}).encode(
+                "utf-8"
+            ),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            urlopen(request, timeout=3)
+        except HTTPError as err:
+            payload = json.loads(err.read().decode("utf-8"))
+            assert err.code == 400
+            assert payload["status"] == "error"
+            assert "browser-" in payload["error"]
+        else:
+            raise AssertionError("expected non-browser call id to be rejected")
     finally:
         server.shutdown()
         thread.join(timeout=3)
@@ -253,11 +527,13 @@ def test_root_serves_outbound_test_page():
         assert response.status == 200
         assert "SIP 实时语音网关外呼测试" in body
         assert "外呼测试" in body
+        assert "浏览器对话" in body
         assert "交接文档" in body
         assert "学习笔记" in body
         assert "Mac 接入指导" in body
         assert "推荐AGENT.md" in body
         assert 'href="/outbound-test"' in body
+        assert 'href="/browser-realtime-test"' in body
         assert 'nav class="nav" aria-label="主导航"' in body
         assert "width: min(1360px, calc(100% - 24px))" in body
         assert "width: min(100% - 16px, 1360px)" in body
@@ -267,6 +543,7 @@ def test_root_serves_outbound_test_page():
         assert 'href="/docs/mac-softphone"' in body
         assert 'href="/docs/agent-readme"' in body
         assert body.count('href="/docs/handoff"') == 1
+        assert body.count('href="/browser-realtime-test"') == 1
         assert body.count('href="/docs/notes"') == 1
         assert body.count('href="/docs/mac-softphone"') == 1
         assert body.count('href="/docs/agent-readme"') == 1
@@ -293,6 +570,7 @@ def test_docs_path_redirects_to_handoff_doc():
         assert '<h1 id="section-1">SIP 实时语音网关交接总文档</h1>' in body
         assert "文档入口" not in body
         assert 'href="/docs/handoff"' in body
+        assert 'href="/browser-realtime-test"' in body
         assert 'href="/docs/notes"' in body
         assert 'href="/docs/mac-softphone"' in body
         assert 'href="/docs/agent-readme"' in body
@@ -318,6 +596,7 @@ def test_handoff_doc_is_rendered_as_html():
         assert "SIP 实时语音网关" in body
         assert 'nav class="nav" aria-label="主导航"' in body
         assert 'href="/outbound-test"' in body
+        assert 'href="/browser-realtime-test"' in body
         assert 'class="active" aria-current="page" href="/docs/handoff"' in body
         assert 'href="/docs/notes"' in body
         assert 'href="/docs/mac-softphone"' in body
@@ -352,6 +631,7 @@ def test_notes_doc_is_rendered_from_static_html():
         assert response.status == 200
         assert '<h1 id="section-1">TEN 电话线路接入学习笔记</h1>' in body
         assert 'href="/outbound-test"' in body
+        assert 'href="/browser-realtime-test"' in body
         assert 'href="/docs/handoff"' in body
         assert 'class="active" aria-current="page" href="/docs/notes"' in body
         assert 'href="/docs/mac-softphone"' in body
@@ -381,6 +661,7 @@ def test_mac_softphone_doc_is_rendered_from_static_html():
         assert response.status == 200
         assert '<h1 id="section-1">Mac 软电话接入 9199 本地测试指导</h1>' in body
         assert 'href="/outbound-test"' in body
+        assert 'href="/browser-realtime-test"' in body
         assert 'href="/docs/handoff"' in body
         assert 'href="/docs/notes"' in body
         assert (
@@ -421,6 +702,7 @@ def test_agent_readme_doc_is_rendered_from_static_html():
         assert 'href="#section-6">5. Git 要求</a>' in body
         assert 'href="#section-7">6. 当前项目特别要求</a>' in body
         assert 'href="/outbound-test"' in body
+        assert 'href="/browser-realtime-test"' in body
         assert 'href="/docs/handoff"' in body
         assert 'href="/docs/notes"' in body
         assert 'href="/docs/mac-softphone"' in body
@@ -452,6 +734,11 @@ def test_top_navigation_stays_stable_across_pages():
             mac = response.read().decode("utf-8")
         with urlopen(f"http://{host}:{port}/docs/agent-readme", timeout=3) as response:
             agent = response.read().decode("utf-8")
+        with urlopen(
+            f"http://{host}:{port}/browser-realtime-test",
+            timeout=3,
+        ) as response:
+            browser = response.read().decode("utf-8")
 
         assert _topbar_without_current_page(outbound) == _topbar_without_current_page(
             handoff
@@ -461,6 +748,9 @@ def test_top_navigation_stays_stable_across_pages():
         )
         assert _topbar_without_current_page(notes) == _topbar_without_current_page(mac)
         assert _topbar_without_current_page(mac) == _topbar_without_current_page(agent)
+        assert _topbar_without_current_page(agent) == _topbar_without_current_page(
+            browser
+        )
         assert outbound.index("刷新状态") > outbound.index("</header>")
         assert "刷新状态" not in handoff
         assert "刷新状态" not in notes

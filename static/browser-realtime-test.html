@@ -1,0 +1,1156 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>浏览器对话测试</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f4f6f8;
+        --surface: #ffffff;
+        --panel: #ffffff;
+        --text: #151922;
+        --muted: #667085;
+        --line: #d9dee8;
+        --green: #087443;
+        --green-soft: #e8f5ee;
+        --red: #b42318;
+        --amber: #b54708;
+        --blue: #175cd3;
+        --code: #101828;
+        font-family: Inter, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        border-bottom: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.96);
+        backdrop-filter: blur(10px);
+      }
+
+      .topbar-inner {
+        width: min(1360px, calc(100% - 24px));
+        margin: 0 auto;
+        min-height: 64px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 18px;
+      }
+
+      .brand {
+        display: grid;
+        gap: 2px;
+        min-width: 190px;
+      }
+
+      .brand strong {
+        font-size: 17px;
+        letter-spacing: 0;
+      }
+
+      .brand span {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: flex-end;
+      }
+
+      .nav a {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 96px;
+        min-height: 36px;
+        padding: 0 12px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        color: var(--text);
+        background: var(--surface);
+        text-decoration: none;
+        font-size: 13px;
+        font-weight: 600;
+      }
+
+      .nav a.active {
+        border-color: #8ccfc0;
+        color: #075c44;
+        background: var(--green-soft);
+      }
+
+      .shell {
+        width: min(1360px, calc(100% - 24px));
+        margin: 0 auto;
+        padding: 18px 0 48px;
+      }
+
+      .notice {
+        border: 1px solid #fedf89;
+        background: #fffaeb;
+        color: #7a2e0e;
+        border-radius: 8px;
+        padding: 12px 14px;
+        margin-bottom: 14px;
+        line-height: 1.55;
+      }
+
+      .workspace {
+        display: grid;
+        grid-template-columns: minmax(340px, 0.92fr) minmax(480px, 1.08fr);
+        gap: 14px;
+        align-items: start;
+      }
+
+      .panel {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: 16px;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 26px;
+        line-height: 1.25;
+        letter-spacing: 0;
+      }
+
+      h2 {
+        margin: 0 0 12px;
+        font-size: 17px;
+        letter-spacing: 0;
+      }
+
+      p {
+        margin: 0 0 12px;
+        line-height: 1.6;
+        color: var(--muted);
+      }
+
+      label {
+        display: grid;
+        gap: 6px;
+        margin-bottom: 10px;
+        font-size: 13px;
+        font-weight: 650;
+      }
+
+      .help-text {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 500;
+        line-height: 1.45;
+      }
+
+      .check-line {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        margin: 8px 0 12px;
+      }
+
+      .check-line input {
+        width: auto;
+        margin-top: 3px;
+      }
+
+      .check-line strong {
+        display: block;
+        font-size: 13px;
+      }
+
+      .persona-profile {
+        margin: 2px 0 12px;
+        padding: 12px 0;
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+      }
+
+      .persona-profile-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 6px;
+      }
+
+      .persona-profile-head h3 {
+        margin: 0;
+        font-size: 14px;
+        letter-spacing: 0;
+      }
+
+      .persona-profile-head span {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 1.45;
+        text-align: right;
+      }
+
+      .persona-profile-type {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0 0 8px;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      .persona-profile-type strong {
+        color: var(--text);
+        font-size: 13px;
+        overflow-wrap: anywhere;
+      }
+
+      .persona-profile-text {
+        min-height: 52px;
+        max-height: 132px;
+        margin: 0;
+        overflow: auto;
+        color: var(--text);
+        font-size: 13px;
+        line-height: 1.55;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      input,
+      textarea,
+      select {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 9px 10px;
+        font: inherit;
+        color: var(--text);
+        background: #fff;
+      }
+
+      textarea {
+        min-height: 96px;
+        resize: vertical;
+        line-height: 1.45;
+      }
+
+      .constraint-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+        margin-top: 12px;
+      }
+
+      .constraint-field {
+        margin-bottom: 0;
+      }
+
+      .constraint-field textarea {
+        min-height: 150px;
+      }
+
+      .constraint-field.tall textarea {
+        min-height: 220px;
+      }
+
+      .constraint-field.wide {
+        grid-column: 1 / -1;
+      }
+
+      .constraint-field.wide textarea {
+        min-height: 170px;
+      }
+
+      .constraint-field.speaking-style-field textarea {
+        min-height: 86px;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      button {
+        min-height: 38px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #fff;
+        color: var(--text);
+        padding: 0 12px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      button.primary {
+        background: var(--green);
+        border-color: var(--green);
+        color: #fff;
+      }
+
+      button.danger {
+        color: var(--red);
+        border-color: #fda29b;
+      }
+
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .metric {
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 10px;
+        background: #fbfcfe;
+      }
+
+      .metric span {
+        display: block;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .metric strong {
+        display: block;
+        margin-top: 3px;
+        font-size: 15px;
+        overflow-wrap: anywhere;
+      }
+
+      .badge-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 8px 0 12px;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        min-height: 28px;
+        border-radius: 999px;
+        padding: 0 10px;
+        background: #eff8ff;
+        color: var(--blue);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .badge.warn {
+        background: #fffaeb;
+        color: var(--amber);
+      }
+
+      .badge.ok {
+        background: var(--green-soft);
+        color: var(--green);
+      }
+
+      pre {
+        min-height: 180px;
+        max-height: 420px;
+        overflow: auto;
+        border: 1px solid #263449;
+        border-radius: 8px;
+        padding: 12px;
+        background: #111827;
+        color: #d1fadf;
+        font-size: 12px;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .hidden {
+        display: none;
+      }
+
+      @media (max-width: 980px) {
+        .topbar-inner {
+          align-items: flex-start;
+          flex-direction: column;
+          padding: 10px 0;
+        }
+
+        .nav {
+          width: 100%;
+          justify-content: flex-start;
+        }
+
+        .nav a {
+          flex: 1 1 calc(50% - 4px);
+        }
+
+        .workspace,
+        .constraint-grid,
+        .row {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand">
+          <strong>SIP 实时语音网关</strong>
+          <span>本地 9199 外呼控制台</span>
+        </div>
+        <nav class="nav" aria-label="主导航">
+          <a href="/outbound-test">外呼测试</a>
+          <a class="active" href="/browser-realtime-test" aria-current="page">浏览器对话</a>
+          <a href="/docs/handoff">交接文档</a>
+          <a href="/docs/notes">学习笔记</a>
+          <a href="/docs/mac-softphone">Mac 接入指导</a>
+          <a href="/docs/agent-readme">推荐AGENT.md</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section class="notice">
+        非电话链路验证：本页面绕过 SIP、RTP、FreeSWITCH 和运营商线路，只用于验证模型对话效果和测试公共约束。修改规则后需要创建新的 browser call_id 并重连。
+      </section>
+
+      <section class="workspace">
+        <section class="panel">
+          <h1>浏览器对话测试</h1>
+          <p>先创建测试会话，再连接麦克风。数据库组合模式会读取真实策略、语气、开场白和金额字段。</p>
+
+          <h2>浏览器媒体会话</h2>
+          <label>浏览器会话 ID
+            <span class="help-text">自动生成的 browser call_id，只用于本次页面、WebSocket 和测试 prompt，不是数据库 call_record.id。</span>
+            <input id="callId" autocomplete="off" />
+          </label>
+          <label>WebSocket URL <input id="wsUrl" value="ws://127.0.0.1:9101/media/" /></label>
+          <div class="actions">
+            <button id="newIdButton" type="button">生成浏览器会话 ID</button>
+            <button id="registerButton" class="primary" type="button">创建测试会话</button>
+            <button id="connectButton" class="primary" type="button" disabled>连接并开始说话</button>
+            <button id="disconnectButton" class="danger" type="button" disabled>断开</button>
+          </div>
+
+          <h2 style="margin-top:16px">状态</h2>
+          <div class="metrics">
+            <div class="metric"><span>连接状态</span><strong id="connectionStatus">未连接</strong></div>
+            <div class="metric"><span>麦克风权限</span><strong id="micStatus">未请求</strong></div>
+            <div class="metric"><span>上行帧</span><strong id="uplinkFrames">0</strong></div>
+            <div class="metric"><span>下行帧</span><strong id="downlinkFrames">0</strong></div>
+            <div class="metric"><span>入站 RMS</span><strong id="micRms">0</strong></div>
+            <div class="metric"><span>播放缓冲</span><strong id="playbackBuffer">0 ms</strong></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Prompt Lab</h2>
+          <label>模式
+            <select id="mode">
+              <option value="database" selected>数据库组合模式</option>
+              <option value="manual">手工模式</option>
+            </select>
+          </label>
+          <div id="databaseFields">
+            <div class="row">
+              <label>数据库通话记录 callId（可选）
+                <span class="help-text">来自业务系统或 call_record.id；只用于加载同一债务的历史摘要，不会作为浏览器会话 ID。</span>
+                <input id="businessCallId" placeholder="可留空；需要历史摘要时填业务 call_record.id" />
+              </label>
+              <label>debtId（必填）
+                <span class="help-text">用于读取债务记录、金额、真实 persona_id、策略和语气。</span>
+                <input id="debtId" value="2058923748267257858" />
+              </label>
+            </div>
+            <div class="row">
+              <label>identityName
+                <span class="help-text">用于匹配数字员工身份和该 persona 下的策略。</span>
+                <select id="identityName">
+                  <option value="项目员工" selected>项目员工</option>
+                  <option value="企业客服">企业客服</option>
+                  <option value="企业法务">企业法务</option>
+                  <option value="律师">律师</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <div id="manualFields" class="hidden">
+            <div class="row">
+              <label>员工名称 <input id="employeeName" value="浏览器测试员工" /></label>
+              <label>业主称呼来源 <input id="debtorName" value="金阳" /></label>
+            </div>
+            <div class="row">
+              <label>待处理金额 <input id="debtAmount" value="12.34" /></label>
+              <label>策略 <input id="strategyCore" value="先确认本人，再说明费用。" /></label>
+            </div>
+          </div>
+          <section id="personaProfile" class="persona-profile" aria-label="用户画像">
+            <div class="persona-profile-head">
+              <h3>用户画像</h3>
+              <span id="personaProfileMeta">来自数据库 persona 策略</span>
+            </div>
+            <div class="persona-profile-type">
+              <span>画像类型</span>
+              <strong id="personaTypeValue">待加载</strong>
+            </div>
+            <p id="personaProfileText" class="persona-profile-text">选择 debtId 和 identityName 后加载。</p>
+          </section>
+          <label class="check-line">
+            <input id="openingEnabled" type="checkbox" checked />
+            <span>
+              <strong>生成并播放数据库开场白</strong>
+              <span class="help-text">勾选后，创建测试会话时会按数据库 opening_template 生成音频；浏览器连上媒体 WebSocket 后先播放这段开场白。</span>
+            </span>
+          </label>
+          <h2>程序默认公共约束</h2>
+          <p>下方默认加载当前代码里的公共约束。只发送改动过的约束；未改动的字段不会重复追加到本次 prompt。</p>
+          <label class="constraint-field wide speaking-style-field">speaking_style 覆盖
+            <span class="help-text">用于配置模型对话风格，例如“你说话偏向林黛玉。”、“你口吻拽拽的。”</span>
+            <textarea id="speakingStyle"></textarea>
+          </label>
+          <div class="constraint-grid">
+            <label class="constraint-field tall">规则优先级 <textarea data-section="rule_priority"></textarea></label>
+            <label class="constraint-field tall">高优先级运行红线 <textarea data-section="critical_runtime"></textarea></label>
+            <label class="constraint-field">对话风格 <textarea data-section="dialog_style"></textarea></label>
+            <label class="constraint-field">事实边界 <textarea data-section="fact_boundary"></textarea></label>
+            <label class="constraint-field">身份核实与隐私边界 <textarea data-section="privacy_disclosure"></textarea></label>
+            <label class="constraint-field">金额与争议处理 <textarea data-section="amount_dispute"></textarea></label>
+            <label class="constraint-field wide">物业费场景约束 <textarea data-section="property_fee_scene"></textarea></label>
+            <label class="constraint-field wide">沟通规范 <textarea data-section="communication_norms"></textarea></label>
+            <label class="constraint-field wide">补充测试规则 <textarea data-section="extra"></textarea></label>
+          </div>
+        </section>
+      </section>
+
+      <section class="panel" style="margin-top:14px">
+        <h2>最终 Prompt 预览</h2>
+        <div class="badge-row">
+          <span id="amountBadge" class="badge warn">金额状态未知</span>
+          <span id="privacyBadge" class="badge">通话中禁止说金额</span>
+          <span id="addressBadge" class="badge ok">地址/房号/费用明细不应进入 prompt</span>
+        </div>
+        <pre id="promptPreview">创建测试会话后展示最终拼接提示词。</pre>
+      </section>
+
+      <section class="panel" style="margin-top:14px">
+        <h2>日志</h2>
+        <pre id="logOutput">等待操作...</pre>
+      </section>
+    </main>
+
+    <script>
+      const callIdInput = document.getElementById("callId");
+      const wsUrlInput = document.getElementById("wsUrl");
+      const newIdButton = document.getElementById("newIdButton");
+      const registerButton = document.getElementById("registerButton");
+      const connectButton = document.getElementById("connectButton");
+      const disconnectButton = document.getElementById("disconnectButton");
+      const connectionStatus = document.getElementById("connectionStatus");
+      const micStatus = document.getElementById("micStatus");
+      const uplinkFrames = document.getElementById("uplinkFrames");
+      const downlinkFrames = document.getElementById("downlinkFrames");
+      const micRms = document.getElementById("micRms");
+      const playbackBuffer = document.getElementById("playbackBuffer");
+      const promptPreview = document.getElementById("promptPreview");
+      const logOutput = document.getElementById("logOutput");
+      const modeInput = document.getElementById("mode");
+      const databaseFields = document.getElementById("databaseFields");
+      const manualFields = document.getElementById("manualFields");
+      const businessCallIdInput = document.getElementById("businessCallId");
+      const debtIdInput = document.getElementById("debtId");
+      const identityNameInput = document.getElementById("identityName");
+      const speakingStyleInput = document.getElementById("speakingStyle");
+      const amountBadge = document.getElementById("amountBadge");
+      const privacyBadge = document.getElementById("privacyBadge");
+      const addressBadge = document.getElementById("addressBadge");
+      const personaProfileMeta = document.getElementById("personaProfileMeta");
+      const personaTypeValue = document.getElementById("personaTypeValue");
+      const personaProfileText = document.getElementById("personaProfileText");
+
+      let ws = null;
+      let audioContext = null;
+      let mediaStream = null;
+      let sourceNode = null;
+      let captureNode = null;
+      let playbackNode = null;
+      let silentGain = null;
+      let uplinkCount = 0;
+      let downlinkCount = 0;
+      let promptRegistered = false;
+      let registeringPrompt = false;
+      let mediaPort = 9101;
+      let programDefaultSpeakingStyle = "";
+      let defaultSpeakingStyle = "";
+      const defaultSections = {};
+      const apiBase = location.protocol === "file:" ? "http://127.0.0.1:19100" : "";
+
+      function apiUrl(path) {
+        return `${apiBase}${path}`;
+      }
+
+      function log(message) {
+        const time = new Date().toLocaleTimeString();
+        logOutput.textContent = `[${time}] ${message}\n` + logOutput.textContent;
+      }
+
+      function makeCallId() {
+        const stamp = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
+        const random = Math.random().toString(16).slice(2, 8);
+        return `browser-${stamp}-${random}`;
+      }
+
+      function mediaWebSocketUrl(callId) {
+        if (location.protocol === "https:") {
+          return `wss://${location.host}/media/${callId}`;
+        }
+        const host = location.hostname || "127.0.0.1";
+        return `ws://${host}:${mediaPort}/media/${callId}`;
+      }
+
+      function updateWsUrl() {
+        wsUrlInput.value = mediaWebSocketUrl(callIdInput.value.trim());
+      }
+
+      async function loadReadyConfig() {
+        try {
+          const response = await fetch(apiUrl("/ready"), { cache: "no-store" });
+          const payload = await response.json();
+          const port = payload?.config?.freeswitch?.media_port;
+          if (Number.isInteger(port) && port > 0) {
+            mediaPort = port;
+            updateWsUrl();
+            log(`已读取媒体端口：${mediaPort}`);
+          }
+        } catch (error) {
+          log(`读取 /ready 失败，继续使用默认媒体端口：${error.message}`);
+        }
+      }
+
+      async function loadPromptDefaults() {
+        try {
+          const response = await fetch(apiUrl("/browser-test-prompts/defaults"), { cache: "no-store" });
+          const payload = await response.json();
+          programDefaultSpeakingStyle = payload.speaking_style || "";
+          defaultSpeakingStyle = programDefaultSpeakingStyle;
+          speakingStyleInput.value = defaultSpeakingStyle;
+          for (const [name, value] of Object.entries(payload.sections || {})) {
+            defaultSections[name] = String(value || "");
+            const node = document.querySelector(`[data-section="${name}"]`);
+            if (node) node.value = defaultSections[name];
+          }
+          log("已加载程序默认公共约束");
+          await loadDatabaseSpeakingStyle();
+        } catch (error) {
+          log(`加载公共约束失败：${error.message}`);
+        }
+      }
+
+      function sectionLines(name) {
+        const node = document.querySelector(`[data-section="${name}"]`);
+        return node.value.split("\n").map((line) => line.trim()).filter(Boolean);
+      }
+
+      function normalizedText(value) {
+        return String(value || "").split("\n").map((line) => line.trim()).filter(Boolean).join("\n");
+      }
+
+      function speakingStyleDirty() {
+        return normalizedText(speakingStyleInput.value) !== normalizedText(defaultSpeakingStyle);
+      }
+
+      function databaseContextPayload() {
+        return {
+          callId: businessCallIdInput.value.trim(),
+          debtId: debtIdInput.value.trim(),
+          identityName: identityNameInput.value.trim(),
+        };
+      }
+
+      function renderPersonaProfile(payload, errorMessage = "") {
+        const metadata = payload?.prompt?.metadata || {};
+        const identityName = payload?.identityName || metadata.identityName || identityNameInput.value || "-";
+        const personaId = payload?.personaId || metadata.personaId || "-";
+        const personaType = payload?.persona_type || metadata.persona_type || metadata.personaType || "";
+        const profile = normalizedText(payload?.persona_profile || metadata.strategy_core || "");
+        if (modeInput.value !== "database") {
+          personaProfileMeta.textContent = "手工模式";
+          personaTypeValue.textContent = "不适用";
+          personaProfileText.textContent = "手工模式不读取数据库用户画像。";
+          return;
+        }
+        personaProfileMeta.textContent = `来自数据库 persona 策略 · ${identityName} · persona ${personaId}`;
+        personaTypeValue.textContent = personaType || (personaId === "-" ? "未知" : `persona ${personaId}`);
+        if (profile) {
+          personaProfileText.textContent = profile;
+        } else if (errorMessage) {
+          personaProfileText.textContent = `用户画像加载失败：${errorMessage}`;
+        } else {
+          personaProfileText.textContent = "暂无数据库用户画像；请检查 debtId、identityName 或 persona 策略配置。";
+        }
+      }
+
+      async function loadDatabaseSpeakingStyle() {
+        if (modeInput.value !== "database") return;
+        const context = databaseContextPayload();
+        if (!context.debtId || !context.identityName) return;
+        const keepManualValue = speakingStyleDirty();
+        try {
+          const payload = await postJson("/browser-test-prompts/database-preview", { context });
+          const databaseStyle = payload.speaking_style || programDefaultSpeakingStyle;
+          defaultSpeakingStyle = databaseStyle;
+          if (!keepManualValue) speakingStyleInput.value = databaseStyle;
+          renderPersonaProfile(payload);
+          log(`已加载数据库 speaking_style：${payload.identityName || context.identityName} / persona ${payload.personaId || "-"}`);
+        } catch (error) {
+          defaultSpeakingStyle = programDefaultSpeakingStyle;
+          if (!keepManualValue) speakingStyleInput.value = programDefaultSpeakingStyle;
+          renderPersonaProfile(null, error.message);
+          log(`加载数据库 speaking_style 失败：${error.message}`);
+        }
+      }
+
+      function changedSections() {
+        const result = {};
+        for (const name of ["rule_priority", "critical_runtime", "dialog_style", "fact_boundary", "privacy_disclosure", "amount_dispute", "property_fee_scene", "communication_norms", "extra"]) {
+          const node = document.querySelector(`[data-section="${name}"]`);
+          if (!node) continue;
+          if (normalizedText(node.value) !== normalizedText(defaultSections[name])) {
+            result[name] = sectionLines(name);
+          }
+        }
+        return result;
+      }
+
+      function promptPayload() {
+        const mode = modeInput.value;
+        const payload = {
+          call_id: callIdInput.value.trim(),
+          mode,
+          opening: { enabled: document.getElementById("openingEnabled").checked },
+          overrides: {
+            sections: changedSections(),
+          },
+        };
+        const speakingStyle = speakingStyleInput.value.trim();
+        if (normalizedText(speakingStyle) !== normalizedText(defaultSpeakingStyle)) {
+          payload.overrides.speaking_style = speakingStyle;
+        }
+        if (mode === "database") {
+          payload.context = databaseContextPayload();
+        } else {
+          payload.employee_name = document.getElementById("employeeName").value.trim();
+          payload.identityName = identityNameInput.value.trim();
+          payload.debtor_name = document.getElementById("debtorName").value.trim();
+          payload.debtor_gender = "女";
+          payload.debt_amount = document.getElementById("debtAmount").value.trim();
+          payload.strategy_core = document.getElementById("strategyCore").value.trim();
+        }
+        return payload;
+      }
+
+      async function postJson(url, payload) {
+        const response = await fetch(apiUrl(url), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(body.error || `${response.status} ${response.statusText}`);
+        }
+        return body;
+      }
+
+      function renderRegistration(payload) {
+        renderPersonaProfile(payload);
+        promptPreview.textContent = payload.prompt.preview || "";
+        amountBadge.textContent = payload.sensitive_summary.amount_in_prompt
+          ? "金额仍在 prompt"
+          : "金额未进入 prompt";
+        amountBadge.className = payload.sensitive_summary.amount_in_prompt
+          ? "badge warn"
+          : "badge";
+        privacyBadge.className = payload.sensitive_summary.amount_disclosure_forbidden
+          ? "badge ok"
+          : "badge warn";
+        addressBadge.className = payload.sensitive_summary.address_room_detail_excluded
+          ? "badge ok"
+          : "badge warn";
+      }
+
+      function floatToInt16Pcm(floatSamples) {
+        const buffer = new ArrayBuffer(floatSamples.length * 2);
+        const view = new DataView(buffer);
+        for (let index = 0; index < floatSamples.length; index += 1) {
+          const sample = Math.max(-1, Math.min(1, floatSamples[index]));
+          view.setInt16(index * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+        }
+        return buffer;
+      }
+
+      function pcmToFloat32(buffer) {
+        const view = new DataView(buffer);
+        const samples = new Float32Array(buffer.byteLength / 2);
+        for (let index = 0; index < samples.length; index += 1) {
+          samples[index] = view.getInt16(index * 2, true) / 0x8000;
+        }
+        return samples;
+      }
+
+      function rms(samples) {
+        if (!samples.length) return 0;
+        let sum = 0;
+        for (const sample of samples) sum += sample * sample;
+        return Math.sqrt(sum / samples.length);
+      }
+
+      function captureWorkletUrl() {
+        const code = `
+          class CaptureProcessor extends AudioWorkletProcessor {
+            constructor() {
+              super();
+              this.pending = [];
+              this.sourceRate = sampleRate;
+              this.targetRate = 8000;
+              this.step = this.sourceRate / this.targetRate;
+              this.cursor = 0;
+            }
+            process(inputs) {
+              const input = inputs[0];
+              if (!input || !input[0]) return true;
+              const left = input[0];
+              const right = input[1];
+              while (this.cursor < left.length) {
+                const index = Math.floor(this.cursor);
+                const sample = right ? (left[index] + right[index]) / 2 : left[index];
+                this.pending.push(sample || 0);
+                this.cursor += this.step;
+                if (this.pending.length === 160) {
+                  const frame = new Float32Array(this.pending);
+                  this.pending = [];
+                  this.port.postMessage(frame, [frame.buffer]);
+                }
+              }
+              this.cursor -= left.length;
+              return true;
+            }
+          }
+          registerProcessor("capture-processor", CaptureProcessor);
+        `;
+        return URL.createObjectURL(new Blob([code], { type: "application/javascript" }));
+      }
+
+      function playbackWorkletUrl() {
+        const code = `
+          class PlaybackProcessor extends AudioWorkletProcessor {
+            constructor() {
+              super();
+              this.queue = [];
+              this.current = null;
+              this.sourceRate = 8000;
+              this.step = this.sourceRate / sampleRate;
+              this.readPosition = 0;
+              this.bufferedSourceSamples = 0;
+              this.started = false;
+              this.startThresholdSamples = 640;
+              this.reportCountdown = 0;
+              this.port.onmessage = (event) => {
+                const data = event.data || {};
+                if (data.type === "reset") {
+                  this.queue = [];
+                  this.current = null;
+                  this.readPosition = 0;
+                  this.bufferedSourceSamples = 0;
+                  this.started = false;
+                  this.port.postMessage({ type: "buffer", ms: 0 });
+                  return;
+                }
+                if (data.type === "frame" && data.frame) {
+                  this.queue.push(data.frame);
+                  this.bufferedSourceSamples += data.frame.length;
+                  if (this.bufferedSourceSamples >= this.startThresholdSamples) {
+                    this.started = true;
+                  }
+                }
+              };
+            }
+
+            process(inputs, outputs) {
+              const output = outputs[0] && outputs[0][0];
+              if (!output) return true;
+
+              for (let index = 0; index < output.length; index += 1) {
+                if (!this.started) {
+                  output[index] = 0;
+                  continue;
+                }
+                if (!this.current) {
+                  this.current = this.queue.shift() || null;
+                  this.readPosition = 0;
+                }
+                if (!this.current) {
+                  output[index] = 0;
+                  this.started = false;
+                  continue;
+                }
+
+                while (this.current && this.readPosition >= this.current.length) {
+                  this.readPosition -= this.current.length;
+                  this.current = this.queue.shift() || null;
+                }
+                if (!this.current) {
+                  output[index] = 0;
+                  this.started = false;
+                  continue;
+                }
+
+                const leftIndex = Math.floor(this.readPosition);
+                const rightIndex = leftIndex + 1;
+                const left = this.current[leftIndex] || 0;
+                const right = rightIndex < this.current.length
+                  ? this.current[rightIndex]
+                  : (this.queue[0] ? this.queue[0][0] : left);
+                const fraction = this.readPosition - leftIndex;
+                output[index] = left + (right - left) * fraction;
+                this.readPosition += this.step;
+                this.bufferedSourceSamples = Math.max(
+                  0,
+                  this.bufferedSourceSamples - this.step
+                );
+              }
+
+              this.reportCountdown -= 1;
+              if (this.reportCountdown <= 0) {
+                this.reportCountdown = 12;
+                this.port.postMessage({
+                  type: "buffer",
+                  ms: Math.round((this.bufferedSourceSamples / this.sourceRate) * 1000),
+                });
+              }
+              return true;
+            }
+          }
+          registerProcessor("playback-processor", PlaybackProcessor);
+        `;
+        return URL.createObjectURL(new Blob([code], { type: "application/javascript" }));
+      }
+
+      async function connectMedia() {
+        if (!promptRegistered) {
+          log("请先创建测试会话");
+          return;
+        }
+        connectionStatus.textContent = "连接中";
+        uplinkCount = 0;
+        downlinkCount = 0;
+        uplinkFrames.textContent = "0";
+        downlinkFrames.textContent = "0";
+        audioContext = new AudioContext({ latencyHint: "interactive" });
+        await audioContext.audioWorklet.addModule(captureWorkletUrl());
+        await audioContext.audioWorklet.addModule(playbackWorkletUrl());
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+        micStatus.textContent = "已授权";
+        sourceNode = audioContext.createMediaStreamSource(mediaStream);
+        captureNode = new AudioWorkletNode(audioContext, "capture-processor");
+        playbackNode = new AudioWorkletNode(audioContext, "playback-processor", {
+          numberOfInputs: 0,
+          numberOfOutputs: 1,
+          outputChannelCount: [1],
+        });
+        playbackNode.port.onmessage = (event) => {
+          const data = event.data || {};
+          if (data.type === "buffer") playbackBuffer.textContent = `${data.ms} ms`;
+        };
+        playbackNode.connect(audioContext.destination);
+        silentGain = audioContext.createGain();
+        silentGain.gain.value = 0;
+        sourceNode.connect(captureNode);
+        captureNode.connect(silentGain).connect(audioContext.destination);
+        await audioContext.resume();
+        ws = new WebSocket(wsUrlInput.value.trim());
+        ws.binaryType = "arraybuffer";
+        ws.addEventListener("open", () => {
+          connectionStatus.textContent = "已连接";
+          disconnectButton.disabled = false;
+          connectButton.disabled = true;
+          log("媒体 WebSocket 已连接");
+        });
+        ws.addEventListener("message", (event) => {
+          if (typeof event.data === "string") {
+            log(`控制消息：${event.data}`);
+            return;
+          }
+          downlinkCount += 1;
+          downlinkFrames.textContent = String(downlinkCount);
+          const frame = pcmToFloat32(event.data);
+          if (playbackNode) {
+            playbackNode.port.postMessage({ type: "frame", frame }, [frame.buffer]);
+          }
+        });
+        ws.addEventListener("close", () => {
+          connectionStatus.textContent = "已断开";
+          disconnectButton.disabled = true;
+          connectButton.disabled = false;
+          log("媒体 WebSocket 已断开");
+        });
+        ws.addEventListener("error", () => {
+          connectionStatus.textContent = "错误";
+          log("媒体 WebSocket 错误");
+        });
+        captureNode.port.onmessage = (event) => {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          if (ws.bufferedAmount > 320 * 20) return;
+          const samples = event.data;
+          micRms.textContent = rms(samples).toFixed(4);
+          ws.send(floatToInt16Pcm(samples));
+          uplinkCount += 1;
+          uplinkFrames.textContent = String(uplinkCount);
+        };
+      }
+
+      async function disconnectMedia() {
+        if (ws) {
+          ws.close();
+          ws = null;
+        }
+        if (playbackNode) {
+          playbackNode.port.postMessage({ type: "reset" });
+          playbackNode.disconnect();
+          playbackNode = null;
+        }
+        if (mediaStream) {
+          for (const track of mediaStream.getTracks()) track.stop();
+          mediaStream = null;
+        }
+        if (audioContext) {
+          await audioContext.close().catch(() => {});
+          audioContext = null;
+        }
+        sourceNode = null;
+        captureNode = null;
+        silentGain = null;
+        disconnectButton.disabled = true;
+        connectButton.disabled = !promptRegistered;
+        connectionStatus.textContent = "已断开";
+        playbackBuffer.textContent = "0 ms";
+      }
+
+      newIdButton.addEventListener("click", () => {
+        callIdInput.value = makeCallId();
+        promptRegistered = false;
+        connectButton.disabled = true;
+        updateWsUrl();
+        log("已生成新的浏览器会话 ID");
+      });
+
+      callIdInput.addEventListener("input", () => {
+        promptRegistered = false;
+        connectButton.disabled = true;
+        updateWsUrl();
+      });
+
+      modeInput.addEventListener("change", () => {
+        const databaseMode = modeInput.value === "database";
+        const keepManualValue = speakingStyleDirty();
+        databaseFields.classList.toggle("hidden", !databaseMode);
+        manualFields.classList.toggle("hidden", databaseMode);
+        if (databaseMode) {
+          loadDatabaseSpeakingStyle();
+        } else {
+          defaultSpeakingStyle = programDefaultSpeakingStyle;
+          if (!keepManualValue) speakingStyleInput.value = programDefaultSpeakingStyle;
+          renderPersonaProfile(null);
+        }
+      });
+
+      businessCallIdInput.addEventListener("change", loadDatabaseSpeakingStyle);
+      debtIdInput.addEventListener("change", loadDatabaseSpeakingStyle);
+      identityNameInput.addEventListener("change", loadDatabaseSpeakingStyle);
+
+      registerButton.addEventListener("click", async () => {
+        if (registeringPrompt) return;
+        registeringPrompt = true;
+        registerButton.disabled = true;
+        const previousRegisterButtonText = registerButton.textContent;
+        registerButton.textContent = "创建中...";
+        try {
+          updateWsUrl();
+          const payload = await postJson("/browser-test-prompts", promptPayload());
+          promptRegistered = true;
+          connectButton.disabled = false;
+          renderRegistration(payload);
+          log(`测试会话已创建：${payload.call_id} / ${payload.prompt.content_hash}`);
+          if (payload.opening && payload.opening.status !== "disabled") {
+            log(`开场白状态：${payload.opening.status}`);
+          }
+          for (const warning of payload.warnings || []) log(`提示：${warning}`);
+        } catch (error) {
+          promptRegistered = false;
+          connectButton.disabled = true;
+          log(`创建测试会话失败：${error.message}`);
+        } finally {
+          registeringPrompt = false;
+          registerButton.disabled = false;
+          registerButton.textContent = previousRegisterButtonText;
+        }
+      });
+
+      connectButton.addEventListener("click", async () => {
+        try {
+          await connectMedia();
+        } catch (error) {
+          connectionStatus.textContent = "错误";
+          micStatus.textContent = "失败";
+          log(`连接失败：${error.message}`);
+          await disconnectMedia();
+        }
+      });
+
+      disconnectButton.addEventListener("click", () => {
+        disconnectMedia();
+      });
+
+      callIdInput.value = makeCallId();
+      updateWsUrl();
+      loadReadyConfig();
+      loadPromptDefaults();
+    </script>
+  </body>
+</html>

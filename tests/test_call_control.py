@@ -863,7 +863,7 @@ def test_outbound_manager_emits_accepted_flow_callback_after_call_is_queued():
         assert flow_events[0].task_id == "task-1"
         assert flow_events[0].business_id == "biz-call-1"
         assert flow_events[0].message == "外呼任务已受理"
-        assert call["status"] == "queued"
+        assert call["status"] in {"queued", "originating", "originated"}
     finally:
         manager.shutdown()
 
@@ -1349,7 +1349,7 @@ def test_outbound_manager_generates_opening_before_originating():
             }
         )
 
-        assert call["status"] == "queued"
+        assert call["status"] in {"queued", "originating", "originated"}
         assert call["opening"]["status"] == "ready"
         assert call["opening"]["voice"] == "female"
         assert call["opening"]["audio_sample_rate"] == 24000

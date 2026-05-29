@@ -483,6 +483,104 @@ def test_outbound_manager_ignores_late_transcript_updates_after_completed():
         manager.shutdown()
 
 
+def test_outbound_manager_ignores_late_transcript_success_after_failed_callback():
+    enqueued_payloads = []
+    flow_events: list[FlowCallbackEvent] = []
+
+    class FakeCallResultWriter:
+        def enqueue_nowait(self, payload):
+            enqueued_payloads.append(payload)
+            return True
+
+    class FakeFlowCallbackWriter:
+        def publish(self, event):
+            flow_events.append(event)
+            return True
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            return "+OK agent-uuid-1"
+
+        async def break_audio_stream(self, call_id: str) -> str:
+            return "+OK"
+
+        async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
+            return "+OK uuid_bridge accepted"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+        call_result_writer=FakeCallResultWriter(),
+        flow_callback_writer=FakeFlowCallbackWriter(),
+    )
+
+    try:
+        call = manager.create_call(
+            {
+                "destination": "1000",
+                "context": {
+                    "tenantId": "000000",
+                    "taskId": "task-1",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            }
+        )
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=call_id)
+        )
+        manager.request_handoff(call_id, {"last_utterance": "我要转人工"})
+        manager.claim_handoff(
+            call_id,
+            {"agent_extension": "1001", "agent_uuid": "agent-uuid-1"},
+        )
+        manager.handle_channel_event(
+            ChannelStateEvent(
+                name="CHANNEL_HANGUP_COMPLETE",
+                call_id=call_id,
+                hangup_cause="NORMAL_CLEARING",
+            )
+        )
+
+        failed_call = manager.complete_handoff_transcript(
+            call_id,
+            {"status": "failed", "error": "asr unavailable"},
+        )
+        late_success_call = manager.complete_handoff_transcript(
+            call_id,
+            {
+                "turns": [
+                    {
+                        "role": "assistant",
+                        "speaker_type": "human_agent",
+                        "text": "迟到的成功转写。",
+                    }
+                ]
+            },
+        )
+
+        assert failed_call["handoff"]["human_transcript_status"] == "failed"
+        assert late_success_call["handoff"]["human_transcript_status"] == "failed"
+        assert late_success_call["handoff"]["human_transcript_error"] == (
+            "asr unavailable"
+        )
+        assert enqueued_payloads == []
+        assert [event.status for event in flow_events] == ["ACCEPTED", "FAILED"]
+    finally:
+        manager.shutdown()
+
+
 def test_outbound_manager_rejects_handoff_transcript_before_human_hangup():
     class FakeDialer:
         async def resolve_endpoint(self, endpoint: str) -> str:
@@ -982,6 +1080,176 @@ def test_outbound_manager_marks_handoff_transcript_failed_when_processor_fails()
 
         final_call = _wait_for_handoff_transcript_status(manager, call_id, "failed")
         assert final_call["handoff"]["human_transcript_error"] == "asr unavailable"
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_emits_failed_flow_callback_when_handoff_asr_fails():
+    flow_events: list[FlowCallbackEvent] = []
+
+    class FakeFlowCallbackWriter:
+        def publish(self, event):
+            flow_events.append(event)
+            return True
+
+    class BrokenProcessor:
+        def process(self, job):
+            raise RuntimeError("asr unavailable")
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            return "+OK agent-uuid-1"
+
+        async def break_audio_stream(self, call_id: str) -> str:
+            return "+OK"
+
+        async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
+            return "+OK uuid_bridge accepted"
+
+        async def start_recording(self, channel_uuid: str, path: str) -> str:
+            return "+OK Success"
+
+        async def stop_recording(self, channel_uuid: str, path: str) -> str:
+            return "+OK Success"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+            features=FeatureConfig(recording_enabled=True),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+        flow_callback_writer=FakeFlowCallbackWriter(),
+        handoff_transcript_processor=BrokenProcessor(),
+    )
+
+    try:
+        call = manager.create_call(
+            {
+                "destination": "1000",
+                "context": {
+                    "tenantId": "000000",
+                    "taskId": "task-1",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            }
+        )
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=call_id)
+        )
+        manager.request_handoff(call_id, {"last_utterance": "我要转人工"})
+        manager.claim_handoff(
+            call_id,
+            {"agent_extension": "1001", "agent_uuid": "agent-uuid-1"},
+        )
+        manager.handle_channel_event(
+            ChannelStateEvent(
+                name="CHANNEL_HANGUP_COMPLETE",
+                call_id=call_id,
+                hangup_cause="NORMAL_CLEARING",
+            )
+        )
+
+        _wait_for_handoff_transcript_status(manager, call_id, "failed")
+        _wait_for_flow_event_count(flow_events, 2)
+        assert [event.status for event in flow_events] == ["ACCEPTED", "FAILED"]
+        assert flow_events[-1].task_id == "task-1"
+        assert flow_events[-1].business_id == "990000000000032001"
+        assert flow_events[-1].message == "人工转写失败"
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_emits_failed_flow_callback_when_handoff_recording_fails():
+    flow_events: list[FlowCallbackEvent] = []
+
+    class FakeFlowCallbackWriter:
+        def publish(self, event):
+            flow_events.append(event)
+            return True
+
+    class FakeProcessor:
+        def process(self, job):
+            raise AssertionError("processor should not run when recording fails")
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            return "+OK agent-uuid-1"
+
+        async def break_audio_stream(self, call_id: str) -> str:
+            return "+OK"
+
+        async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
+            return "+OK uuid_bridge accepted"
+
+        async def start_recording(self, channel_uuid: str, path: str) -> str:
+            return "+OK Success"
+
+        async def stop_recording(self, channel_uuid: str, path: str) -> str:
+            return "-ERR disk full"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+            features=FeatureConfig(recording_enabled=True),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+        flow_callback_writer=FakeFlowCallbackWriter(),
+        handoff_transcript_processor=FakeProcessor(),
+    )
+
+    try:
+        call = manager.create_call(
+            {
+                "destination": "1000",
+                "context": {
+                    "tenantId": "000000",
+                    "taskId": "task-1",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            }
+        )
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=call_id)
+        )
+        manager.request_handoff(call_id, {"last_utterance": "我要转人工"})
+        manager.claim_handoff(
+            call_id,
+            {"agent_extension": "1001", "agent_uuid": "agent-uuid-1"},
+        )
+        manager.handle_channel_event(
+            ChannelStateEvent(
+                name="CHANNEL_HANGUP_COMPLETE",
+                call_id=call_id,
+                hangup_cause="NORMAL_CLEARING",
+            )
+        )
+
+        _wait_for_handoff_transcript_status(manager, call_id, "failed")
+        _wait_for_flow_event_count(flow_events, 2)
+        assert [event.status for event in flow_events] == ["ACCEPTED", "FAILED"]
+        assert flow_events[-1].task_id == "task-1"
+        assert flow_events[-1].business_id == "990000000000032001"
+        assert flow_events[-1].message == "人工转写失败"
     finally:
         manager.shutdown()
 
@@ -2661,3 +2929,12 @@ def _wait_for_writer_event_count(events: list, count: int) -> None:
             return
         time.sleep(0.02)
     raise AssertionError(f"writer events did not reach {count}: {events!r}")
+
+
+def _wait_for_flow_event_count(events: list, count: int) -> None:
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if len(events) >= count:
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"flow events did not reach {count}: {events!r}")

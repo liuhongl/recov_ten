@@ -98,6 +98,7 @@ class HandoffState:
     bridge_reply: str | None = None
     human_transcript_status: str | None = None
     human_transcript_error: str | None = None
+    terminal_callback_status: str | None = None
     recording_status: str | None = None
     recording_error: str | None = None
     customer_recording_path: str | None = None
@@ -593,6 +594,7 @@ class OutboundCallManager:
         sync_business_id: str | None = None
         sync_status: str | None = None
         stop_handoff_recording_call_id: str | None = None
+        handoff_failed_callback: tuple[dict[str, Any], str | None] | None = None
         with self._lock:
             record = self._calls.get(event.call_id)
             if record is None:
@@ -611,11 +613,14 @@ class OutboundCallManager:
                 record.handoff.recording_status = "stopping"
                 record.handoff.updated_at_ms = _now_ms()
                 stop_handoff_recording_call_id = record.call_id
+            handoff_failed_callback = self._handoff_failed_callback_locked(record)
         if stop_handoff_recording_call_id is not None:
             self._executor.submit(
                 self._run_stop_handoff_recording_worker,
                 stop_handoff_recording_call_id,
             )
+        if handoff_failed_callback is not None:
+            self._publish_handoff_failed_callback(*handoff_failed_callback)
         if self._sync_call_record_terminal(sync_context, sync_status):
             self._publish_flow_callback(
                 sync_context or {},
@@ -738,6 +743,7 @@ class OutboundCallManager:
         if status not in {"completed", "failed"}:
             raise CallControlError("status must be completed or failed")
 
+        handoff_failed_callback: tuple[dict[str, Any], str | None] | None = None
         with self._lock:
             record = self._calls.get(call_id)
             if record is None:
@@ -753,6 +759,8 @@ class OutboundCallManager:
                 raise CallControlError("human handoff is not active", status_code=409)
             if record.handoff.human_transcript_status == "completed":
                 return record.to_dict()
+            if record.handoff.terminal_callback_status == "FAILED":
+                return record.to_dict()
 
             now_ms = _now_ms()
             record.handoff.human_ended_at_ms = (
@@ -763,20 +771,28 @@ class OutboundCallManager:
                 record.handoff.human_transcript_status = "failed"
                 record.handoff.human_transcript_error = _optional_str(payload, "error")
                 record.updated_at_ms = now_ms
-                return record.to_dict()
+                handoff_failed_callback = self._handoff_failed_callback_locked(record)
+                call_payload = record.to_dict()
+            else:
+                human_turns = _normalize_transcript_turns(payload.get("turns"))
+                if not human_turns:
+                    raise CallControlError(
+                        "turns must include at least one human transcript turn"
+                    )
+                record.handoff.human_turns = human_turns
+                record.handoff.human_transcript_status = "completed"
+                record.handoff.human_transcript_error = None
+                result_payload = {
+                    "call_id": record.call_id,
+                    "context": dict(record.context),
+                    "turns": [*record.handoff.ai_turns, *record.handoff.human_turns],
+                }
+                call_payload = record.to_dict()
 
-            human_turns = _normalize_transcript_turns(payload.get("turns"))
-            if not human_turns:
-                raise CallControlError("turns must include at least one human transcript turn")
-            record.handoff.human_turns = human_turns
-            record.handoff.human_transcript_status = "completed"
-            record.handoff.human_transcript_error = None
-            result_payload = {
-                "call_id": record.call_id,
-                "context": dict(record.context),
-                "turns": [*record.handoff.ai_turns, *record.handoff.human_turns],
-            }
-            call_payload = record.to_dict()
+        if status == "failed":
+            if handoff_failed_callback is not None:
+                self._publish_handoff_failed_callback(*handoff_failed_callback)
+            return call_payload
 
         if self._call_result_writer is None:
             LOGGER.warning(
@@ -1075,6 +1091,7 @@ class OutboundCallManager:
                 errors.append(reply)
 
         should_process_transcript = False
+        handoff_failed_callback: tuple[dict[str, Any], str | None] | None = None
         with self._lock:
             record = self._calls.get(call_id)
             if record is None or record.handoff is None:
@@ -1091,11 +1108,14 @@ class OutboundCallManager:
                     record.handoff.human_transcript_error = (
                         f"recording failed: {recording_error}"
                     )
+                handoff_failed_callback = self._handoff_failed_callback_locked(record)
             else:
                 record.handoff.recording_status = "completed"
                 record.handoff.recording_error = None
                 should_process_transcript = True
 
+        if handoff_failed_callback is not None:
+            self._publish_handoff_failed_callback(*handoff_failed_callback)
         if should_process_transcript:
             self._maybe_submit_handoff_transcript_processor(call_id)
 
@@ -1207,6 +1227,7 @@ class OutboundCallManager:
             self._set_status_locked(record, "handoff_failed")
 
     def _mark_handoff_recording_failed(self, call_id: str, error: str) -> None:
+        handoff_failed_callback: tuple[dict[str, Any], str | None] | None = None
         with self._lock:
             record = self._calls.get(call_id)
             if record is None or record.handoff is None:
@@ -1218,6 +1239,9 @@ class OutboundCallManager:
                 record.handoff.human_transcript_error = f"recording failed: {error}"
             record.handoff.updated_at_ms = _now_ms()
             record.updated_at_ms = record.handoff.updated_at_ms
+            handoff_failed_callback = self._handoff_failed_callback_locked(record)
+        if handoff_failed_callback is not None:
+            self._publish_handoff_failed_callback(*handoff_failed_callback)
 
     def _maybe_submit_handoff_transcript_processor(self, call_id: str) -> None:
         if self._handoff_transcript_processor is None:
@@ -1284,6 +1308,7 @@ class OutboundCallManager:
             self._mark_handoff_transcript_failed(call_id, str(err))
 
     def _mark_handoff_transcript_failed(self, call_id: str, error: str) -> None:
+        handoff_failed_callback: tuple[dict[str, Any], str | None] | None = None
         with self._lock:
             record = self._calls.get(call_id)
             if record is None or record.handoff is None:
@@ -1292,6 +1317,39 @@ class OutboundCallManager:
             record.handoff.human_transcript_error = error
             record.handoff.updated_at_ms = _now_ms()
             record.updated_at_ms = record.handoff.updated_at_ms
+            handoff_failed_callback = self._handoff_failed_callback_locked(record)
+        if handoff_failed_callback is not None:
+            self._publish_handoff_failed_callback(*handoff_failed_callback)
+
+    def _handoff_failed_callback_locked(
+        self,
+        record: OutboundCallRecord,
+    ) -> tuple[dict[str, Any], str | None] | None:
+        handoff = record.handoff
+        if handoff is None:
+            return None
+        if handoff.state != "completed":
+            return None
+        if handoff.human_transcript_status != "failed":
+            return None
+        if handoff.terminal_callback_status is not None:
+            return None
+        handoff.terminal_callback_status = "FAILED"
+        handoff.updated_at_ms = _now_ms()
+        record.updated_at_ms = handoff.updated_at_ms
+        return dict(record.context), _business_id(record)
+
+    def _publish_handoff_failed_callback(
+        self,
+        context: dict[str, Any],
+        business_id: str | None,
+    ) -> None:
+        self._publish_flow_callback(
+            context,
+            status="FAILED",
+            message="人工转写失败",
+            business_id=business_id,
+        )
 
     def _mark_failed(self, call_id: str, error: str) -> None:
         failed_context = None

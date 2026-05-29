@@ -659,7 +659,9 @@ Content-Type: application/json
 
 ```text
 如果 analysis_result 强依赖完整 transcript，ASR 失败不能假装成功。
-第一版需要标记 human_transcript_status=failed，并在 Java 侧走人工复核或重试任务。
+第一版需要标记 human_transcript_status=failed，并向 Java 回调 FAILED。
+同一通电话只允许一个终态 callback；FAILED 发出后，迟到的成功 transcript 不能再覆盖终态。
+Java 侧收到 FAILED 后走人工复核或重试任务。
 后续如果补建 gateway_call_detail，再把失败状态同步到 payload。
 ```
 

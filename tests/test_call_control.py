@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import threading
 import time
 
 import pytest
@@ -31,7 +34,11 @@ from app.opening import (
 )
 from app.audio_codec import samples_to_pcm_s16le
 from app.flow_callback import FlowCallbackEvent
-from app.postgres import BusinessPromptPreparation, PromptSnapshot
+from app.postgres import (
+    BusinessPromptPreparation,
+    PostgresCallResultWriter,
+    PromptSnapshot,
+)
 
 
 def test_build_originate_command_uses_local_dialplan():
@@ -875,6 +882,179 @@ def test_outbound_manager_marks_handoff_transcript_failed_when_processor_fails()
         assert final_call["handoff"]["human_transcript_error"] == "asr unavailable"
     finally:
         manager.shutdown()
+
+
+def test_outbound_manager_auto_transcript_writes_record_before_success_callback():
+    writer_events = []
+
+    class Store:
+        async def mark_transcript_completed(self, context, transcript_json):
+            writer_events.append(
+                ("store", dict(context), json.loads(transcript_json))
+            )
+            return True
+
+    class FakeFlowCallbackWriter:
+        def publish(self, event: FlowCallbackEvent):
+            writer_events.append(("callback", event))
+            return True
+
+    writer = PostgresCallResultWriter(
+        Store(),
+        flow_callback_writer=FakeFlowCallbackWriter(),
+    )
+    loop = asyncio.new_event_loop()
+    writer_ready = threading.Event()
+
+    def run_writer_loop():
+        asyncio.set_event_loop(loop)
+
+        async def start_writer():
+            writer.start()
+            writer_ready.set()
+
+        loop.run_until_complete(start_writer())
+        loop.run_forever()
+        loop.run_until_complete(writer.stop())
+        loop.close()
+
+    writer_thread = threading.Thread(target=run_writer_loop)
+    writer_thread.start()
+    assert writer_ready.wait(timeout=1.0)
+
+    class FakeProcessor:
+        def process(self, job):
+            return [
+                {
+                    "role": "assistant",
+                    "speaker_type": "human_agent",
+                    "agent_id": job["agent_id"],
+                    "text": "您好，我是物业客服。",
+                },
+                {
+                    "role": "user",
+                    "speaker_type": "customer",
+                    "text": "我想确认一下费用。",
+                },
+            ]
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            return "+OK agent-uuid-1"
+
+        async def break_audio_stream(self, call_id: str) -> str:
+            return "+OK"
+
+        async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
+            return "+OK uuid_bridge accepted"
+
+        async def start_recording(self, channel_uuid: str, path: str) -> str:
+            return "+OK Success"
+
+        async def stop_recording(self, channel_uuid: str, path: str) -> str:
+            return "+OK Success"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+            features=FeatureConfig(recording_enabled=True),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+        call_result_writer=writer,
+        handoff_transcript_processor=FakeProcessor(),
+    )
+
+    try:
+        call = manager.create_call(
+            {
+                "destination": "1000",
+                "context": {
+                    "tenantId": "000000",
+                    "taskId": "task-1",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            }
+        )
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=call_id)
+        )
+        manager.request_handoff(
+            call_id,
+            {
+                "last_utterance": "我要转人工",
+                "ai_turns": [
+                    {"role": "assistant", "speaker_type": "ai", "text": "您好"},
+                    {"role": "user", "speaker_type": "customer", "text": "我要转人工"},
+                ],
+            },
+        )
+        manager.claim_handoff(
+            call_id,
+            {
+                "agent_extension": "1001",
+                "agent_uuid": "agent-uuid-1",
+                "claimed_by": "agent-1001",
+            },
+        )
+        manager.handle_channel_event(
+            ChannelStateEvent(
+                name="CHANNEL_HANGUP_COMPLETE",
+                call_id=call_id,
+                hangup_cause="NORMAL_CLEARING",
+            )
+        )
+
+        final_call = _wait_for_handoff_transcript_status(manager, call_id, "completed")
+        _wait_for_writer_event_count(writer_events, 2)
+
+        assert final_call["handoff"]["human_transcript_status"] == "completed"
+        assert writer_events[0] == (
+            "store",
+            {
+                "tenantId": "000000",
+                "taskId": "task-1",
+                "callId": "990000000000032001",
+                "debtId": "2049810626160668673",
+            },
+            {
+                "turns": [
+                    {"role": "assistant", "speaker_type": "ai", "text": "您好"},
+                    {"role": "user", "speaker_type": "customer", "text": "我要转人工"},
+                    {
+                        "role": "assistant",
+                        "speaker_type": "human_agent",
+                        "agent_id": "agent-1001",
+                        "text": "您好，我是物业客服。",
+                    },
+                    {
+                        "role": "user",
+                        "speaker_type": "customer",
+                        "text": "我想确认一下费用。",
+                    },
+                ]
+            },
+        )
+        assert writer_events[1][0] == "callback"
+        callback_event = writer_events[1][1]
+        assert callback_event.status == "SUCCESS"
+        assert callback_event.tenant_id == "000000"
+        assert callback_event.task_id == "task-1"
+        assert callback_event.business_id == call_id
+        assert callback_event.message == "外呼完成，转写已写入"
+    finally:
+        manager.shutdown()
+        loop.call_soon_threadsafe(loop.stop)
+        writer_thread.join(timeout=3.0)
 
 
 def test_outbound_manager_marks_handoff_failed_when_agent_originate_fails():
@@ -2370,3 +2550,12 @@ def _wait_for_handoff_transcript_status(
             return call
         time.sleep(0.02)
     raise AssertionError(f"call {call_id} transcript did not reach {status}")
+
+
+def _wait_for_writer_event_count(events: list, count: int) -> None:
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if len(events) >= count:
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"writer events did not reach {count}: {events!r}")

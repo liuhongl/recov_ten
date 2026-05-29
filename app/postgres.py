@@ -9,7 +9,7 @@ import os
 import re
 import time
 from collections.abc import Mapping
-from concurrent.futures import TimeoutError as FutureTimeoutError
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Protocol
@@ -717,9 +717,11 @@ class PostgresCallResultWriter:
             maxsize=max_queue_size
         )
         self._task: asyncio.Task | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def start(self) -> None:
         if self._task is None:
+            self._loop = asyncio.get_running_loop()
             self._task = asyncio.create_task(
                 self._run(),
                 name="postgres-call-result-writer",
@@ -732,8 +734,40 @@ class PostgresCallResultWriter:
         with contextlib.suppress(asyncio.CancelledError):
             await self._task
         self._task = None
+        self._loop = None
 
     def enqueue_nowait(self, payload: dict) -> bool:
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return self._put_nowait(payload)
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is loop:
+            return self._put_nowait(payload)
+
+        result: Future[bool] = Future()
+
+        def put_on_loop() -> None:
+            if result.done():
+                return
+            try:
+                result.set_result(self._put_nowait(payload))
+            except Exception as err:
+                result.set_exception(err)
+
+        try:
+            loop.call_soon_threadsafe(put_on_loop)
+            return result.result(timeout=1.0)
+        except FutureTimeoutError:
+            LOGGER.warning("call_result_writer_enqueue_timeout")
+            return False
+        except RuntimeError:
+            return False
+
+    def _put_nowait(self, payload: dict) -> bool:
         try:
             self.queue.put_nowait(payload)
         except asyncio.QueueFull:

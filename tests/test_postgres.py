@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 
 from app.config import GatewayConfig, PostgresConfig
 from app.flow_callback import FlowCallbackEvent
@@ -1336,6 +1337,57 @@ def test_postgres_call_result_writer_emits_success_flow_callback_after_transcrip
         assert flow_events[0].task_id == "task-1"
         assert flow_events[0].business_id == "internal-media-call"
         assert flow_events[0].message == "外呼完成，转写已写入"
+
+    asyncio.run(assert_writer())
+
+
+def test_postgres_call_result_writer_enqueue_is_thread_safe():
+    async def assert_writer():
+        loop_thread_id = threading.get_ident()
+        put_thread_ids: list[int] = []
+        calls = []
+
+        class Store:
+            async def mark_transcript_completed(self, context, transcript_json):
+                calls.append((context, json.loads(transcript_json)))
+                return True
+
+        writer = PostgresCallResultWriter(Store())
+        writer.start()
+        original_put_nowait = writer.queue.put_nowait
+
+        def recording_put_nowait(payload):
+            put_thread_ids.append(threading.get_ident())
+            return original_put_nowait(payload)
+
+        writer.queue.put_nowait = recording_put_nowait
+        enqueue_results = []
+
+        def enqueue_from_worker_thread():
+            enqueue_results.append(
+                writer.enqueue_nowait(
+                    {
+                        "call_id": "internal-media-call",
+                        "context": {"callId": "990000000000032001"},
+                        "turns": [{"role": "assistant", "text": "您好"}],
+                    }
+                )
+            )
+
+        await asyncio.to_thread(enqueue_from_worker_thread)
+        try:
+            await asyncio.wait_for(writer.queue.join(), timeout=1.0)
+        finally:
+            await writer.stop()
+
+        assert enqueue_results == [True]
+        assert put_thread_ids == [loop_thread_id]
+        assert calls == [
+            (
+                {"callId": "990000000000032001"},
+                {"turns": [{"role": "assistant", "text": "您好"}]},
+            )
+        ]
 
     asyncio.run(assert_writer())
 

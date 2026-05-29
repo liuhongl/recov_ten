@@ -107,6 +107,14 @@ class PostgresConfig:
 
 
 @dataclass(frozen=True)
+class HumanTranscriptConfig:
+    enabled: bool = False
+    provider: str = "http_json"
+    http_url: str = ""
+    timeout_seconds: float = 30.0
+
+
+@dataclass(frozen=True)
 class FlowCallbackHttpConfig:
     enabled: bool = False
     base_url: str = ""
@@ -158,6 +166,7 @@ class GatewayConfig:
     vad: VadConfig = VadConfig()
     features: FeatureConfig = FeatureConfig()
     postgres: PostgresConfig = PostgresConfig()
+    human_transcript: HumanTranscriptConfig = HumanTranscriptConfig()
     flow_callback: FlowCallbackConfig = FlowCallbackConfig()
     rocketmq: RocketMQConfig = RocketMQConfig()
 
@@ -497,6 +506,32 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
                 default=PostgresConfig.command_timeout_seconds,
             ),
         ),
+        human_transcript=HumanTranscriptConfig(
+            enabled=_get_bool(
+                raw,
+                "human_transcript",
+                "enabled",
+                default=HumanTranscriptConfig.enabled,
+            ),
+            provider=_get(
+                raw,
+                "human_transcript",
+                "provider",
+                default=HumanTranscriptConfig.provider,
+            ),
+            http_url=_get(
+                raw,
+                "human_transcript",
+                "http_url",
+                default=HumanTranscriptConfig.http_url,
+            ),
+            timeout_seconds=_get_float(
+                raw,
+                "human_transcript",
+                "timeout_seconds",
+                default=HumanTranscriptConfig.timeout_seconds,
+            ),
+        ),
         flow_callback=FlowCallbackConfig(
             enabled=_get_bool(
                 raw,
@@ -635,6 +670,7 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
     config = _apply_env_overrides(config)
     _validate_media_contract(config.freeswitch)
     _validate_postgres_config(config.postgres)
+    _validate_human_transcript_config(config.human_transcript)
     _validate_flow_callback_config(config.flow_callback)
     _validate_rocketmq_config(config.rocketmq)
     return config
@@ -943,6 +979,24 @@ def _apply_env_overrides(config: GatewayConfig) -> GatewayConfig:
                 config.postgres.command_timeout_seconds,
             ),
         ),
+        human_transcript=HumanTranscriptConfig(
+            enabled=_env_bool(
+                "HUMAN_TRANSCRIPT_ENABLED",
+                config.human_transcript.enabled,
+            ),
+            provider=os.getenv(
+                "HUMAN_TRANSCRIPT_PROVIDER",
+                config.human_transcript.provider,
+            ),
+            http_url=os.getenv(
+                "HUMAN_TRANSCRIPT_HTTP_URL",
+                config.human_transcript.http_url,
+            ),
+            timeout_seconds=_env_float(
+                "HUMAN_TRANSCRIPT_TIMEOUT_SECONDS",
+                config.human_transcript.timeout_seconds,
+            ),
+        ),
         flow_callback=FlowCallbackConfig(
             enabled=_env_bool(
                 "FLOW_CALLBACK_ENABLED",
@@ -1071,6 +1125,15 @@ def _validate_postgres_config(config: PostgresConfig) -> None:
         raise ValueError("postgres.min_pool_size must not exceed max_pool_size")
     if config.command_timeout_seconds <= 0:
         raise ValueError("postgres.command_timeout_seconds must be positive")
+
+
+def _validate_human_transcript_config(config: HumanTranscriptConfig) -> None:
+    if config.timeout_seconds <= 0:
+        raise ValueError("human_transcript.timeout_seconds must be positive")
+    if config.provider != "http_json":
+        raise ValueError("human_transcript.provider must be http_json")
+    if config.enabled and not config.http_url.strip():
+        raise ValueError("human_transcript.http_url is required when enabled")
 
 
 def _validate_flow_callback_config(config: FlowCallbackConfig) -> None:

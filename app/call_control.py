@@ -435,6 +435,10 @@ class CallResultWriterProtocol(Protocol):
     def enqueue_nowait(self, payload: dict[str, Any]) -> bool: ...
 
 
+class HumanHandoffTranscriptProcessorProtocol(Protocol):
+    def process(self, job: dict[str, Any]) -> list[dict[str, Any]]: ...
+
+
 class CallDestinationResolverProtocol(Protocol):
     def resolve(self, context: dict[str, Any]) -> str | None: ...
 
@@ -452,6 +456,9 @@ class OutboundCallManager:
         call_result_writer: CallResultWriterProtocol | None = None,
         flow_callback_writer: FlowCallbackWriterProtocol | None = None,
         destination_resolver: CallDestinationResolverProtocol | None = None,
+        handoff_transcript_processor: (
+            HumanHandoffTranscriptProcessorProtocol | None
+        ) = None,
     ) -> None:
         self.config = config
         self._dialer_factory = dialer_factory or (lambda: FreeSwitchOutboundDialer(config))
@@ -462,6 +469,7 @@ class OutboundCallManager:
         self._call_result_writer = call_result_writer
         self._flow_callback_writer = flow_callback_writer
         self._destination_resolver = destination_resolver
+        self._handoff_transcript_processor = handoff_transcript_processor
         self._calls: dict[str, OutboundCallRecord] = {}
         self._external_call_index: dict[str, str] = {}
         self._lock = threading.RLock()
@@ -1064,6 +1072,7 @@ class OutboundCallManager:
             ):
                 errors.append(reply)
 
+        should_process_transcript = False
         with self._lock:
             record = self._calls.get(call_id)
             if record is None or record.handoff is None:
@@ -1072,11 +1081,21 @@ class OutboundCallManager:
             record.handoff.recording_stopped_at_ms = now_ms
             record.handoff.updated_at_ms = now_ms
             if errors:
+                recording_error = "; ".join(errors)
                 record.handoff.recording_status = "failed"
-                record.handoff.recording_error = "; ".join(errors)
+                record.handoff.recording_error = recording_error
+                if record.handoff.human_transcript_status == "pending":
+                    record.handoff.human_transcript_status = "failed"
+                    record.handoff.human_transcript_error = (
+                        f"recording failed: {recording_error}"
+                    )
             else:
                 record.handoff.recording_status = "completed"
                 record.handoff.recording_error = None
+                should_process_transcript = True
+
+        if should_process_transcript:
+            self._maybe_submit_handoff_transcript_processor(call_id)
 
     async def _handoff(self, call_id: str, request: HandoffClaimRequest) -> dict[str, Any]:
         dialer = self._dialer_factory()
@@ -1152,6 +1171,14 @@ class OutboundCallManager:
             record.handoff.human_transcript_status = (
                 record.handoff.human_transcript_status or "pending"
             )
+            if (
+                recording_status == "failed"
+                and record.handoff.human_transcript_status == "pending"
+            ):
+                record.handoff.human_transcript_status = "failed"
+                record.handoff.human_transcript_error = (
+                    f"recording failed: {recording_error}"
+                )
             record.handoff.recording_status = recording_status
             record.handoff.recording_error = recording_error
             record.handoff.customer_recording_path = customer_recording_path
@@ -1178,6 +1205,83 @@ class OutboundCallManager:
                 return
             record.handoff.recording_status = "failed"
             record.handoff.recording_error = error
+            if record.handoff.human_transcript_status == "pending":
+                record.handoff.human_transcript_status = "failed"
+                record.handoff.human_transcript_error = f"recording failed: {error}"
+            record.handoff.updated_at_ms = _now_ms()
+            record.updated_at_ms = record.handoff.updated_at_ms
+
+    def _maybe_submit_handoff_transcript_processor(self, call_id: str) -> None:
+        if self._handoff_transcript_processor is None:
+            return
+
+        with self._lock:
+            record = self._calls.get(call_id)
+            if record is None or record.handoff is None:
+                return
+            handoff = record.handoff
+            if (
+                handoff.state != "completed"
+                or handoff.human_transcript_status != "pending"
+                or handoff.recording_status != "completed"
+            ):
+                return
+            if (
+                not handoff.agent_uuid
+                or not handoff.customer_recording_path
+                or not handoff.agent_recording_path
+            ):
+                handoff.human_transcript_status = "failed"
+                handoff.human_transcript_error = "recording path is missing"
+                handoff.updated_at_ms = _now_ms()
+                record.updated_at_ms = handoff.updated_at_ms
+                return
+
+            agent_id = handoff.claimed_by or handoff.agent_extension or handoff.agent_uuid
+            job = {
+                "call_id": record.call_id,
+                "context": dict(record.context),
+                "agent_id": agent_id,
+                "agent_uuid": handoff.agent_uuid,
+                "customer_recording_path": handoff.customer_recording_path,
+                "agent_recording_path": handoff.agent_recording_path,
+            }
+            handoff.human_transcript_status = "processing"
+            handoff.human_transcript_error = None
+            handoff.updated_at_ms = _now_ms()
+            record.updated_at_ms = handoff.updated_at_ms
+
+        self._executor.submit(
+            self._run_handoff_transcript_processor_worker,
+            call_id,
+            job,
+        )
+
+    def _run_handoff_transcript_processor_worker(
+        self,
+        call_id: str,
+        job: dict[str, Any],
+    ) -> None:
+        assert self._handoff_transcript_processor is not None
+        try:
+            turns = self._handoff_transcript_processor.process(job)
+            self.complete_handoff_transcript(call_id, {"turns": turns})
+        except Exception as err:
+            LOGGER.warning(
+                "handoff_transcript_processor_failed call_id=%s error=%s",
+                call_id,
+                err,
+                exc_info=True,
+            )
+            self._mark_handoff_transcript_failed(call_id, str(err))
+
+    def _mark_handoff_transcript_failed(self, call_id: str, error: str) -> None:
+        with self._lock:
+            record = self._calls.get(call_id)
+            if record is None or record.handoff is None:
+                return
+            record.handoff.human_transcript_status = "failed"
+            record.handoff.human_transcript_error = error
             record.handoff.updated_at_ms = _now_ms()
             record.updated_at_ms = record.handoff.updated_at_ms
 

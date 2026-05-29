@@ -79,6 +79,8 @@ gateway_call_detail 独立表
 |---|---|---|
 | `RECORDING_ENABLED` | 线上最终验收时为 `true` | 普通 PoC 可关闭，完整 transcript 验收必须打开 |
 | `RECORDING_DIR` | FreeSWITCH 进程可写，Python/ASR 后处理可读 | Docker 部署时要确认该目录是共享挂载 |
+| `HUMAN_TRANSCRIPT_ENABLED` | 启用自动人工阶段后处理 ASR 时为 `true` | 未启用时由后处理服务手动调用 `/handoff/transcript` |
+| `HUMAN_TRANSCRIPT_HTTP_URL` | 可从 Python 网关访问 | 接收录音路径和 call context，返回 `{"turns": [...]}` |
 | 临时录音策略 | 只服务 ASR，不作为长期质检录音 | ASR 成功或复核完成后再按策略清理 |
 
 ## 4. 分阶段验证步骤
@@ -208,7 +210,8 @@ bridge 失败：查客户 call_id 是否仍是客户 FreeSWITCH channel UUID，�
 ```text
 1. 客户或坐席正常挂断
 2. 人工阶段临时音频完成后处理 ASR
-3. 调用 `/calls/{call_id}/handoff/transcript`
+3. 自动 ASR 开启时由 Python 提交 HTTP JSON 转写任务
+4. 自动 ASR 未开启时，由后处理服务调用 `/calls/{call_id}/handoff/transcript`
 ```
 
 通过标准：
@@ -265,7 +268,7 @@ Java callback payload 样例
 | 客户说转人工未触发 | ASR 文本、关键词检测、实时网关 handoff 日志 |
 | 坐席 claim 失败 | handoff state、超时、重复抢接、客户是否已挂断 |
 | bridge 失败 | 客户 channel UUID、agent_uuid、FreeSWITCH channel 状态 |
-| transcript 未写入 | 人工 ASR 结果、`/handoff/transcript` 入参、Postgres 写入日志 |
+| transcript 未写入 | 人工 ASR HTTP 响应、`/handoff/transcript` 入参、Postgres 写入日志 |
 | Java 未收到 callback | call_result writer、flow callback 配置、只回调一次的时序 |
 
 ## 7. 停止条件

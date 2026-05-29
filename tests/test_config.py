@@ -82,6 +82,12 @@ def test_load_config_from_toml(tmp_path):
             recording_dir = "/tmp/recov_ten_handoff_test"
             inbound_rms_diagnostics_enabled = true
 
+            [human_transcript]
+            enabled = true
+            provider = "http_json"
+            http_url = "http://asr.example/transcribe"
+            timeout_seconds = 12.5
+
             [flow_callback]
             enabled = true
             topic = "recov-flow-callback"
@@ -162,6 +168,10 @@ def test_load_config_from_toml(tmp_path):
     assert config.features.recording_enabled is False
     assert config.features.recording_dir == "/tmp/recov_ten_handoff_test"
     assert config.features.inbound_rms_diagnostics_enabled is True
+    assert config.human_transcript.enabled is True
+    assert config.human_transcript.provider == "http_json"
+    assert config.human_transcript.http_url == "http://asr.example/transcribe"
+    assert config.human_transcript.timeout_seconds == 12.5
     assert config.flow_callback.enabled is True
     assert config.flow_callback.topic == "recov-flow-callback"
     assert config.flow_callback.producer_group == "recov-ten-gateway"
@@ -217,6 +227,10 @@ def test_environment_overrides(monkeypatch):
     monkeypatch.setenv("METRICS_ENABLED", "false")
     monkeypatch.setenv("RECORDING_ENABLED", "true")
     monkeypatch.setenv("RECORDING_DIR", "/tmp/env-recordings")
+    monkeypatch.setenv("HUMAN_TRANSCRIPT_ENABLED", "true")
+    monkeypatch.setenv("HUMAN_TRANSCRIPT_PROVIDER", "http_json")
+    monkeypatch.setenv("HUMAN_TRANSCRIPT_HTTP_URL", "http://env-asr.example/transcribe")
+    monkeypatch.setenv("HUMAN_TRANSCRIPT_TIMEOUT_SECONDS", "13.5")
     monkeypatch.setenv("FLOW_CALLBACK_ENABLED", "true")
     monkeypatch.setenv("FLOW_CALLBACK_TOPIC", "env-flow-callback")
     monkeypatch.setenv("FLOW_CALLBACK_PRODUCER_GROUP", "env-producer")
@@ -277,6 +291,10 @@ def test_environment_overrides(monkeypatch):
     assert config.features.recording_enabled is True
     assert config.features.recording_dir == "/tmp/env-recordings"
     assert config.features.inbound_rms_diagnostics_enabled is True
+    assert config.human_transcript.enabled is True
+    assert config.human_transcript.provider == "http_json"
+    assert config.human_transcript.http_url == "http://env-asr.example/transcribe"
+    assert config.human_transcript.timeout_seconds == 13.5
     assert config.flow_callback.enabled is True
     assert config.flow_callback.topic == "env-flow-callback"
     assert config.flow_callback.producer_group == "env-producer"

@@ -103,3 +103,9 @@ dsn_env = "POSTGRES_DSN"
 min_pool_size = 1
 max_pool_size = 5
 command_timeout_seconds = 5.0
+
+[human_transcript]
+enabled = false
+provider = "http_json"
+http_url = "http://127.0.0.1:9200/handoff-transcript"
+timeout_seconds = 30.0

@@ -621,12 +621,38 @@ Java 的 analysis_result 需要基于整通电话 transcript 生成，因此第�
 ```text
 1. bridge 成功后，在 `RECORDING_ENABLED=true` 时启动客户侧和坐席侧临时录音。
 2. 人工通话结束后停止临时录音，handoff 中记录 recording_status、recording_dir 派生路径和错误。
-3. 新增 transcript 合并逻辑：AI turns + 人工 turns。
-4. build_call_record_transcript_json 保留 speaker_type、agent_id 等可选字段。
-5. `/calls/{call_id}/handoff/transcript` 只允许人工通话结束后调用，避免提前写 call_record 或提前 callback Java。
-6. call_record.transcript 的写入时机改为“整通电话结束且人工转写完成后”。
-7. 第一版用任务状态和日志记录 human_transcript_status、recording_status、human_transcript_error。
-8. 后续如果补建 gateway_call_detail，再把这些状态同步到 payload。
+3. 人工临时录音完成后，如果启用 `HUMAN_TRANSCRIPT_ENABLED=true`，通过 HTTP JSON 适配器提交录音路径和 call context。
+4. HTTP JSON 适配器返回 `{"turns": [...]}`，Python 复用统一 transcript 合并逻辑：AI turns + 人工 turns。
+5. build_call_record_transcript_json 保留 speaker_type、agent_id 等可选字段。
+6. `/calls/{call_id}/handoff/transcript` 只允许人工通话结束后调用，避免提前写 call_record 或提前 callback Java；未启用自动 HTTP ASR 时仍可由后处理服务手动调用。
+7. call_record.transcript 的写入时机改为“整通电话结束且人工转写完成后”。
+8. 第一版用任务状态和日志记录 human_transcript_status、recording_status、human_transcript_error。
+9. 后续如果补建 gateway_call_detail，再把这些状态同步到 payload。
+```
+
+自动后处理 ASR 接口：
+
+```text
+POST HUMAN_TRANSCRIPT_HTTP_URL
+Content-Type: application/json
+
+{
+  "call_id": "客户侧 FreeSWITCH channel UUID",
+  "context": { "...": "原外呼上下文" },
+  "agent_id": "坐席账号或分机",
+  "agent_uuid": "坐席侧 FreeSWITCH channel UUID",
+  "customer_recording_path": "/tmp/...-customer.wav",
+  "agent_recording_path": "/tmp/...-agent.wav"
+}
+
+期望响应：
+
+{
+  "turns": [
+    {"role": "assistant", "speaker_type": "human_agent", "agent_id": "agent-1001", "text": "您好"},
+    {"role": "user", "speaker_type": "customer", "text": "我想确认费用"}
+  ]
+}
 ```
 
 如果 ASR 失败：

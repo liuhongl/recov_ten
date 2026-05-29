@@ -14,6 +14,7 @@ from .config import load_config
 from .env_loader import load_env_file
 from .flow_callback import HttpFlowCallbackWriter, LoggingFlowCallbackWriter
 from .freeswitch_media import FreeSwitchMediaEchoServer
+from .handoff_transcript import HttpHumanHandoffTranscriptProcessor
 from .health_server import HealthServer
 from .logging_config import configure_logging
 from .opening import (
@@ -120,6 +121,7 @@ async def _serve(config, *, media_mode: str) -> None:
         opening_store=opening_store,
         config=config,
     )
+    handoff_transcript_processor = _build_handoff_transcript_processor(config)
     outbound_manager = OutboundCallManager(
         config,
         opening_generator=opening_generator,
@@ -129,6 +131,7 @@ async def _serve(config, *, media_mode: str) -> None:
         call_result_writer=postgres_runtime.call_result_writer,
         flow_callback_writer=flow_callback_writer,
         destination_resolver=postgres_runtime.call_destination_resolver,
+        handoff_transcript_processor=handoff_transcript_processor,
     )
     outbound_manager.start()
     health_server = HealthServer(
@@ -249,6 +252,20 @@ def _build_flow_callback_writer(config):
             retry_backoff_seconds=http.retry_backoff_seconds,
         )
     return LoggingFlowCallbackWriter(topic=config.flow_callback.topic)
+
+
+def _build_handoff_transcript_processor(config):
+    human_transcript = config.human_transcript
+    if not human_transcript.enabled:
+        return None
+    if human_transcript.provider == "http_json":
+        return HttpHumanHandoffTranscriptProcessor(
+            human_transcript.http_url,
+            timeout_seconds=human_transcript.timeout_seconds,
+        )
+    raise RuntimeError(
+        f"unsupported human transcript provider: {human_transcript.provider}"
+    )
 
 
 def _system_prompt_for_doubao_session(

@@ -590,6 +590,293 @@ def test_outbound_manager_treats_missing_session_on_recording_stop_as_completed(
         manager.shutdown()
 
 
+def test_outbound_manager_marks_transcript_failed_when_recording_stop_fails():
+    class FakeProcessor:
+        def process(self, job):
+            raise AssertionError("transcript processor should not run")
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            return "+OK agent-uuid-1"
+
+        async def break_audio_stream(self, call_id: str) -> str:
+            return "+OK"
+
+        async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
+            return "+OK uuid_bridge accepted"
+
+        async def start_recording(self, channel_uuid: str, path: str) -> str:
+            return "+OK Success"
+
+        async def stop_recording(self, channel_uuid: str, path: str) -> str:
+            return "-ERR disk full"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+            features=FeatureConfig(recording_enabled=True),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+        handoff_transcript_processor=FakeProcessor(),
+    )
+
+    try:
+        call = manager.create_call({"destination": "1000"})
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=call_id)
+        )
+        manager.request_handoff(call_id, {"last_utterance": "我要转人工"})
+        manager.claim_handoff(
+            call_id,
+            {"agent_extension": "1001", "agent_uuid": "agent-uuid-1"},
+        )
+
+        manager.handle_channel_event(
+            ChannelStateEvent(
+                name="CHANNEL_HANGUP_COMPLETE",
+                call_id=call_id,
+                hangup_cause="NORMAL_CLEARING",
+            )
+        )
+
+        final_call = _wait_for_handoff_transcript_status(manager, call_id, "failed")
+        assert final_call["handoff"]["recording_status"] == "failed"
+        assert final_call["handoff"]["human_transcript_error"] == (
+            "recording failed: -ERR disk full; -ERR disk full"
+        )
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_processes_handoff_recordings_after_recording_completed():
+    enqueued_payloads = []
+    processor_jobs = []
+
+    class FakeCallResultWriter:
+        def enqueue_nowait(self, payload):
+            enqueued_payloads.append(payload)
+            return True
+
+    class FakeProcessor:
+        def process(self, job):
+            processor_jobs.append(job)
+            return [
+                {
+                    "role": "assistant",
+                    "speaker_type": "human_agent",
+                    "agent_id": job["agent_id"],
+                    "text": "您好，我是物业客服。",
+                },
+                {
+                    "role": "user",
+                    "speaker_type": "customer",
+                    "text": "我想确认一下物业费。",
+                },
+            ]
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            return "+OK agent-uuid-1"
+
+        async def break_audio_stream(self, call_id: str) -> str:
+            return "+OK"
+
+        async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
+            return "+OK uuid_bridge accepted"
+
+        async def start_recording(self, channel_uuid: str, path: str) -> str:
+            return "+OK Success"
+
+        async def stop_recording(self, channel_uuid: str, path: str) -> str:
+            return "-ERR Cannot locate session!"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+            features=FeatureConfig(
+                recording_enabled=True,
+                recording_dir="/tmp/recov_ten_handoff_test",
+            ),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+        call_result_writer=FakeCallResultWriter(),
+        handoff_transcript_processor=FakeProcessor(),
+    )
+
+    try:
+        call = manager.create_call(
+            {
+                "destination": "1000",
+                "context": {
+                    "tenantId": "000000",
+                    "taskId": "task-1",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            }
+        )
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=call_id)
+        )
+        manager.request_handoff(
+            call_id,
+            {
+                "last_utterance": "我要转人工",
+                "ai_turns": [
+                    {"role": "assistant", "speaker_type": "ai", "text": "您好"},
+                    {"role": "user", "speaker_type": "customer", "text": "我要转人工"},
+                ],
+            },
+        )
+        manager.claim_handoff(
+            call_id,
+            {
+                "agent_extension": "1001",
+                "agent_uuid": "agent-uuid-1",
+                "claimed_by": "agent-1001",
+            },
+        )
+        manager.handle_channel_event(
+            ChannelStateEvent(
+                name="CHANNEL_HANGUP_COMPLETE",
+                call_id=call_id,
+                hangup_cause="NORMAL_CLEARING",
+            )
+        )
+
+        final_call = _wait_for_handoff_transcript_status(manager, call_id, "completed")
+
+        assert processor_jobs == [
+            {
+                "call_id": call_id,
+                "context": {
+                    "tenantId": "000000",
+                    "taskId": "task-1",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+                "agent_id": "agent-1001",
+                "agent_uuid": "agent-uuid-1",
+                "customer_recording_path": (
+                    f"/tmp/recov_ten_handoff_test/{call_id}-customer.wav"
+                ),
+                "agent_recording_path": (
+                    f"/tmp/recov_ten_handoff_test/{call_id}-agent-uuid-1-agent.wav"
+                ),
+            }
+        ]
+        assert final_call["handoff"]["human_transcript_status"] == "completed"
+        assert enqueued_payloads == [
+            {
+                "call_id": call_id,
+                "context": {
+                    "tenantId": "000000",
+                    "taskId": "task-1",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+                "turns": [
+                    {"role": "assistant", "speaker_type": "ai", "text": "您好"},
+                    {"role": "user", "speaker_type": "customer", "text": "我要转人工"},
+                    {
+                        "role": "assistant",
+                        "speaker_type": "human_agent",
+                        "agent_id": "agent-1001",
+                        "text": "您好，我是物业客服。",
+                    },
+                    {
+                        "role": "user",
+                        "speaker_type": "customer",
+                        "text": "我想确认一下物业费。",
+                    },
+                ],
+            }
+        ]
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_marks_handoff_transcript_failed_when_processor_fails():
+    class BrokenProcessor:
+        def process(self, job):
+            raise RuntimeError("asr unavailable")
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            return "+OK agent-uuid-1"
+
+        async def break_audio_stream(self, call_id: str) -> str:
+            return "+OK"
+
+        async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
+            return "+OK uuid_bridge accepted"
+
+        async def start_recording(self, channel_uuid: str, path: str) -> str:
+            return "+OK Success"
+
+        async def stop_recording(self, channel_uuid: str, path: str) -> str:
+            return "+OK Success"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+            features=FeatureConfig(recording_enabled=True),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+        handoff_transcript_processor=BrokenProcessor(),
+    )
+
+    try:
+        call = manager.create_call({"destination": "1000"})
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=call_id)
+        )
+        manager.request_handoff(call_id, {"last_utterance": "我要转人工"})
+        manager.claim_handoff(
+            call_id,
+            {"agent_extension": "1001", "agent_uuid": "agent-uuid-1"},
+        )
+        manager.handle_channel_event(
+            ChannelStateEvent(
+                name="CHANNEL_HANGUP_COMPLETE",
+                call_id=call_id,
+                hangup_cause="NORMAL_CLEARING",
+            )
+        )
+
+        final_call = _wait_for_handoff_transcript_status(manager, call_id, "failed")
+        assert final_call["handoff"]["human_transcript_error"] == "asr unavailable"
+    finally:
+        manager.shutdown()
+
+
 def test_outbound_manager_rejects_handoff_transcript_without_human_bridge():
     class FakeDialer:
         async def resolve_endpoint(self, endpoint: str) -> str:
@@ -1966,3 +2253,21 @@ def _wait_for_handoff_recording_status(
             return call
         time.sleep(0.02)
     raise AssertionError(f"call {call_id} recording did not reach {status}")
+
+
+def _wait_for_handoff_transcript_status(
+    manager: OutboundCallManager,
+    call_id: str,
+    status: str,
+) -> dict:
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        call = manager.get_call(call_id)
+        if (
+            call is not None
+            and call.get("handoff") is not None
+            and call["handoff"].get("human_transcript_status") == status
+        ):
+            return call
+        time.sleep(0.02)
+    raise AssertionError(f"call {call_id} transcript did not reach {status}")

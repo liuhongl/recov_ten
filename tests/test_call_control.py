@@ -877,6 +877,105 @@ def test_outbound_manager_marks_handoff_transcript_failed_when_processor_fails()
         manager.shutdown()
 
 
+def test_outbound_manager_marks_handoff_failed_when_agent_originate_fails():
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            if "&park()" not in command:
+                return "+OK customer-call"
+            return "-ERR USER_NOT_REGISTERED"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+    )
+
+    try:
+        call = manager.create_call({"destination": "1000"})
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=call_id)
+        )
+        manager.request_handoff(call_id, {"last_utterance": "我要转人工"})
+
+        with pytest.raises(CallControlError) as exc_info:
+            manager.claim_handoff(
+                call_id,
+                {"agent_extension": "1001", "agent_uuid": "agent-uuid-1"},
+            )
+
+        assert exc_info.value.status_code == 503
+        failed_call = manager.get_call(call_id)
+        assert failed_call is not None
+        assert failed_call["status"] == "handoff_failed"
+        assert failed_call["handoff"]["state"] == "handoff_failed"
+        assert failed_call["handoff"]["error"] == "-ERR USER_NOT_REGISTERED"
+        assert failed_call["handoff"]["can_claim"] is False
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_marks_handoff_failed_when_bridge_fails():
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            return "+OK agent-uuid-1"
+
+        async def break_audio_stream(self, call_id: str) -> str:
+            return "+OK"
+
+        async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
+            return "-ERR No such channel"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+    )
+
+    try:
+        call = manager.create_call({"destination": "1000"})
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=call_id)
+        )
+        manager.request_handoff(call_id, {"last_utterance": "我要转人工"})
+
+        with pytest.raises(CallControlError) as exc_info:
+            manager.claim_handoff(
+                call_id,
+                {"agent_extension": "1001", "agent_uuid": "agent-uuid-1"},
+            )
+
+        assert exc_info.value.status_code == 503
+        failed_call = manager.get_call(call_id)
+        assert failed_call is not None
+        assert failed_call["status"] == "handoff_failed"
+        assert failed_call["handoff"]["state"] == "handoff_failed"
+        assert failed_call["handoff"]["audio_stream_break_reply"] == "+OK"
+        assert failed_call["handoff"]["error"] == "-ERR No such channel"
+        assert failed_call["handoff"]["can_claim"] is False
+    finally:
+        manager.shutdown()
+
+
 def test_outbound_manager_rejects_handoff_transcript_without_human_bridge():
     class FakeDialer:
         async def resolve_endpoint(self, endpoint: str) -> str:

@@ -1131,6 +1131,12 @@ class OutboundCallManager:
             self._set_status_locked(record, "bridging")
 
         break_reply = (await dialer.break_audio_stream(call_id)).strip()
+        with self._lock:
+            record = self._calls[call_id]
+            assert record.handoff is not None
+            record.handoff.audio_stream_break_reply = break_reply
+            record.handoff.updated_at_ms = _now_ms()
+
         bridge_reply = (await dialer.bridge(call_id, request.agent_uuid)).strip()
         if bridge_reply.startswith("-ERR"):
             raise CallControlError(bridge_reply, status_code=503)
@@ -1193,10 +1199,10 @@ class OutboundCallManager:
             record = self._calls.get(call_id)
             if record is None or record.handoff is None:
                 return
-            record.handoff.state = "failed"
+            record.handoff.state = "handoff_failed"
             record.handoff.error = error
             record.handoff.updated_at_ms = _now_ms()
-            record.updated_at_ms = record.handoff.updated_at_ms
+            self._set_status_locked(record, "handoff_failed")
 
     def _mark_handoff_recording_failed(self, call_id: str, error: str) -> None:
         with self._lock:

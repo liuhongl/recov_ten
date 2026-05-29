@@ -201,6 +201,7 @@ handoff.bridge_reply 为 +OK
 claim 409：该通电话已被抢接、已过期或不是 waiting_agent。
 originate 失败：查坐席 SIP 注册、WSS、contact、浏览器是否在线。
 bridge 失败：查客户 call_id 是否仍是客户 FreeSWITCH channel UUID，查 agent_uuid 是否还在线。
+originate 或 bridge 失败后，`GET /calls/{call_id}` 应显示 status = handoff_failed，并保留 handoff.error。
 ```
 
 ### 4.6 通话结束与 transcript

@@ -751,6 +751,8 @@ class OutboundCallManager:
                 )
             if record.handoff.state != "completed":
                 raise CallControlError("human handoff is not active", status_code=409)
+            if record.handoff.human_transcript_status == "completed":
+                return record.to_dict()
 
             now_ms = _now_ms()
             record.handoff.human_ended_at_ms = (

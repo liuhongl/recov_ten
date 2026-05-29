@@ -271,6 +271,7 @@ Java callback payload 样例
 | bridge 失败 | 客户 channel UUID、agent_uuid、FreeSWITCH channel 状态 |
 | transcript 未写入 | 人工 ASR HTTP 响应、`/handoff/transcript` 入参、Postgres 写入日志 |
 | Java 未收到 callback | call_result writer、flow callback 配置、只回调一次的时序 |
+| Java 收到重复 callback | 重复 `/handoff/transcript` 是否被幂等忽略、call_result writer 是否重复入队 |
 
 ## 7. 停止条件
 

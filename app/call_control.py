@@ -744,6 +744,8 @@ class OutboundCallManager:
             raise CallControlError("status must be completed or failed")
 
         handoff_failed_callback: tuple[dict[str, Any], str | None] | None = None
+        rollback_state: dict[str, Any] | None = None
+        human_turns: list[dict[str, Any]] = []
         with self._lock:
             record = self._calls.get(call_id)
             if record is None:
@@ -779,6 +781,16 @@ class OutboundCallManager:
                     raise CallControlError(
                         "turns must include at least one human transcript turn"
                     )
+                rollback_state = {
+                    "human_ended_at_ms": record.handoff.human_ended_at_ms,
+                    "updated_at_ms": record.handoff.updated_at_ms,
+                    "human_turns": list(record.handoff.human_turns),
+                    "human_transcript_status": (
+                        record.handoff.human_transcript_status
+                    ),
+                    "human_transcript_error": record.handoff.human_transcript_error,
+                    "record_updated_at_ms": record.updated_at_ms,
+                }
                 record.handoff.human_turns = human_turns
                 record.handoff.human_transcript_status = "completed"
                 record.handoff.human_transcript_error = None
@@ -801,6 +813,27 @@ class OutboundCallManager:
             )
             return call_payload
         if not self._call_result_writer.enqueue_nowait(result_payload):
+            assert rollback_state is not None
+            with self._lock:
+                record = self._calls.get(call_id)
+                if (
+                    record is not None
+                    and record.handoff is not None
+                    and record.handoff.human_transcript_status == "completed"
+                    and record.handoff.human_turns == human_turns
+                ):
+                    record.handoff.human_ended_at_ms = rollback_state[
+                        "human_ended_at_ms"
+                    ]
+                    record.handoff.updated_at_ms = rollback_state["updated_at_ms"]
+                    record.handoff.human_turns = rollback_state["human_turns"]
+                    record.handoff.human_transcript_status = rollback_state[
+                        "human_transcript_status"
+                    ]
+                    record.handoff.human_transcript_error = rollback_state[
+                        "human_transcript_error"
+                    ]
+                    record.updated_at_ms = rollback_state["record_updated_at_ms"]
             raise CallControlError("call result writer queue is full", status_code=503)
         return call_payload
 

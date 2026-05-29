@@ -805,7 +805,14 @@ def build_call_record_transcript_json(payload: Mapping[str, Any]) -> str:
             text = _prompt_text(item.get("text"))
             if not text:
                 continue
-            turns.append({"role": role, "text": text})
+            turn = {"role": role, "text": text}
+            speaker_type = _prompt_text(item.get("speaker_type"))
+            if speaker_type:
+                turn["speaker_type"] = speaker_type
+            agent_id = _prompt_text(item.get("agent_id"))
+            if agent_id:
+                turn["agent_id"] = agent_id
+            turns.append(turn)
     return json.dumps({"turns": turns}, ensure_ascii=False)
 
 

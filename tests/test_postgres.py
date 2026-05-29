@@ -1265,6 +1265,36 @@ def test_postgres_call_result_writer_updates_call_record_with_simple_transcript(
     asyncio.run(assert_writer())
 
 
+def test_call_record_transcript_json_preserves_handoff_speaker_metadata():
+    transcript_json = build_call_record_transcript_json(
+        {
+            "turns": [
+                {"role": "assistant", "speaker_type": "ai", "text": "您好"},
+                {"role": "user", "speaker_type": "customer", "text": "我要转人工"},
+                {
+                    "role": "assistant",
+                    "speaker_type": "human_agent",
+                    "agent_id": "agent-1001",
+                    "text": "您好，我是物业客服。",
+                },
+            ]
+        }
+    )
+
+    assert json.loads(transcript_json) == {
+        "turns": [
+            {"role": "assistant", "speaker_type": "ai", "text": "您好"},
+            {"role": "user", "speaker_type": "customer", "text": "我要转人工"},
+            {
+                "role": "assistant",
+                "speaker_type": "human_agent",
+                "agent_id": "agent-1001",
+                "text": "您好，我是物业客服。",
+            },
+        ]
+    }
+
+
 def test_postgres_call_result_writer_emits_success_flow_callback_after_transcript_update():
     async def assert_writer():
         flow_events: list[FlowCallbackEvent] = []

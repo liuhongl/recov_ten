@@ -324,6 +324,310 @@ def test_browser_realtime_test_page_is_served():
         thread.join(timeout=3)
 
 
+def test_webrtc_agent_test_page_is_served():
+    config = GatewayConfig(server=ServerConfig(host="127.0.0.1", port=0))
+    server = HealthServer(config, call_manager=FakeCallManager())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.address
+        with urlopen(f"http://{host}:{port}/webrtc-agent-test", timeout=3) as response:
+            body = response.read().decode("utf-8")
+
+        assert response.status == 200
+        assert "WebRTC 坐席接入测试" in body
+        assert "JsSIP" in body
+        assert 'id="wsUrl" value="ws://127.0.0.1:5066"' in body
+        assert 'id="iceServers" value=""' in body
+        assert 'id="sipUri" value="sip:1001@111.229.146.182"' in body
+        assert 'id="targetUri" value="sip:9196@111.229.146.182"' in body
+        assert 'src="/vendor/jssip.min.js"' in body
+        assert "检查麦克风" in body
+        assert "上线注册" in body
+        assert "拨打测试" in body
+        assert "呼叫本座席" in body
+        assert "接听来电" in body
+        assert "拒接" in body
+        assert "挂断" in body
+        assert "待接通话" in body
+        assert "接听选中通话" in body
+        assert "/webrtc-agent-test/call" in body
+        assert "/calls?status=active&limit=50" in body
+        assert "/handoff/claim" in body
+        assert "ws://127.0.0.1:5066" in body
+        assert "new JsSIP.WebSocketInterface" in body
+        assert "new JsSIP.UA" in body
+        assert "register: true" in body
+        assert 'event.originator === "remote"' in body
+        assert "answerIncoming" in body
+        assert "pendingIncomingSession.answer" in body
+        assert "return true;" in body
+        assert "return false;" in body
+        assert "const microphoneReady = await checkMicrophone();" in body
+        assert 'throw new Error("麦克风不可用，无法上线注册");' in body
+        assert "mediaStream: micStream" in body
+        assert "rtcAnswerConstraints" in body
+        assert "boundSessions" in body
+        assert "pcConfig: buildPeerConnectionConfig()" in body
+        assert "iceServers" in body
+        assert "navigator.mediaDevices.getUserMedia" in body
+        assert 'href="/outbound-test"' in body
+        assert 'href="/browser-realtime-test"' in body
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
+def test_webrtc_agent_call_endpoint_invokes_requester():
+    captured_payloads = []
+
+    def request_agent_call(payload):
+        captured_payloads.append(payload)
+        return {
+            "agent_uuid": "agent-uuid-1",
+            "agent_extension": "1001",
+            "freeswitch_reply": "+OK agent call accepted",
+        }
+
+    config = GatewayConfig(server=ServerConfig(host="127.0.0.1", port=0))
+    server = HealthServer(
+        config,
+        webrtc_agent_call_requester=request_agent_call,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.address
+        request = Request(
+            f"http://{host}:{port}/webrtc-agent-test/call",
+            data=json.dumps(
+                {"agent_extension": "1001", "timeout_seconds": 12}
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=3) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+        assert response.status == 202
+        assert payload == {
+            "status": "accepted",
+            "agent_uuid": "agent-uuid-1",
+            "agent_extension": "1001",
+            "freeswitch_reply": "+OK agent call accepted",
+        }
+        assert captured_payloads == [
+            {"agent_extension": "1001", "timeout_seconds": 12}
+        ]
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
+def test_calls_endpoint_filters_active_calls():
+    manager = FakeCallManager()
+    config = GatewayConfig(server=ServerConfig(host="127.0.0.1", port=0))
+    server = HealthServer(config, call_manager=manager)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.address
+        with urlopen(f"http://{host}:{port}/calls?status=active", timeout=3) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+        assert response.status == 200
+        assert payload == {
+            "status": "ok",
+            "calls": [
+                {"call_id": "call-1", "status": "queued"},
+                {"call_id": "call-2", "status": "waiting_agent"},
+            ],
+        }
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
+def test_handoff_endpoint_invokes_call_manager():
+    manager = FakeCallManager()
+    config = GatewayConfig(server=ServerConfig(host="127.0.0.1", port=0))
+    server = HealthServer(config, call_manager=manager)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.address
+        request = Request(
+            f"http://{host}:{port}/calls/call-1/handoff",
+            data=json.dumps(
+                {
+                    "agent_extension": "1001",
+                    "trigger": "customer_requested",
+                    "reason": "request_human",
+                    "last_utterance": "我要转人工",
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=3) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+        assert response.status == 202
+        assert payload == {
+            "status": "accepted",
+            "call": {
+                "call_id": "call-1",
+                "status": "waiting_agent",
+                "handoff": {
+                    "state": "waiting_agent",
+                    "last_utterance": "我要转人工",
+                },
+            },
+        }
+        assert manager.handoff_request == (
+            "call-1",
+            {
+                "agent_extension": "1001",
+                "trigger": "customer_requested",
+                "reason": "request_human",
+                "last_utterance": "我要转人工",
+            },
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
+def test_handoff_claim_endpoint_invokes_call_manager():
+    manager = FakeCallManager()
+    config = GatewayConfig(server=ServerConfig(host="127.0.0.1", port=0))
+    server = HealthServer(config, call_manager=manager)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.address
+        request = Request(
+            f"http://{host}:{port}/calls/call-1/handoff/claim",
+            data=json.dumps(
+                {
+                    "agent_extension": "1001",
+                    "agent_uuid": "agent-uuid-1",
+                    "claimed_by": "agent-1001",
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=3) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+        assert response.status == 202
+        assert payload == {
+            "status": "accepted",
+            "call": {
+                "call_id": "call-1",
+                "status": "human_active",
+                "handoff": {
+                    "state": "human_active",
+                    "agent_extension": "1001",
+                    "claimed_by": "agent-1001",
+                },
+            },
+        }
+        assert manager.handoff_claim == (
+            "call-1",
+            {
+                "agent_extension": "1001",
+                "agent_uuid": "agent-uuid-1",
+                "claimed_by": "agent-1001",
+            },
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
+def test_handoff_transcript_endpoint_invokes_call_manager():
+    manager = FakeCallManager()
+    config = GatewayConfig(server=ServerConfig(host="127.0.0.1", port=0))
+    server = HealthServer(config, call_manager=manager)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.address
+        request = Request(
+            f"http://{host}:{port}/calls/call-1/handoff/transcript",
+            data=json.dumps(
+                {
+                    "turns": [
+                        {
+                            "role": "assistant",
+                            "speaker_type": "human_agent",
+                            "agent_id": "agent-1001",
+                            "text": "您好，我是物业客服。",
+                        }
+                    ]
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=3) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+        assert response.status == 202
+        assert payload == {
+            "status": "accepted",
+            "call": {
+                "call_id": "call-1",
+                "status": "completed",
+                "handoff": {"human_transcript_status": "completed"},
+            },
+        }
+        assert manager.handoff_transcript == (
+            "call-1",
+            {
+                "turns": [
+                    {
+                        "role": "assistant",
+                        "speaker_type": "human_agent",
+                        "agent_id": "agent-1001",
+                        "text": "您好，我是物业客服。",
+                    }
+                ]
+            },
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
+def test_jssip_vendor_asset_is_served():
+    config = GatewayConfig(server=ServerConfig(host="127.0.0.1", port=0))
+    server = HealthServer(config, call_manager=FakeCallManager())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.address
+        with urlopen(f"http://{host}:{port}/vendor/jssip.min.js", timeout=3) as response:
+            body = response.read().decode("utf-8")
+
+        assert response.status == 200
+        assert response.headers["Content-Type"].startswith("application/javascript")
+        assert "JsSIP" in body
+        assert "WebSocketInterface" in body
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
 def test_browser_test_prompt_defaults_endpoint_exposes_current_program_rules():
     config = GatewayConfig(server=ServerConfig(host="127.0.0.1", port=0))
     server = HealthServer(config, call_manager=FakeCallManager())
@@ -776,13 +1080,20 @@ def _topbar_without_current_page(body: str) -> str:
 class FakeCallManager:
     def __init__(self) -> None:
         self.created_payload = None
+        self.handoff_request = None
+        self.handoff_claim = None
+        self.handoff_transcript = None
 
     def create_call(self, payload):
         self.created_payload = payload
         return {"call_id": "call-1", "status": "queued"}
 
     def list_calls(self, *, limit=50):
-        return [self.get_call("call-1")]
+        return [
+            {"call_id": "call-1", "status": "queued"},
+            {"call_id": "call-2", "status": "waiting_agent"},
+            {"call_id": "call-3", "status": "completed"},
+        ]
 
     def get_call(self, call_id):
         if call_id != "call-1":
@@ -791,3 +1102,34 @@ class FakeCallManager:
 
     def request_hangup(self, call_id, *, cause="NORMAL_CLEARING"):
         return {"call_id": call_id, "status": "hangup_requested", "cause": cause}
+
+    def request_handoff(self, call_id, payload):
+        self.handoff_request = (call_id, payload)
+        return {
+            "call_id": call_id,
+            "status": "waiting_agent",
+            "handoff": {
+                "state": "waiting_agent",
+                "last_utterance": payload.get("last_utterance"),
+            },
+        }
+
+    def claim_handoff(self, call_id, payload):
+        self.handoff_claim = (call_id, payload)
+        return {
+            "call_id": call_id,
+            "status": "human_active",
+            "handoff": {
+                "state": "human_active",
+                "agent_extension": payload.get("agent_extension"),
+                "claimed_by": payload.get("claimed_by"),
+            },
+        }
+
+    def complete_handoff_transcript(self, call_id, payload):
+        self.handoff_transcript = (call_id, payload)
+        return {
+            "call_id": call_id,
+            "status": "completed",
+            "handoff": {"human_transcript_status": "completed"},
+        }

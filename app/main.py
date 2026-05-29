@@ -126,6 +126,7 @@ async def _serve(config, *, media_mode: str) -> None:
         opening_store=opening_store,
         business_prompt_preparer=business_prompt_preparer,
         call_record_updater=postgres_runtime.call_record_updater,
+        call_result_writer=postgres_runtime.call_result_writer,
         flow_callback_writer=flow_callback_writer,
         destination_resolver=postgres_runtime.call_destination_resolver,
     )
@@ -191,6 +192,7 @@ async def _serve(config, *, media_mode: str) -> None:
             on_media_disconnected=outbound_manager.mark_media_disconnected,
             opening_store=opening_store,
             is_call_answered=outbound_manager.is_call_answered,
+            handoff_requester=outbound_manager.request_handoff,
         )
     else:
         raise ValueError(f"unsupported media_mode: {media_mode}")

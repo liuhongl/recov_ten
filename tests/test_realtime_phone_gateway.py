@@ -25,6 +25,7 @@ from app.realtime_phone_gateway import (
     OPENING_TURN_ID,
     PlaybackFrame,
     RealtimePhoneSessionStats,
+    _detect_handoff_request,
     _inbound_rms_avg,
     _record_inbound_audio_rms,
 )
@@ -176,6 +177,48 @@ def test_realtime_phone_gateway_records_inbound_audio_rms_stats():
 
 def test_realtime_phone_gateway_skips_inbound_audio_rms_when_diagnostics_disabled():
     asyncio.run(_assert_realtime_phone_gateway_skips_inbound_audio_rms_when_disabled())
+
+
+def test_handoff_request_detection_is_conservative():
+    assert _detect_handoff_request("我要转人工") == "request_human"
+    assert _detect_handoff_request("麻烦帮我转接人工客服") == "request_human"
+    assert _detect_handoff_request("我想找真人客服") == "request_human"
+    assert _detect_handoff_request("这个人工费是什么") is None
+    assert _detect_handoff_request("我要人工费明细") is None
+    assert _detect_handoff_request("人工智能能处理吗") is None
+
+
+def test_realtime_gateway_triggers_handoff_and_suppresses_model_output():
+    asyncio.run(_assert_realtime_gateway_triggers_handoff_and_suppresses_model_output())
+
+
+def test_realtime_gateway_defers_call_result_when_handoff_is_requested():
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+        call_result_writer=FakeCallResultWriter(),
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="customer-call",
+        session_id="test-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+    )
+    session.disconnected_at = 1
+    session.handoff_requested = True
+    session.committed_exchanges.append(
+        ConversationExchange(
+            turn_id=1,
+            status="handoff_requested",
+            input_transcript="我要转人工",
+            source="handoff_requested",
+        )
+    )
+
+    server._enqueue_call_result(session)
+
+    assert server.call_result_writer.payloads == []
 
 
 async def _assert_realtime_phone_gateway_skips_inbound_audio_rms_when_disabled():
@@ -355,6 +398,84 @@ def test_abandoned_pending_turn_is_committed_as_interrupted_history():
     assert exchange.source == "client_interrupt"
     assert exchange.played_audio_ms == 820
     assert session.gateway_history_interrupted_turns == 1
+
+
+async def _assert_realtime_gateway_triggers_handoff_and_suppresses_model_output():
+    fake_handoff = FakeHandoffRequester()
+    fake_playback_control = FakePlaybackControl()
+    fake_realtime_session = FakeRealtimeSession(
+        b"",
+        auto_provider_events=False,
+        restart_on_interruption=False,
+    )
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+        playback_control=fake_playback_control,
+        handoff_requester=fake_handoff,
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="customer-call",
+        session_id="test-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+    )
+    server._realtime_sessions[session.session_id] = fake_realtime_session
+
+    await server._queue_audio_delta(session, 4, samples_to_pcm_s16le([1600] * 480))
+    assert not session.playback_queue.empty()
+
+    await server._finalize_server_vad_turn(
+        session,
+        RealtimeTurnResult(
+            turn_id=4,
+            input_audio_bytes=640,
+            output_audio_bytes=320,
+            input_transcript="我要转人工",
+            output_transcript="我帮您转接，请稍等。",
+            event_counts={},
+            first_audio_delta_ms=50,
+            response_done_ms=120,
+            status="completed",
+        ),
+    )
+
+    assert fake_handoff.requests == [
+        (
+            "customer-call",
+            {
+                "trigger": "customer_requested",
+                "reason": "request_human",
+                "last_utterance": "我要转人工",
+                "ai_turns": [
+                    {"role": "user", "text": "我要转人工"},
+                ],
+            },
+        )
+    ]
+    assert session.handoff_requested is True
+    assert session.handoff_completed is True
+    assert session.handoff_error is None
+    assert session.current_output_turn_id is None
+    assert session.playback_queue.empty()
+    assert fake_playback_control.break_calls == ["customer-call"]
+    assert fake_realtime_session.cancel_calls == 1
+    assert fake_realtime_session.close_calls == 1
+    committed = [
+        (item.status, item.input_transcript, item.output_transcript)
+        for item in session.committed_exchanges
+    ]
+    assert committed == [
+        ("handoff_requested", "我要转人工", "")
+    ]
+    assert session.context_repair_requests == 0
+
+    await server._queue_audio_delta(session, 5, samples_to_pcm_s16le([1600] * 480))
+
+    assert session.playback_queue.empty()
+    assert session.dropped_stale_frames == 1
+    assert len(fake_handoff.requests) == 1
 
 
 def test_realtime_gateway_drops_late_audio_for_closed_interrupted_turn():
@@ -1696,6 +1817,30 @@ class FakePlaybackControl:
 
     async def break_playback(self, media_uuid: str) -> bool:
         self.break_calls.append(media_uuid)
+        return True
+
+
+class FakeHandoffRequester:
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, dict[str, object]]] = []
+
+    def __call__(self, call_id: str, payload: dict[str, object]) -> dict:
+        self.requests.append((call_id, dict(payload)))
+        return {
+            "status": "accepted",
+            "call": {
+                "status": "waiting_agent",
+                "handoff": {"state": "waiting_agent"},
+            },
+        }
+
+
+class FakeCallResultWriter:
+    def __init__(self) -> None:
+        self.payloads: list[dict] = []
+
+    def enqueue_nowait(self, payload: dict) -> bool:
+        self.payloads.append(payload)
         return True
 
 

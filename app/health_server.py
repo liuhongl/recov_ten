@@ -4,6 +4,7 @@ import html
 import json
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import asdict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,10 +18,15 @@ from .browser_prompt_test import (
     BrowserPromptTestStore,
     browser_public_constraint_defaults,
 )
-from .call_control import CallControlError, OutboundCallManager
+from .call_control import (
+    CallControlError,
+    OutboundCallManager,
+    originate_webrtc_agent_test_call,
+)
 from .config import GatewayConfig
 
 LOGGER = logging.getLogger(__name__)
+AgentCallRequester = Callable[[dict[str, Any]], dict[str, Any]]
 
 DOCS = {
     "handoff": {
@@ -66,6 +72,7 @@ class HealthServer:
         *,
         call_manager: OutboundCallManager | None = None,
         browser_prompt_store: BrowserPromptTestStore | None = None,
+        webrtc_agent_call_requester: AgentCallRequester | None = None,
     ):
         self.config = config
         self.call_manager = call_manager
@@ -74,6 +81,7 @@ class HealthServer:
             config,
             call_manager=call_manager,
             browser_prompt_store=browser_prompt_store,
+            webrtc_agent_call_requester=webrtc_agent_call_requester,
         )
         self._server = ThreadingHTTPServer(
             (config.server.host, config.server.port),
@@ -100,7 +108,12 @@ class HealthServer:
         *,
         call_manager: OutboundCallManager | None = None,
         browser_prompt_store: BrowserPromptTestStore | None = None,
+        webrtc_agent_call_requester: AgentCallRequester | None = None,
     ) -> type[BaseHTTPRequestHandler]:
+        agent_call_requester = webrtc_agent_call_requester or (
+            lambda payload: originate_webrtc_agent_test_call(config, payload)
+        )
+
         class Handler(BaseHTTPRequestHandler):
             server_version = "SipRealtimeVoiceGateway/0.1"
 
@@ -163,6 +176,18 @@ class HealthServer:
                     self._send_html(HTTPStatus.OK, _load_browser_realtime_test_html())
                     return
 
+                if parsed.path == "/webrtc-agent-test":
+                    self._send_html(HTTPStatus.OK, _load_webrtc_agent_test_html())
+                    return
+
+                if parsed.path == "/vendor/jssip.min.js":
+                    self._send_asset(
+                        HTTPStatus.OK,
+                        _load_vendor_asset("jssip.min.js"),
+                        "application/javascript; charset=utf-8",
+                    )
+                    return
+
                 if parsed.path == "/browser-test-prompts/defaults":
                     defaults = (
                         browser_prompt_store.public_constraint_defaults()
@@ -198,11 +223,13 @@ class HealthServer:
                         )
                         return
                     limit = _query_int(parsed.query, "limit", default=50)
+                    status_filter = _query_str(parsed.query, "status")
+                    calls = call_manager.list_calls(limit=limit)
                     self._send_json(
                         HTTPStatus.OK,
                         {
                             "status": "ok",
-                            "calls": call_manager.list_calls(limit=limit),
+                            "calls": _filter_calls_by_status(calls, status_filter),
                         },
                     )
                     return
@@ -298,6 +325,28 @@ class HealthServer:
                     )
                     return
 
+                if parsed.path == "/webrtc-agent-test/call":
+                    try:
+                        result = agent_call_requester(self._read_json_body())
+                    except CallControlError as err:
+                        self._send_json(
+                            HTTPStatus(err.status_code),
+                            {"status": "error", "error": str(err)},
+                        )
+                        return
+                    except json.JSONDecodeError:
+                        self._send_json(
+                            HTTPStatus.BAD_REQUEST,
+                            {"status": "error", "error": "invalid JSON body"},
+                        )
+                        return
+
+                    self._send_json(
+                        HTTPStatus.ACCEPTED,
+                        {"status": "accepted", **result},
+                    )
+                    return
+
                 if parsed.path == "/calls":
                     if call_manager is None:
                         self._send_json(
@@ -331,6 +380,99 @@ class HealthServer:
                             "message": "AI外呼任务已受理",
                             "call": call,
                         },
+                    )
+                    return
+
+                call_id = _handoff_transcript_call_id_from_path(parsed.path)
+                if call_id is not None:
+                    if call_manager is None:
+                        self._send_json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"status": "unavailable", "error": "call control disabled"},
+                        )
+                        return
+                    try:
+                        call = call_manager.complete_handoff_transcript(
+                            call_id,
+                            self._read_json_body(),
+                        )
+                    except CallControlError as err:
+                        self._send_json(
+                            HTTPStatus(err.status_code),
+                            {"status": "error", "error": str(err)},
+                        )
+                        return
+                    except json.JSONDecodeError:
+                        self._send_json(
+                            HTTPStatus.BAD_REQUEST,
+                            {"status": "error", "error": "invalid JSON body"},
+                        )
+                        return
+                    self._send_json(
+                        HTTPStatus.ACCEPTED,
+                        {"status": "accepted", "call": call},
+                    )
+                    return
+
+                call_id = _handoff_claim_call_id_from_path(parsed.path)
+                if call_id is not None:
+                    if call_manager is None:
+                        self._send_json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"status": "unavailable", "error": "call control disabled"},
+                        )
+                        return
+                    try:
+                        call = call_manager.claim_handoff(
+                            call_id,
+                            self._read_json_body(),
+                        )
+                    except CallControlError as err:
+                        self._send_json(
+                            HTTPStatus(err.status_code),
+                            {"status": "error", "error": str(err)},
+                        )
+                        return
+                    except json.JSONDecodeError:
+                        self._send_json(
+                            HTTPStatus.BAD_REQUEST,
+                            {"status": "error", "error": "invalid JSON body"},
+                        )
+                        return
+                    self._send_json(
+                        HTTPStatus.ACCEPTED,
+                        {"status": "accepted", "call": call},
+                    )
+                    return
+
+                call_id = _handoff_call_id_from_path(parsed.path)
+                if call_id is not None:
+                    if call_manager is None:
+                        self._send_json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"status": "unavailable", "error": "call control disabled"},
+                        )
+                        return
+                    try:
+                        call = call_manager.request_handoff(
+                            call_id,
+                            self._read_json_body(),
+                        )
+                    except CallControlError as err:
+                        self._send_json(
+                            HTTPStatus(err.status_code),
+                            {"status": "error", "error": str(err)},
+                        )
+                        return
+                    except json.JSONDecodeError:
+                        self._send_json(
+                            HTTPStatus.BAD_REQUEST,
+                            {"status": "error", "error": "invalid JSON body"},
+                        )
+                        return
+                    self._send_json(
+                        HTTPStatus.ACCEPTED,
+                        {"status": "accepted", "call": call},
                     )
                     return
 
@@ -416,6 +558,19 @@ class HealthServer:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _send_asset(
+                self,
+                status: HTTPStatus,
+                body: bytes,
+                content_type: str,
+            ) -> None:
+                self.send_response(status.value)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             def _send_redirect(self, location: str) -> None:
                 self.send_response(HTTPStatus.FOUND.value)
                 self.send_header("Location", location)
@@ -435,9 +590,77 @@ def _call_id_from_path(path: str) -> str | None:
     return suffix
 
 
+def _query_str(query: str, name: str) -> str | None:
+    values = parse_qs(query).get(name)
+    if not values:
+        return None
+    value = values[0].strip()
+    return value or None
+
+
+def _filter_calls_by_status(
+    calls: list[dict[str, Any]],
+    status_filter: str | None,
+) -> list[dict[str, Any]]:
+    if status_filter is None:
+        return calls
+    if status_filter == "active":
+        terminal_statuses = {
+            "completed",
+            "failed",
+            "busy",
+            "no_answer",
+            "canceled",
+            "hangup_failed",
+        }
+        return [
+            call
+            for call in calls
+            if str(call.get("status")) not in terminal_statuses
+        ]
+    return [
+        call
+        for call in calls
+        if str(call.get("status")) == status_filter
+    ]
+
+
 def _hangup_call_id_from_path(path: str) -> str | None:
     prefix = "/calls/"
     suffix = "/hangup"
+    if not path.startswith(prefix) or not path.endswith(suffix):
+        return None
+    call_id = path[len(prefix) : -len(suffix)].strip("/")
+    if not call_id or "/" in call_id:
+        return None
+    return call_id
+
+
+def _handoff_call_id_from_path(path: str) -> str | None:
+    prefix = "/calls/"
+    suffix = "/handoff"
+    if not path.startswith(prefix) or not path.endswith(suffix):
+        return None
+    call_id = path[len(prefix) : -len(suffix)].strip("/")
+    if not call_id or "/" in call_id:
+        return None
+    return call_id
+
+
+def _handoff_claim_call_id_from_path(path: str) -> str | None:
+    prefix = "/calls/"
+    suffix = "/handoff/claim"
+    if not path.startswith(prefix) or not path.endswith(suffix):
+        return None
+    call_id = path[len(prefix) : -len(suffix)].strip("/")
+    if not call_id or "/" in call_id:
+        return None
+    return call_id
+
+
+def _handoff_transcript_call_id_from_path(path: str) -> str | None:
+    prefix = "/calls/"
+    suffix = "/handoff/transcript"
     if not path.startswith(prefix) or not path.endswith(suffix):
         return None
     call_id = path[len(prefix) : -len(suffix)].strip("/")
@@ -478,6 +701,20 @@ def _load_browser_realtime_test_html() -> str:
         / "browser-realtime-test.html"
     )
     return html_path.read_text(encoding="utf-8")
+
+
+def _load_webrtc_agent_test_html() -> str:
+    html_path = (
+        Path(__file__).resolve().parent.parent
+        / "static"
+        / "webrtc-agent-test.html"
+    )
+    return html_path.read_text(encoding="utf-8")
+
+
+def _load_vendor_asset(filename: str) -> bytes:
+    asset_path = Path(__file__).resolve().parent.parent / "static" / "vendor" / filename
+    return asset_path.read_bytes()
 
 
 def _browser_prompt_registration_payload(

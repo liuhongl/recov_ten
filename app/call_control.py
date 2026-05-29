@@ -57,6 +57,85 @@ class CreateCallRequest:
     opening: OpeningRequest | None = None
 
 
+@dataclass(frozen=True)
+class HandoffRequest:
+    trigger: str | None = None
+    reason: str | None = None
+    last_utterance: str | None = None
+    summary: str | None = None
+    ai_turns: list[dict[str, Any]] = field(default_factory=list)
+    wait_timeout_seconds: int = 15
+
+
+@dataclass(frozen=True)
+class HandoffClaimRequest:
+    agent_extension: str
+    agent_uuid: str
+    timeout_seconds: int
+    claimed_by: str | None = None
+
+
+@dataclass
+class HandoffState:
+    state: str
+    requested_at_ms: int
+    updated_at_ms: int
+    expires_at_ms: int | None = None
+    trigger: str | None = None
+    reason: str | None = None
+    last_utterance: str | None = None
+    summary: str | None = None
+    claimed_at_ms: int | None = None
+    claimed_by: str | None = None
+    agent_extension: str | None = None
+    agent_uuid: str | None = None
+    agent_endpoint: str | None = None
+    answered_at_ms: int | None = None
+    bridged_at_ms: int | None = None
+    human_ended_at_ms: int | None = None
+    agent_originate_reply: str | None = None
+    audio_stream_break_reply: str | None = None
+    bridge_reply: str | None = None
+    human_transcript_status: str | None = None
+    human_transcript_error: str | None = None
+    ai_turns: list[dict[str, Any]] = field(default_factory=list)
+    human_turns: list[dict[str, Any]] = field(default_factory=list)
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        turns = [*self.ai_turns, *self.human_turns]
+        return {
+            "state": self.state,
+            "trigger": self.trigger,
+            "reason": self.reason,
+            "last_utterance": self.last_utterance,
+            "summary": self.summary,
+            "requested_at_ms": self.requested_at_ms,
+            "expires_at_ms": self.expires_at_ms,
+            "claimed_at_ms": self.claimed_at_ms,
+            "claimed_by": self.claimed_by,
+            "agent_extension": self.agent_extension,
+            "agent_uuid": self.agent_uuid,
+            "agent_endpoint": self.agent_endpoint,
+            "answered_at_ms": self.answered_at_ms,
+            "bridged_at_ms": self.bridged_at_ms,
+            "human_ended_at_ms": self.human_ended_at_ms,
+            "updated_at_ms": self.updated_at_ms,
+            "agent_originate_reply": self.agent_originate_reply,
+            "audio_stream_break_reply": self.audio_stream_break_reply,
+            "bridge_reply": self.bridge_reply,
+            "human_transcript_status": self.human_transcript_status,
+            "human_transcript_error": self.human_transcript_error,
+            "ai_turns": list(self.ai_turns),
+            "human_turns": list(self.human_turns),
+            "turns": turns,
+            "recent_turns": turns[-8:],
+            "can_claim": self.state == "waiting_agent"
+            and (self.expires_at_ms is None or self.expires_at_ms > _now_ms()),
+            "error": self.error,
+        }
+
+
 @dataclass
 class OutboundCallRecord:
     call_id: str
@@ -89,9 +168,12 @@ class OutboundCallRecord:
     last_event_at_ms: int | None = None
     opening: OpeningCallMetadata | None = None
     prompt_snapshot: PromptSnapshot | None = None
+    handoff: HandoffState | None = None
 
     def to_dict(self) -> dict[str, Any]:
         diagnostics = _build_call_diagnostics(self)
+        handoff_payload = None if self.handoff is None else self.handoff.to_dict()
+        turns = [] if handoff_payload is None else handoff_payload["turns"]
         return {
             "call_id": self.call_id,
             "external_call_id": self.external_call_id,
@@ -122,6 +204,10 @@ class OutboundCallRecord:
             "last_event_name": self.last_event_name,
             "last_event_at_ms": self.last_event_at_ms,
             "opening": None if self.opening is None else self.opening.to_dict(),
+            "handoff": handoff_payload,
+            "turns": turns,
+            "recent_turns": turns[-8:],
+            "summary": _handoff_summary(self.handoff),
             "prompt": (
                 None
                 if self.prompt_snapshot is None
@@ -177,6 +263,27 @@ class FreeSwitchOutboundDialer:
         finally:
             await client.close()
 
+    async def break_audio_stream(self, call_id: str) -> str:
+        _require_safe_token(call_id, "call_id")
+        client = self._make_client()
+        try:
+            await client.connect()
+            return await client.api(f"uuid_audio_stream {call_id} break")
+        finally:
+            await client.close()
+
+    async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
+        command = build_uuid_bridge_command(
+            customer_call_id=customer_call_id,
+            agent_uuid=agent_uuid,
+        )
+        client = self._make_client()
+        try:
+            await client.connect()
+            return await client.api(command)
+        finally:
+            await client.close()
+
     def _make_client(self) -> FreeSwitchEventSocketClient:
         event_socket = self.config.event_socket
         password = os.getenv(event_socket.password_env, "")
@@ -190,6 +297,74 @@ class FreeSwitchOutboundDialer:
             port=event_socket.port,
             password=password,
         )
+
+
+def build_webrtc_agent_originate_command(
+    *,
+    agent_uuid: str,
+    endpoint: str,
+    timeout_seconds: int,
+) -> str:
+    _require_safe_token(agent_uuid, "agent_uuid")
+    _require_safe_token(endpoint, "endpoint")
+    if not 1 <= timeout_seconds <= 120:
+        raise CallControlError("timeout_seconds must be between 1 and 120")
+    variables = {
+        "origination_uuid": agent_uuid,
+        "origination_caller_id_name": "Handoff_Test",
+        "origination_caller_id_number": "9001",
+        "originate_timeout": str(timeout_seconds),
+    }
+    return f"originate {_format_originate_variables(variables)}{endpoint} &park()"
+
+
+def build_uuid_bridge_command(*, customer_call_id: str, agent_uuid: str) -> str:
+    _require_safe_token(customer_call_id, "customer_call_id")
+    _require_safe_token(agent_uuid, "agent_uuid")
+    return f"uuid_bridge {customer_call_id} {agent_uuid}"
+
+
+def originate_webrtc_agent_test_call(
+    config: GatewayConfig,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    if not config.event_socket.enabled:
+        raise CallControlError(
+            "FreeSWITCH Event Socket is disabled; WebRTC agent test calls require it",
+            status_code=503,
+        )
+
+    agent_extension = _optional_safe_str(payload, "agent_extension") or "1001"
+    timeout_seconds = _optional_int(payload, "timeout_seconds") or 20
+    if not 1 <= timeout_seconds <= 120:
+        raise CallControlError("timeout_seconds must be between 1 and 120")
+    agent_uuid = _optional_safe_str(payload, "agent_uuid") or uuid.uuid4().hex
+
+    async def run() -> dict[str, Any]:
+        dialer = FreeSwitchOutboundDialer(config)
+        endpoint = await dialer.resolve_endpoint(f"sofia_contact:*/{agent_extension}")
+        command = build_webrtc_agent_originate_command(
+            agent_uuid=agent_uuid,
+            endpoint=endpoint,
+            timeout_seconds=timeout_seconds,
+        )
+        reply = (await dialer.originate(command)).strip()
+        if reply.startswith("-ERR"):
+            raise CallControlError(reply, status_code=503)
+        return {
+            "agent_uuid": agent_uuid,
+            "agent_extension": agent_extension,
+            "endpoint": endpoint,
+            "freeswitch_reply": reply,
+        }
+
+    try:
+        return asyncio.run(run())
+    except (OSError, EOFError, EventSocketError) as err:
+        raise CallControlError(
+            f"FreeSWITCH Event Socket request failed: {err}",
+            status_code=503,
+        ) from err
 
 
 DialerFactory = Callable[[], FreeSwitchOutboundDialer]
@@ -207,6 +382,10 @@ class CallRecordUpdaterProtocol(Protocol):
     def mark_no_answer(self, context: dict[str, Any]) -> bool: ...
 
 
+class CallResultWriterProtocol(Protocol):
+    def enqueue_nowait(self, payload: dict[str, Any]) -> bool: ...
+
+
 class CallDestinationResolverProtocol(Protocol):
     def resolve(self, context: dict[str, Any]) -> str | None: ...
 
@@ -221,6 +400,7 @@ class OutboundCallManager:
         opening_store: OpeningAudioStore | None = None,
         business_prompt_preparer: BusinessPromptPreparerProtocol | None = None,
         call_record_updater: CallRecordUpdaterProtocol | None = None,
+        call_result_writer: CallResultWriterProtocol | None = None,
         flow_callback_writer: FlowCallbackWriterProtocol | None = None,
         destination_resolver: CallDestinationResolverProtocol | None = None,
     ) -> None:
@@ -230,6 +410,7 @@ class OutboundCallManager:
         self._opening_store = opening_store
         self._business_prompt_preparer = business_prompt_preparer
         self._call_record_updater = call_record_updater
+        self._call_result_writer = call_result_writer
         self._flow_callback_writer = flow_callback_writer
         self._destination_resolver = destination_resolver
         self._calls: dict[str, OutboundCallRecord] = {}
@@ -399,6 +580,135 @@ class OutboundCallManager:
 
         self._executor.submit(self._run_hangup_worker, call_id, cause)
         return record.to_dict()
+
+    def request_handoff(self, call_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        _require_safe_token(call_id, "call_id")
+        request = parse_handoff_request(payload)
+        with self._lock:
+            record = self._calls.get(call_id)
+            if record is None:
+                raise CallControlError("call not found", status_code=404)
+            if _is_terminal_status(record.status):
+                raise CallControlError("call is not active", status_code=409)
+            if record.handoff is not None and record.handoff.state in {
+                "waiting_agent",
+                "agent_claimed",
+                "agent_ringing",
+                "bridging",
+                "human_active",
+            }:
+                raise CallControlError("handoff already in progress", status_code=409)
+            now_ms = _now_ms()
+            record.handoff = HandoffState(
+                state="waiting_agent",
+                requested_at_ms=now_ms,
+                updated_at_ms=now_ms,
+                expires_at_ms=now_ms + request.wait_timeout_seconds * 1000,
+                trigger=request.trigger,
+                reason=request.reason,
+                last_utterance=request.last_utterance,
+                summary=request.summary,
+                ai_turns=request.ai_turns,
+            )
+            self._set_status_locked(record, "waiting_agent")
+            return record.to_dict()
+
+    def claim_handoff(self, call_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.config.event_socket.enabled:
+            raise CallControlError(
+                "FreeSWITCH Event Socket is disabled; handoff claim requires it",
+                status_code=503,
+            )
+        _require_safe_token(call_id, "call_id")
+        request = parse_handoff_claim_request(payload)
+        with self._lock:
+            record = self._calls.get(call_id)
+            if record is None:
+                raise CallControlError("call not found", status_code=404)
+            if _is_terminal_status(record.status):
+                raise CallControlError("call is not active", status_code=409)
+            if record.handoff is None:
+                raise CallControlError("handoff not requested", status_code=409)
+            if record.handoff.state != "waiting_agent":
+                raise CallControlError("handoff already claimed", status_code=409)
+            now_ms = _now_ms()
+            if record.handoff.expires_at_ms is not None and record.handoff.expires_at_ms <= now_ms:
+                record.handoff.state = "handoff_failed"
+                record.handoff.error = "handoff request expired"
+                record.handoff.updated_at_ms = now_ms
+                self._set_status_locked(record, "handoff_failed")
+                raise CallControlError("handoff request expired", status_code=409)
+            record.handoff.state = "agent_claimed"
+            record.handoff.claimed_at_ms = now_ms
+            record.handoff.claimed_by = request.claimed_by or request.agent_extension
+            record.handoff.agent_extension = request.agent_extension
+            record.handoff.agent_uuid = request.agent_uuid
+            record.handoff.updated_at_ms = now_ms
+            self._set_status_locked(record, "agent_claimed")
+
+        try:
+            return asyncio.run(self._handoff(call_id, request))
+        except (OSError, EOFError, EventSocketError, CallControlError) as err:
+            self._mark_handoff_failed(call_id, str(err))
+            if isinstance(err, CallControlError):
+                raise
+            raise CallControlError(
+                f"FreeSWITCH Event Socket request failed: {err}",
+                status_code=503,
+            ) from err
+
+    def complete_handoff_transcript(
+        self,
+        call_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        _require_safe_token(call_id, "call_id")
+        status = _optional_str(payload, "status") or "completed"
+        if status not in {"completed", "failed"}:
+            raise CallControlError("status must be completed or failed")
+
+        with self._lock:
+            record = self._calls.get(call_id)
+            if record is None:
+                raise CallControlError("call not found", status_code=404)
+            if record.handoff is None:
+                raise CallControlError("handoff not requested", status_code=409)
+            if record.handoff.state not in {"human_active", "completed"}:
+                raise CallControlError("human handoff is not active", status_code=409)
+
+            now_ms = _now_ms()
+            record.handoff.human_ended_at_ms = (
+                record.handoff.human_ended_at_ms or record.completed_at_ms or now_ms
+            )
+            record.handoff.updated_at_ms = now_ms
+            if status == "failed":
+                record.handoff.human_transcript_status = "failed"
+                record.handoff.human_transcript_error = _optional_str(payload, "error")
+                record.updated_at_ms = now_ms
+                return record.to_dict()
+
+            human_turns = _normalize_transcript_turns(payload.get("turns"))
+            if not human_turns:
+                raise CallControlError("turns must include at least one human transcript turn")
+            record.handoff.human_turns = human_turns
+            record.handoff.human_transcript_status = "completed"
+            record.handoff.human_transcript_error = None
+            result_payload = {
+                "call_id": record.call_id,
+                "context": dict(record.context),
+                "turns": [*record.handoff.ai_turns, *record.handoff.human_turns],
+            }
+            call_payload = record.to_dict()
+
+        if self._call_result_writer is None:
+            LOGGER.warning(
+                "handoff_transcript_completed_without_writer call_id=%s",
+                call_id,
+            )
+            return call_payload
+        if not self._call_result_writer.enqueue_nowait(result_payload):
+            raise CallControlError("call result writer queue is full", status_code=503)
+        return call_payload
 
     def _build_record(self, request: CreateCallRequest) -> OutboundCallRecord:
         outbound = self.config.outbound
@@ -649,6 +959,66 @@ class OutboundCallManager:
                 business_id=failed_business_id,
             )
 
+    async def _handoff(self, call_id: str, request: HandoffClaimRequest) -> dict[str, Any]:
+        dialer = self._dialer_factory()
+        endpoint = await dialer.resolve_endpoint(
+            f"sofia_contact:*/{request.agent_extension}"
+        )
+        with self._lock:
+            record = self._calls[call_id]
+            assert record.handoff is not None
+            now_ms = _now_ms()
+            record.handoff.state = "agent_ringing"
+            record.handoff.agent_endpoint = endpoint
+            record.handoff.updated_at_ms = now_ms
+            self._set_status_locked(record, "agent_ringing")
+
+        command = build_webrtc_agent_originate_command(
+            agent_uuid=request.agent_uuid,
+            endpoint=endpoint,
+            timeout_seconds=request.timeout_seconds,
+        )
+        originate_reply = (await dialer.originate(command)).strip()
+        if originate_reply.startswith("-ERR"):
+            raise CallControlError(originate_reply, status_code=503)
+
+        with self._lock:
+            record = self._calls[call_id]
+            assert record.handoff is not None
+            now_ms = _now_ms()
+            record.handoff.state = "bridging"
+            record.handoff.agent_originate_reply = originate_reply
+            record.handoff.answered_at_ms = now_ms
+            record.handoff.updated_at_ms = now_ms
+            self._set_status_locked(record, "bridging")
+
+        break_reply = (await dialer.break_audio_stream(call_id)).strip()
+        bridge_reply = (await dialer.bridge(call_id, request.agent_uuid)).strip()
+        if bridge_reply.startswith("-ERR"):
+            raise CallControlError(bridge_reply, status_code=503)
+
+        with self._lock:
+            record = self._calls[call_id]
+            assert record.handoff is not None
+            now_ms = _now_ms()
+            record.handoff.state = "human_active"
+            record.handoff.audio_stream_break_reply = break_reply
+            record.handoff.bridge_reply = bridge_reply
+            record.handoff.bridged_at_ms = now_ms
+            record.handoff.updated_at_ms = now_ms
+            self._set_status_locked(record, "human_active")
+            return record.to_dict()
+
+    def _mark_handoff_failed(self, call_id: str, error: str) -> None:
+        with self._lock:
+            record = self._calls.get(call_id)
+            if record is None or record.handoff is None:
+                return
+            record.handoff.state = "failed"
+            record.handoff.error = error
+            record.handoff.updated_at_ms = _now_ms()
+            record.updated_at_ms = record.handoff.updated_at_ms
+
     def _mark_failed(self, call_id: str, error: str) -> None:
         failed_context = None
         with self._lock:
@@ -702,6 +1072,12 @@ class OutboundCallManager:
 
         if event.name in {"CHANNEL_HANGUP", "CHANNEL_HANGUP_COMPLETE"}:
             record.completed_at_ms = record.completed_at_ms or now_ms
+            if record.handoff is not None and record.handoff.state == "human_active":
+                record.handoff.state = "completed"
+                record.handoff.human_ended_at_ms = (
+                    record.handoff.human_ended_at_ms or now_ms
+                )
+                record.handoff.updated_at_ms = now_ms
             self._set_status_locked(record, _terminal_status_for_cause(record))
             self._discard_opening_locked(record.call_id)
 
@@ -882,6 +1258,60 @@ def parse_create_call_request(payload: dict[str, Any]) -> CreateCallRequest:
         context=context,
         opening=opening,
     )
+
+
+def parse_handoff_request(payload: dict[str, Any]) -> HandoffRequest:
+    if not isinstance(payload, dict):
+        raise CallControlError("request body must be a JSON object")
+    wait_timeout_seconds = _optional_int(payload, "wait_timeout_seconds") or 15
+    if not 1 <= wait_timeout_seconds <= 300:
+        raise CallControlError("wait_timeout_seconds must be between 1 and 300")
+    return HandoffRequest(
+        trigger=_optional_str(payload, "trigger"),
+        reason=_optional_str(payload, "reason"),
+        last_utterance=_optional_str(payload, "last_utterance"),
+        summary=_optional_str(payload, "summary"),
+        ai_turns=_normalize_transcript_turns(payload.get("ai_turns") or payload.get("turns")),
+        wait_timeout_seconds=wait_timeout_seconds,
+    )
+
+
+def parse_handoff_claim_request(payload: dict[str, Any]) -> HandoffClaimRequest:
+    if not isinstance(payload, dict):
+        raise CallControlError("request body must be a JSON object")
+    agent_extension = _optional_safe_str(payload, "agent_extension") or "1001"
+    agent_uuid = _optional_safe_str(payload, "agent_uuid") or uuid.uuid4().hex
+    timeout_seconds = _optional_int(payload, "timeout_seconds") or 20
+    if not 1 <= timeout_seconds <= 120:
+        raise CallControlError("timeout_seconds must be between 1 and 120")
+    return HandoffClaimRequest(
+        agent_extension=agent_extension,
+        agent_uuid=agent_uuid,
+        timeout_seconds=timeout_seconds,
+        claimed_by=_optional_safe_str(payload, "claimed_by"),
+    )
+
+
+def _normalize_transcript_turns(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    turns: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        role = _optional_str(item, "role")
+        text = _optional_str(item, "text")
+        if role not in {"assistant", "user"} or text is None:
+            continue
+        turn: dict[str, Any] = {"role": role, "text": text}
+        speaker_type = _optional_str(item, "speaker_type")
+        if speaker_type is not None:
+            turn["speaker_type"] = speaker_type
+        agent_id = _optional_safe_str(item, "agent_id")
+        if agent_id is not None:
+            turn["agent_id"] = agent_id
+        turns.append(turn)
+    return turns
 
 
 def _normalized_context(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1105,6 +1535,18 @@ def _phase(status: str, cause: str | None) -> str:
         return "hangup_sent"
     if status == "hangup_failed":
         return "hangup_failed"
+    if status == "human_active":
+        return "human_active"
+    if status == "waiting_agent":
+        return "waiting_agent"
+    if status == "agent_claimed":
+        return "agent_claimed"
+    if status == "agent_ringing":
+        return "agent_ringing"
+    if status == "bridging":
+        return "bridging"
+    if status == "handoff_failed":
+        return "handoff_failed"
     return status
 
 
@@ -1127,6 +1569,12 @@ def _phase_label(status: str, cause: str | None) -> str:
         "hangup_requested": "挂断中",
         "hangup_sent": "已发送挂断",
         "hangup_failed": "挂断失败",
+        "human_active": "人工通话中",
+        "waiting_agent": "等待人工接听",
+        "agent_claimed": "坐席已抢接",
+        "agent_ringing": "呼叫坐席中",
+        "bridging": "桥接中",
+        "handoff_failed": "转人工失败",
     }
     return labels.get(phase, status)
 
@@ -1181,6 +1629,18 @@ def _terminal_status_for_cause(record: OutboundCallRecord) -> str:
 
 def _business_id(record: OutboundCallRecord) -> str:
     return record.external_call_id or record.call_id
+
+
+def _handoff_summary(handoff: HandoffState | None) -> str | None:
+    if handoff is None:
+        return None
+    if handoff.summary:
+        return handoff.summary
+    if handoff.last_utterance:
+        return f"客户要求转人工：{handoff.last_utterance}"
+    if handoff.state:
+        return "客户要求转人工"
+    return None
 
 
 def _idempotency_key(request: CreateCallRequest) -> str | None:

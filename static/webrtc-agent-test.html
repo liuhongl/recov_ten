@@ -1,0 +1,1102 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WebRTC 坐席接入测试</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f4f6f8;
+        --surface: #ffffff;
+        --surface-soft: #f9fafb;
+        --text: #151922;
+        --muted: #667085;
+        --line: #d9dee8;
+        --blue: #175cd3;
+        --blue-soft: #eaf1ff;
+        --green: #087443;
+        --green-soft: #e8f5ee;
+        --amber: #9a5b13;
+        --amber-soft: #fff4df;
+        --red: #b42318;
+        --red-soft: #fff0ee;
+        --code: #101828;
+        --shadow: 0 12px 28px rgba(21, 25, 34, 0.08);
+        font-family: Inter, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      a {
+        color: inherit;
+      }
+
+      button,
+      input {
+        font: inherit;
+      }
+
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        border-bottom: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.96);
+        backdrop-filter: blur(10px);
+      }
+
+      .topbar-inner {
+        width: min(1360px, calc(100% - 24px));
+        min-height: 64px;
+        margin: 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+
+      .brand {
+        display: grid;
+        gap: 2px;
+        min-width: 210px;
+      }
+
+      .brand strong {
+        font-size: 17px;
+        line-height: 1.2;
+      }
+
+      .brand span {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .nav {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+
+      .nav a,
+      .button {
+        min-height: 36px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 0 12px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        background: var(--surface);
+        color: var(--text);
+        text-decoration: none;
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 500;
+        line-height: 1;
+        white-space: nowrap;
+      }
+
+      .nav a.active,
+      .button.primary {
+        border-color: var(--blue);
+        background: var(--blue);
+        color: #ffffff;
+      }
+
+      .button.danger {
+        border-color: #fecdca;
+        background: var(--red-soft);
+        color: var(--red);
+      }
+
+      .button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      .shell {
+        width: min(1360px, calc(100% - 24px));
+        margin: 22px auto 40px;
+        display: grid;
+        gap: 16px;
+      }
+
+      .summary {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 16px;
+        padding: 18px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+
+      h1,
+      h2,
+      p {
+        margin: 0;
+      }
+
+      h1 {
+        font-size: clamp(24px, 3vw, 34px);
+        letter-spacing: 0;
+      }
+
+      h2 {
+        font-size: 16px;
+        letter-spacing: 0;
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+
+      .status-pill {
+        min-width: 132px;
+        min-height: 38px;
+        border-radius: 999px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 16px;
+        background: var(--surface-soft);
+        color: var(--muted);
+        font-weight: 700;
+      }
+
+      .status-pill.ready {
+        background: var(--green-soft);
+        color: var(--green);
+      }
+
+      .status-pill.busy {
+        background: var(--amber-soft);
+        color: var(--amber);
+      }
+
+      .status-pill.error {
+        background: var(--red-soft);
+        color: var(--red);
+      }
+
+      .workspace {
+        display: grid;
+        grid-template-columns: minmax(340px, 0.92fr) minmax(420px, 1.08fr);
+        gap: 16px;
+        align-items: start;
+      }
+
+      .panel {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        overflow: hidden;
+      }
+
+      .panel-header {
+        min-height: 54px;
+        padding: 14px 16px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        border-bottom: 1px solid var(--line);
+        background: var(--surface-soft);
+      }
+
+      .panel-body {
+        padding: 16px;
+        display: grid;
+        gap: 14px;
+      }
+
+      .field-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .field {
+        display: grid;
+        gap: 7px;
+      }
+
+      .field.wide {
+        grid-column: 1 / -1;
+      }
+
+      label {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      input {
+        width: 100%;
+        min-height: 38px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 0 10px;
+        background: #ffffff;
+        color: var(--text);
+        outline: none;
+      }
+
+      input:focus {
+        border-color: var(--blue);
+        box-shadow: 0 0 0 3px rgba(23, 92, 211, 0.13);
+      }
+
+      .button-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .meter {
+        height: 10px;
+        border-radius: 999px;
+        background: var(--surface-soft);
+        overflow: hidden;
+        border: 1px solid var(--line);
+      }
+
+      .meter-bar {
+        width: 0%;
+        height: 100%;
+        background: var(--green);
+        transition: width 100ms ease;
+      }
+
+      .checklist {
+        display: grid;
+        gap: 9px;
+      }
+
+      .check-item {
+        display: grid;
+        grid-template-columns: 92px minmax(0, 1fr);
+        gap: 10px;
+        align-items: center;
+        min-height: 34px;
+      }
+
+      .tag {
+        min-height: 26px;
+        border-radius: 999px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 9px;
+        background: var(--surface-soft);
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .tag.ok {
+        background: var(--green-soft);
+        color: var(--green);
+      }
+
+      .tag.warn {
+        background: var(--amber-soft);
+        color: var(--amber);
+      }
+
+      .tag.fail {
+        background: var(--red-soft);
+        color: var(--red);
+      }
+
+      .log {
+        min-height: 396px;
+        max-height: 560px;
+        overflow: auto;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        background: #101828;
+        color: #d0d5dd;
+        padding: 12px;
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: 12px;
+        line-height: 1.55;
+        white-space: pre-wrap;
+      }
+
+      code {
+        color: var(--code);
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      }
+
+      .audio-box {
+        display: grid;
+        gap: 8px;
+      }
+
+      .handoff-layout {
+        display: grid;
+        grid-template-columns: minmax(220px, 0.9fr) minmax(260px, 1.1fr);
+        gap: 12px;
+      }
+
+      .handoff-list,
+      .timeline {
+        min-height: 160px;
+        max-height: 320px;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+      }
+
+      .handoff-item,
+      .turn {
+        width: 100%;
+        border: 0;
+        border-bottom: 1px solid var(--line);
+        padding: 10px 12px;
+        display: grid;
+        gap: 4px;
+        background: transparent;
+        color: var(--text);
+        text-align: left;
+      }
+
+      .handoff-item {
+        cursor: pointer;
+      }
+
+      .handoff-item:hover,
+      .handoff-item.active {
+        background: var(--blue-soft);
+      }
+
+      .turn:last-child,
+      .handoff-item:last-child {
+        border-bottom: 0;
+      }
+
+      .turn-role {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .empty {
+        padding: 14px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      audio {
+        width: 100%;
+      }
+
+      @media (max-width: 960px) {
+        .topbar-inner,
+        .summary,
+        .workspace,
+        .handoff-layout {
+          grid-template-columns: 1fr;
+        }
+
+        .topbar-inner {
+          align-items: flex-start;
+          padding: 12px 0;
+        }
+
+        .field-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand">
+          <strong>WebRTC 坐席接入测试</strong>
+          <span>localhost + FreeSWITCH WS PoC</span>
+        </div>
+        <nav class="nav" aria-label="主导航">
+          <a href="/outbound-test">外呼测试</a>
+          <a href="/browser-realtime-test">浏览器对话</a>
+          <a class="active" href="/webrtc-agent-test" aria-current="page">坐席测试</a>
+          <a href="/docs/handoff">交接文档</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section class="summary">
+        <div>
+          <h1>网页坐席上线验证</h1>
+          <p class="muted">
+            当前页验证浏览器麦克风、JsSIP 注册、待接通话查看、坐席 claim 和 FreeSWITCH 桥接。
+          </p>
+        </div>
+        <div id="agentStatus" class="status-pill">idle</div>
+      </section>
+
+      <section class="workspace">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>连接参数</h2>
+            <span class="tag" id="libraryState">JsSIP 加载中</span>
+          </div>
+          <div class="panel-body">
+            <div class="field-grid">
+              <div class="field wide">
+                <label for="wsUrl">WebSocket URL</label>
+                <input id="wsUrl" value="ws://127.0.0.1:5066" autocomplete="off" />
+              </div>
+              <div class="field wide">
+                <label for="iceServers">ICE Servers</label>
+                <input id="iceServers" value="" autocomplete="off" />
+              </div>
+              <div class="field">
+                <label for="sipUri">坐席 SIP URI</label>
+                <input id="sipUri" value="sip:1001@111.229.146.182" autocomplete="off" />
+              </div>
+              <div class="field">
+                <label for="password">坐席密码</label>
+                <input id="password" type="password" autocomplete="current-password" />
+              </div>
+              <div class="field">
+                <label for="displayName">显示名称</label>
+                <input id="displayName" value="Web Agent 1001" autocomplete="off" />
+              </div>
+              <div class="field">
+                <label for="targetUri">拨打测试目标</label>
+                <input id="targetUri" value="sip:9196@111.229.146.182" autocomplete="off" />
+              </div>
+            </div>
+
+            <div class="button-row">
+              <button id="micButton" class="button" type="button">检查麦克风</button>
+              <button id="registerButton" class="button primary" type="button">上线注册</button>
+              <button id="unregisterButton" class="button" type="button" disabled>下线</button>
+              <button id="callButton" class="button" type="button" disabled>拨打测试</button>
+              <button id="agentCallButton" class="button" type="button" disabled>呼叫本座席</button>
+              <button id="answerButton" class="button primary" type="button" disabled>接听来电</button>
+              <button id="rejectButton" class="button danger" type="button" disabled>拒接</button>
+              <button id="hangupButton" class="button danger" type="button" disabled>挂断</button>
+            </div>
+
+            <div class="field">
+              <label>麦克风输入</label>
+              <div class="meter" aria-hidden="true"><div id="meterBar" class="meter-bar"></div></div>
+            </div>
+
+            <div class="checklist">
+              <div class="check-item">
+                <span id="micState" class="tag">未检查</span>
+                <span>浏览器麦克风权限</span>
+              </div>
+              <div class="check-item">
+                <span id="socketState" class="tag">未连接</span>
+                <span>WS 到 FreeSWITCH</span>
+              </div>
+              <div class="check-item">
+                <span id="registerState" class="tag">未注册</span>
+                <span>SIP REGISTER</span>
+              </div>
+              <div class="check-item">
+                <span id="callState" class="tag">无通话</span>
+                <span>echo / 坐席通话</span>
+              </div>
+            </div>
+
+            <div class="audio-box">
+              <label for="remoteAudio">远端音频</label>
+              <audio id="remoteAudio" controls autoplay></audio>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>事件日志</h2>
+            <button id="clearLogButton" class="button" type="button">清空</button>
+          </div>
+          <div class="panel-body">
+            <div id="log" class="log" role="log" aria-live="polite"></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>待接通话</h2>
+            <div class="button-row">
+              <button id="refreshHandoffButton" class="button" type="button">刷新</button>
+              <button id="claimHandoffButton" class="button primary" type="button" disabled>接听选中通话</button>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="handoff-layout">
+              <div>
+                <label>等待人工</label>
+                <div id="handoffList" class="handoff-list">
+                  <div class="empty">暂无待接通话</div>
+                </div>
+              </div>
+              <div>
+                <label>AI 对话记录</label>
+                <div id="handoffTimeline" class="timeline">
+                  <div class="empty">选择一通待接电话查看上下文</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/vendor/jssip.min.js"></script>
+    <script>
+      const els = {
+        agentStatus: document.getElementById("agentStatus"),
+        libraryState: document.getElementById("libraryState"),
+        wsUrl: document.getElementById("wsUrl"),
+        iceServers: document.getElementById("iceServers"),
+        sipUri: document.getElementById("sipUri"),
+        password: document.getElementById("password"),
+        displayName: document.getElementById("displayName"),
+        targetUri: document.getElementById("targetUri"),
+        micButton: document.getElementById("micButton"),
+        registerButton: document.getElementById("registerButton"),
+        unregisterButton: document.getElementById("unregisterButton"),
+        callButton: document.getElementById("callButton"),
+        agentCallButton: document.getElementById("agentCallButton"),
+        answerButton: document.getElementById("answerButton"),
+        rejectButton: document.getElementById("rejectButton"),
+        hangupButton: document.getElementById("hangupButton"),
+        refreshHandoffButton: document.getElementById("refreshHandoffButton"),
+        claimHandoffButton: document.getElementById("claimHandoffButton"),
+        clearLogButton: document.getElementById("clearLogButton"),
+        micState: document.getElementById("micState"),
+        socketState: document.getElementById("socketState"),
+        registerState: document.getElementById("registerState"),
+        callState: document.getElementById("callState"),
+        meterBar: document.getElementById("meterBar"),
+        remoteAudio: document.getElementById("remoteAudio"),
+        handoffList: document.getElementById("handoffList"),
+        handoffTimeline: document.getElementById("handoffTimeline"),
+        log: document.getElementById("log"),
+      };
+
+      let ua = null;
+      let currentSession = null;
+      let pendingIncomingSession = null;
+      const boundSessions = new WeakSet();
+      const remoteAudioBoundSessions = new WeakSet();
+      let micStream = null;
+      let meterContext = null;
+      let meterFrame = null;
+      let waitingHandoffCalls = [];
+      let selectedHandoffCall = null;
+      let claimInFlight = false;
+
+      function log(message, details) {
+        const time = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+        const suffix = details ? ` ${JSON.stringify(details, null, 2)}` : "";
+        els.log.textContent += `[${time}] ${message}${suffix}\n`;
+        els.log.scrollTop = els.log.scrollHeight;
+      }
+
+      function setTag(el, text, kind) {
+        el.textContent = text;
+        el.className = `tag${kind ? ` ${kind}` : ""}`;
+      }
+
+      function setStatus(text, kind) {
+        els.agentStatus.textContent = text;
+        els.agentStatus.className = `status-pill${kind ? ` ${kind}` : ""}`;
+      }
+
+      function setControls() {
+        const registered = ua && ua.isRegistered();
+        const activeCall = Boolean(currentSession);
+        const incomingCall = Boolean(pendingIncomingSession);
+        els.registerButton.disabled = registered;
+        els.unregisterButton.disabled = !ua;
+        els.callButton.disabled = !registered || activeCall || incomingCall;
+        els.agentCallButton.disabled = !registered || activeCall || incomingCall;
+        els.answerButton.disabled = !incomingCall;
+        els.rejectButton.disabled = !incomingCall;
+        els.hangupButton.disabled = !activeCall;
+        els.claimHandoffButton.disabled =
+          !registered ||
+          !selectedHandoffCall ||
+          !selectedHandoffCall.handoff ||
+          !selectedHandoffCall.handoff.can_claim ||
+          activeCall ||
+          incomingCall ||
+          claimInFlight;
+      }
+
+      function stopMicMeter() {
+        if (meterFrame) cancelAnimationFrame(meterFrame);
+        meterFrame = null;
+        if (meterContext) meterContext.close();
+        meterContext = null;
+        els.meterBar.style.width = "0%";
+      }
+
+      async function checkMicrophone() {
+        try {
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            throw new Error("当前浏览器不支持 getUserMedia");
+          }
+          if (!micStream) {
+            micStream = await navigator.mediaDevices.getUserMedia({
+              audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+              },
+            });
+          }
+          setTag(els.micState, "可用", "ok");
+          log("麦克风授权成功");
+          startMicMeter(micStream);
+          return true;
+        } catch (error) {
+          setTag(els.micState, "失败", "fail");
+          setStatus("mic error", "error");
+          log("麦克风授权失败", { error: error.message });
+          return false;
+        }
+      }
+
+      function startMicMeter(stream) {
+        stopMicMeter();
+        meterContext = new AudioContext();
+        const source = meterContext.createMediaStreamSource(stream);
+        const analyser = meterContext.createAnalyser();
+        analyser.fftSize = 256;
+        source.connect(analyser);
+        const samples = new Uint8Array(analyser.frequencyBinCount);
+        const tick = () => {
+          analyser.getByteFrequencyData(samples);
+          const avg = samples.reduce((sum, value) => sum + value, 0) / samples.length;
+          els.meterBar.style.width = `${Math.min(100, Math.round(avg * 1.5))}%`;
+          meterFrame = requestAnimationFrame(tick);
+        };
+        tick();
+      }
+
+      function ensureJsSIP() {
+        if (!window.JsSIP) {
+          setTag(els.libraryState, "JsSIP 未加载", "fail");
+          throw new Error("JsSIP 未加载，请确认 /vendor/jssip.min.js 可访问");
+        }
+        setTag(els.libraryState, "JsSIP 已加载", "ok");
+      }
+
+      async function registerAgent() {
+        try {
+          ensureJsSIP();
+          const microphoneReady = await checkMicrophone();
+          if (!microphoneReady) throw new Error("麦克风不可用，无法上线注册");
+          if (ua) {
+            ua.stop();
+            ua = null;
+          }
+
+          const socket = new JsSIP.WebSocketInterface(els.wsUrl.value.trim());
+          ua = new JsSIP.UA({
+            sockets: [socket],
+            uri: els.sipUri.value.trim(),
+            password: els.password.value,
+            display_name: els.displayName.value.trim(),
+            register: true,
+            session_timers: false,
+          });
+
+          ua.on("connecting", () => {
+            setStatus("connecting", "busy");
+            setTag(els.socketState, "连接中", "warn");
+            log("正在连接 FreeSWITCH WS");
+          });
+
+          ua.on("connected", () => {
+            setTag(els.socketState, "已连接", "ok");
+            log("WS 已连接");
+          });
+
+          ua.on("disconnected", () => {
+            setTag(els.socketState, "已断开", "fail");
+            setTag(els.registerState, "未注册", "");
+            setStatus("offline", "");
+            log("WS 已断开");
+            setControls();
+          });
+
+          ua.on("registered", () => {
+            setTag(els.registerState, "已注册", "ok");
+            setStatus("available", "ready");
+            log("SIP 注册成功");
+            setControls();
+          });
+
+          ua.on("unregistered", () => {
+            setTag(els.registerState, "未注册", "");
+            setStatus("offline", "");
+            log("SIP 已下线");
+            setControls();
+          });
+
+          ua.on("registrationFailed", (event) => {
+            setTag(els.registerState, "注册失败", "fail");
+            setStatus("register error", "error");
+            log("SIP 注册失败", {
+              cause: event.cause,
+              status_code: event.response && event.response.status_code,
+            });
+            setControls();
+          });
+
+          ua.on("newRTCSession", (event) => {
+            bindSession(event.session, { incoming: event.originator === "remote" });
+          });
+
+          ua.start();
+          setControls();
+        } catch (error) {
+          log("上线注册失败", { error: error.message });
+          setStatus("error", "error");
+          setControls();
+        }
+      }
+
+      function unregisterAgent() {
+        if (currentSession) currentSession.terminate();
+        currentSession = null;
+        if (pendingIncomingSession) pendingIncomingSession.terminate();
+        pendingIncomingSession = null;
+        if (ua) {
+          ua.unregister();
+          ua.stop();
+          ua = null;
+        }
+        setTag(els.registerState, "未注册", "");
+        setTag(els.socketState, "未连接", "");
+        setTag(els.callState, "无通话", "");
+        setStatus("offline", "");
+        setControls();
+      }
+
+      function callTarget() {
+        if (!ua || !ua.isRegistered()) return;
+        const target = els.targetUri.value.trim();
+        log("发起测试呼叫", { target });
+        const session = ua.call(target, {
+          pcConfig: buildPeerConnectionConfig(),
+          mediaStream: micStream,
+          mediaConstraints: { audio: true, video: false },
+          rtcOfferConstraints: {
+            offerToReceiveAudio: true,
+            offerToReceiveVideo: false,
+          },
+        });
+        bindSession(session);
+      }
+
+      async function callThisAgent() {
+        if (!ua || !ua.isRegistered()) return;
+        const agentExtension = currentAgentExtension();
+        try {
+          log("请求后端呼叫本座席", { agent_extension: agentExtension });
+          const response = await fetch("/webrtc-agent-test/call", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              agent_extension: agentExtension,
+              timeout_seconds: 20,
+            }),
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || response.statusText);
+          log("后端已发起座席呼叫", payload);
+        } catch (error) {
+          log("呼叫本座席失败", { error: error.message });
+        }
+      }
+
+      async function refreshHandoffCalls() {
+        try {
+          const response = await fetch("/calls?status=active&limit=50");
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || response.statusText);
+          waitingHandoffCalls = (payload.calls || []).filter((call) => {
+            return call.handoff && call.handoff.state === "waiting_agent";
+          });
+          renderHandoffList();
+          log("待接通话已刷新", { count: waitingHandoffCalls.length });
+        } catch (error) {
+          log("刷新待接通话失败", { error: error.message });
+        }
+      }
+
+      function renderHandoffList() {
+        if (!waitingHandoffCalls.length) {
+          els.handoffList.innerHTML = '<div class="empty">暂无待接通话</div>';
+          selectedHandoffCall = null;
+          renderHandoffTimeline(null);
+          setControls();
+          return;
+        }
+        els.handoffList.innerHTML = "";
+        waitingHandoffCalls.forEach((call) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = `handoff-item${selectedHandoffCall && selectedHandoffCall.call_id === call.call_id ? " active" : ""}`;
+          button.innerHTML = `
+            <strong>${escapeHtml(call.call_id)}</strong>
+            <span class="muted">${escapeHtml(call.handoff.last_utterance || "客户要求转人工")}</span>
+          `;
+          button.addEventListener("click", () => selectHandoffCall(call.call_id));
+          els.handoffList.appendChild(button);
+        });
+        setControls();
+      }
+
+      async function selectHandoffCall(callId) {
+        try {
+          const response = await fetch(`/calls/${encodeURIComponent(callId)}`);
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || response.statusText);
+          selectedHandoffCall = payload.call;
+          renderHandoffList();
+          renderHandoffTimeline(selectedHandoffCall);
+          log("已加载待接通话详情", { call_id: callId });
+        } catch (error) {
+          log("加载待接通话详情失败", { call_id: callId, error: error.message });
+        } finally {
+          setControls();
+        }
+      }
+
+      function renderHandoffTimeline(call) {
+        const turns = call && (call.turns || (call.handoff && call.handoff.turns) || []);
+        if (!turns || !turns.length) {
+          els.handoffTimeline.innerHTML = '<div class="empty">暂无 AI 对话记录</div>';
+          return;
+        }
+        els.handoffTimeline.innerHTML = "";
+        turns.forEach((turn) => {
+          const item = document.createElement("div");
+          item.className = "turn";
+          const role = turn.role === "assistant" ? "客服" : "客户";
+          item.innerHTML = `
+            <span class="turn-role">${role}</span>
+            <span>${escapeHtml(turn.text || "")}</span>
+          `;
+          els.handoffTimeline.appendChild(item);
+        });
+      }
+
+      async function claimSelectedHandoff() {
+        if (!selectedHandoffCall) return;
+        claimInFlight = true;
+        setControls();
+        const callId = selectedHandoffCall.call_id;
+        try {
+          log("提交坐席 claim", { call_id: callId });
+          const response = await fetch(`/calls/${encodeURIComponent(callId)}/handoff/claim`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              agent_extension: currentAgentExtension(),
+              claimed_by: currentAgentExtension(),
+              timeout_seconds: 20,
+            }),
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || response.statusText);
+          selectedHandoffCall = payload.call;
+          renderHandoffTimeline(selectedHandoffCall);
+          log("坐席 claim 已完成，等待浏览器来电并点击接听", payload.call.handoff);
+          await refreshHandoffCalls();
+        } catch (error) {
+          log("坐席 claim 失败", { call_id: callId, error: error.message });
+        } finally {
+          claimInFlight = false;
+          setControls();
+        }
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+      }
+
+      function currentAgentExtension() {
+        const match = els.sipUri.value.trim().match(/^sip:([^@]+)@/i);
+        return match ? match[1] : "1001";
+      }
+
+      function buildPeerConnectionConfig() {
+        const raw = els.iceServers.value.trim();
+        if (!raw) return {};
+        return {
+          iceServers: raw
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean)
+            .map((urls) => ({ urls })),
+        };
+      }
+
+      function bindSession(session, options = {}) {
+        const incoming = Boolean(options.incoming);
+        if (incoming) {
+          pendingIncomingSession = session;
+          setTag(els.callState, "来电中", "warn");
+          setStatus("incoming", "busy");
+          log("收到座席来电");
+        } else {
+          currentSession = session;
+          setTag(els.callState, "通话中", "warn");
+          setStatus("busy", "busy");
+        }
+        if (boundSessions.has(session)) {
+          setControls();
+          return;
+        }
+        boundSessions.add(session);
+        setControls();
+
+        session.on("progress", () => log("呼叫振铃 / progress"));
+        session.on("accepted", () => {
+          if (pendingIncomingSession === session) pendingIncomingSession = null;
+          currentSession = session;
+          setTag(els.callState, "已接通", "ok");
+          log("呼叫已接通");
+          setControls();
+        });
+        session.on("confirmed", () => log("媒体协商完成"));
+        session.on("peerconnection", () => attachRemoteAudio(session));
+        session.on("ended", (event) => {
+          log("呼叫结束", { cause: event.cause });
+          if (currentSession === session) currentSession = null;
+          if (pendingIncomingSession === session) pendingIncomingSession = null;
+          setTag(els.callState, "无通话", "");
+          setStatus(ua && ua.isRegistered() ? "available" : "offline", ua && ua.isRegistered() ? "ready" : "");
+          setControls();
+        });
+        session.on("failed", (event) => {
+          log("呼叫失败", { cause: event.cause });
+          if (currentSession === session) currentSession = null;
+          if (pendingIncomingSession === session) pendingIncomingSession = null;
+          setTag(els.callState, "失败", "fail");
+          setStatus(ua && ua.isRegistered() ? "available" : "error", ua && ua.isRegistered() ? "ready" : "error");
+          setControls();
+        });
+
+        attachRemoteAudio(session);
+      }
+
+      function attachRemoteAudio(session) {
+        if (remoteAudioBoundSessions.has(session)) return;
+        if (!session.connection) return;
+        remoteAudioBoundSessions.add(session);
+        session.connection.addEventListener("track", (event) => {
+          const [stream] = event.streams;
+          if (stream) {
+            els.remoteAudio.srcObject = stream;
+            log("收到远端音频 track");
+          }
+        });
+      }
+
+      async function answerIncoming() {
+        if (!pendingIncomingSession) return;
+        try {
+          if (!micStream) await checkMicrophone();
+          if (!micStream) throw new Error("麦克风不可用");
+          pendingIncomingSession.answer({
+            pcConfig: buildPeerConnectionConfig(),
+            mediaStream: micStream,
+            mediaConstraints: { audio: true, video: false },
+            rtcAnswerConstraints: {
+              offerToReceiveAudio: true,
+              offerToReceiveVideo: false,
+            },
+          });
+          currentSession = pendingIncomingSession;
+          pendingIncomingSession = null;
+          setTag(els.callState, "接听中", "warn");
+          setStatus("busy", "busy");
+          setControls();
+        } catch (error) {
+          log("接听来电失败", { error: error.message });
+        }
+      }
+
+      function rejectIncoming() {
+        if (!pendingIncomingSession) return;
+        pendingIncomingSession.terminate();
+        pendingIncomingSession = null;
+        setTag(els.callState, "无通话", "");
+        setStatus(ua && ua.isRegistered() ? "available" : "offline", ua && ua.isRegistered() ? "ready" : "");
+        setControls();
+      }
+
+      function hangup() {
+        if (currentSession) currentSession.terminate();
+      }
+
+      els.micButton.addEventListener("click", checkMicrophone);
+      els.registerButton.addEventListener("click", registerAgent);
+      els.unregisterButton.addEventListener("click", unregisterAgent);
+      els.callButton.addEventListener("click", callTarget);
+      els.agentCallButton.addEventListener("click", callThisAgent);
+      els.refreshHandoffButton.addEventListener("click", refreshHandoffCalls);
+      els.claimHandoffButton.addEventListener("click", claimSelectedHandoff);
+      els.answerButton.addEventListener("click", answerIncoming);
+      els.rejectButton.addEventListener("click", rejectIncoming);
+      els.hangupButton.addEventListener("click", hangup);
+      els.clearLogButton.addEventListener("click", () => {
+        els.log.textContent = "";
+      });
+
+      window.addEventListener("load", () => {
+        if (window.JsSIP) {
+          setTag(els.libraryState, "JsSIP 已加载", "ok");
+          log("页面已就绪");
+        } else {
+          setTag(els.libraryState, "JsSIP 未加载", "fail");
+          log("JsSIP 未加载，请检查 /vendor/jssip.min.js");
+        }
+        setControls();
+        refreshHandoffCalls();
+      });
+
+      window.addEventListener("beforeunload", () => {
+        if (currentSession) currentSession.terminate();
+        if (ua) ua.stop();
+        if (micStream) micStream.getTracks().forEach((track) => track.stop());
+        stopMicMeter();
+      });
+    </script>
+  </body>
+</html>

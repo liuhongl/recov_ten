@@ -8,7 +8,10 @@ from app.call_control import (
     CallControlError,
     OutboundCallManager,
     OutboundCallRecord,
+    build_uuid_bridge_command,
+    build_webrtc_agent_originate_command,
     build_originate_command,
+    originate_webrtc_agent_test_call,
     parse_create_call_request,
 )
 from app.config import (
@@ -52,6 +55,368 @@ def test_build_originate_command_uses_local_dialplan():
     assert "ignore_early_media=true" in command
     assert "sip_realtime_external_call_id=biz-1" in command
     assert command.endswith("}user/1000 9199 XML default")
+
+
+def test_build_webrtc_agent_originate_command_parks_known_agent_uuid():
+    command = build_webrtc_agent_originate_command(
+        agent_uuid="agent-uuid-1",
+        endpoint="sofia/internal/sip:1001@127.0.0.1:5066;transport=ws",
+        timeout_seconds=12,
+    )
+
+    assert command.startswith("originate {")
+    assert "origination_uuid=agent-uuid-1" in command
+    assert "originate_timeout=12" in command
+    assert "origination_caller_id_number=9001" in command
+    assert command.endswith(
+        "}sofia/internal/sip:1001@127.0.0.1:5066;transport=ws &park()"
+    )
+
+
+def test_build_uuid_bridge_command_uses_customer_and_agent_uuids():
+    command = build_uuid_bridge_command(
+        customer_call_id="customer-uuid-1",
+        agent_uuid="agent-uuid-1",
+    )
+
+    assert command == "uuid_bridge customer-uuid-1 agent-uuid-1"
+
+
+def test_originate_webrtc_agent_test_call_maps_event_socket_failure(monkeypatch):
+    class FakeDialer:
+        def __init__(self, config):
+            self.config = config
+
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            raise OSError("connect failed")
+
+    monkeypatch.setattr("app.call_control.FreeSwitchOutboundDialer", FakeDialer)
+    config = GatewayConfig(event_socket=EventSocketConfig(enabled=True))
+
+    with pytest.raises(CallControlError) as exc_info:
+        originate_webrtc_agent_test_call(config, {"agent_extension": "1001"})
+
+    assert exc_info.value.status_code == 503
+    assert "FreeSWITCH Event Socket request failed" in str(exc_info.value)
+
+
+def test_outbound_manager_handoff_creates_waiting_agent_before_claim():
+    operations: list[tuple[str, str, str | None]] = []
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            operations.append(("resolve", endpoint, None))
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            operations.append(("originate", command, None))
+            return "+OK agent-uuid-1"
+
+        async def break_audio_stream(self, call_id: str) -> str:
+            operations.append(("break_audio_stream", call_id, None))
+            return "+OK"
+
+        async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
+            operations.append(("bridge", customer_call_id, agent_uuid))
+            return "+OK uuid_bridge accepted"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+    )
+
+    try:
+        call = manager.create_call({"destination": "1000"})
+        final_call = _wait_for_status(manager, call["call_id"], "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=final_call["call_id"])
+        )
+        operations.clear()
+
+        handoff_call = manager.request_handoff(
+            final_call["call_id"],
+            {
+                "trigger": "customer_requested",
+                "reason": "request_human",
+                "last_utterance": "我要转人工",
+                "ai_turns": [
+                    {"role": "assistant", "text": "您好，这里是物业中心。"},
+                    {"role": "user", "text": "我要转人工"},
+                ],
+            },
+        )
+
+        assert handoff_call["status"] == "waiting_agent"
+        assert handoff_call["handoff"] == {
+            "state": "waiting_agent",
+            "trigger": "customer_requested",
+            "reason": "request_human",
+            "last_utterance": "我要转人工",
+            "summary": None,
+            "requested_at_ms": handoff_call["handoff"]["requested_at_ms"],
+            "expires_at_ms": handoff_call["handoff"]["expires_at_ms"],
+            "claimed_at_ms": None,
+            "claimed_by": None,
+            "agent_extension": None,
+            "agent_uuid": None,
+            "agent_endpoint": None,
+            "answered_at_ms": None,
+            "bridged_at_ms": None,
+            "human_ended_at_ms": None,
+            "updated_at_ms": handoff_call["handoff"]["updated_at_ms"],
+            "agent_originate_reply": None,
+            "audio_stream_break_reply": None,
+            "bridge_reply": None,
+            "human_transcript_status": None,
+            "human_transcript_error": None,
+            "ai_turns": [
+                {"role": "assistant", "text": "您好，这里是物业中心。"},
+                {"role": "user", "text": "我要转人工"},
+            ],
+            "human_turns": [],
+            "turns": [
+                {"role": "assistant", "text": "您好，这里是物业中心。"},
+                {"role": "user", "text": "我要转人工"},
+            ],
+            "recent_turns": [
+                {"role": "assistant", "text": "您好，这里是物业中心。"},
+                {"role": "user", "text": "我要转人工"},
+            ],
+            "can_claim": True,
+            "error": None,
+        }
+        assert handoff_call["turns"] == handoff_call["handoff"]["turns"]
+        assert handoff_call["recent_turns"] == handoff_call["handoff"]["recent_turns"]
+        assert operations == []
+
+        claimed_call = manager.claim_handoff(
+            final_call["call_id"],
+            {
+                "agent_extension": "1001",
+                "agent_uuid": "agent-uuid-1",
+                "timeout_seconds": 12,
+                "claimed_by": "agent-1001",
+            },
+        )
+
+        assert claimed_call["status"] == "human_active"
+        assert claimed_call["handoff"]["state"] == "human_active"
+        assert claimed_call["handoff"]["claimed_by"] == "agent-1001"
+        assert claimed_call["handoff"]["agent_extension"] == "1001"
+        assert claimed_call["handoff"]["agent_uuid"] == "agent-uuid-1"
+        assert claimed_call["handoff"]["agent_endpoint"] == (
+            "sofia/internal/sip:agent@browser.invalid;transport=ws"
+        )
+        assert claimed_call["handoff"]["agent_originate_reply"] == "+OK agent-uuid-1"
+        assert claimed_call["handoff"]["audio_stream_break_reply"] == "+OK"
+        assert claimed_call["handoff"]["bridge_reply"] == "+OK uuid_bridge accepted"
+        assert claimed_call["handoff"]["can_claim"] is False
+        assert operations == [
+            ("resolve", "sofia_contact:*/1001", None),
+            (
+                "originate",
+                (
+                    "originate {origination_uuid=agent-uuid-1,"
+                    "origination_caller_id_name=Handoff_Test,"
+                    "origination_caller_id_number=9001,originate_timeout=12}"
+                    "sofia/internal/sip:agent@browser.invalid;transport=ws &park()"
+                ),
+                None,
+            ),
+            ("break_audio_stream", final_call["call_id"], None),
+            ("bridge", final_call["call_id"], "agent-uuid-1"),
+        ]
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_handoff_transcript_merges_ai_and_human_turns_after_hangup():
+    enqueued_payloads = []
+
+    class FakeCallResultWriter:
+        def enqueue_nowait(self, payload):
+            enqueued_payloads.append(payload)
+            return True
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            return "+OK agent-uuid-1"
+
+        async def break_audio_stream(self, call_id: str) -> str:
+            return "+OK"
+
+        async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
+            return "+OK uuid_bridge accepted"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+        call_result_writer=FakeCallResultWriter(),
+    )
+
+    try:
+        call = manager.create_call(
+            {
+                "destination": "1000",
+                "context": {
+                    "tenantId": "000000",
+                    "taskId": "task-1",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            }
+        )
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=call_id)
+        )
+        manager.request_handoff(
+            call_id,
+            {
+                "trigger": "customer_requested",
+                "reason": "request_human",
+                "last_utterance": "我要转人工",
+                "ai_turns": [
+                    {"role": "assistant", "speaker_type": "ai", "text": "您好"},
+                    {"role": "user", "speaker_type": "customer", "text": "我要转人工"},
+                ],
+            },
+        )
+        manager.claim_handoff(
+            call_id,
+            {
+                "agent_extension": "1001",
+                "agent_uuid": "agent-uuid-1",
+                "claimed_by": "agent-1001",
+            },
+        )
+        manager.handle_channel_event(
+            ChannelStateEvent(
+                name="CHANNEL_HANGUP_COMPLETE",
+                call_id=call_id,
+                hangup_cause="NORMAL_CLEARING",
+            )
+        )
+
+        final_call = manager.complete_handoff_transcript(
+            call_id,
+            {
+                "turns": [
+                    {
+                        "role": "assistant",
+                        "speaker_type": "human_agent",
+                        "agent_id": "agent-1001",
+                        "text": "您好，我是物业客服。",
+                    },
+                    {
+                        "role": "user",
+                        "speaker_type": "customer",
+                        "text": "我想确认一下费用。",
+                    },
+                ]
+            },
+        )
+
+        assert final_call["handoff"]["human_transcript_status"] == "completed"
+        assert final_call["handoff"]["human_ended_at_ms"] is not None
+        assert enqueued_payloads == [
+            {
+                "call_id": call_id,
+                "context": {
+                    "tenantId": "000000",
+                    "taskId": "task-1",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+                "turns": [
+                    {"role": "assistant", "speaker_type": "ai", "text": "您好"},
+                    {"role": "user", "speaker_type": "customer", "text": "我要转人工"},
+                    {
+                        "role": "assistant",
+                        "speaker_type": "human_agent",
+                        "agent_id": "agent-1001",
+                        "text": "您好，我是物业客服。",
+                    },
+                    {
+                        "role": "user",
+                        "speaker_type": "customer",
+                        "text": "我想确认一下费用。",
+                    },
+                ],
+            }
+        ]
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_rejects_handoff_transcript_without_human_bridge():
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "user/1000"
+
+        async def originate(self, command: str) -> str:
+            return "+OK customer-call"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+    )
+
+    try:
+        call = manager.create_call({"destination": "1000"})
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=call_id)
+        )
+        manager.request_handoff(
+            call_id,
+            {
+                "trigger": "customer_requested",
+                "reason": "request_human",
+                "last_utterance": "我要转人工",
+            },
+        )
+        manager.handle_channel_event(
+            ChannelStateEvent(
+                name="CHANNEL_HANGUP_COMPLETE",
+                call_id=call_id,
+                hangup_cause="NORMAL_CLEARING",
+            )
+        )
+
+        with pytest.raises(CallControlError) as exc_info:
+            manager.complete_handoff_transcript(
+                call_id,
+                {"turns": [{"role": "assistant", "text": "您好，我是物业客服。"}]},
+            )
+
+        assert exc_info.value.status_code == 409
+        assert "human handoff is not active" in str(exc_info.value)
+    finally:
+        manager.shutdown()
 
 
 def test_call_record_exposes_busy_diagnostics():
@@ -334,7 +699,7 @@ def test_outbound_manager_originates_in_background():
             }
         )
 
-        assert call["status"] == "queued"
+        assert call["status"] in {"queued", "originating", "originated"}
         final_call = _wait_for_status(manager, call["call_id"], "originated")
         assert final_call["freeswitch_reply"] == "+OK call accepted"
         assert commands

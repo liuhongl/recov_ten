@@ -72,6 +72,12 @@ LATEST_UTTERANCE_GUARD = (
     "除非用户最新一句明确询问时间，否则不要主动报时。"
 )
 SPOKEN_AMOUNT_RE = re.compile(r"\d+(?:\.\d+)?\s*元")
+HANDOFF_REQUEST_RE = re.compile(
+    r"(?:转接|转|接|找|换|叫|要)(?:一下|个)?人工(?!费|智能)"
+    r"|(?:转接|转|找)(?:一下|个)?客服"
+    r"|人工(?:客服|坐席)"
+    r"|真人(?:客服|坐席)"
+)
 OPENING_BUSINESS_GUARD = "\n".join(
     [
         "这是待缴费用确认电话，不是闲聊。",
@@ -178,6 +184,7 @@ RealtimeSessionFactory = Callable[
 CallAnsweredPredicate = Callable[[str], bool]
 PromptSnapshotProvider = Callable[[str], PromptSnapshot | None]
 CallContextProvider = Callable[[str], Mapping[str, Any] | None]
+HandoffRequester = Callable[[str, dict[str, Any]], Mapping[str, Any]]
 
 
 @dataclass
@@ -332,6 +339,11 @@ class RealtimePhoneSessionStats:
     )
     interruption_repair_active: bool = False
     playback_active: bool = False
+    handoff_requested: bool = False
+    handoff_completed: bool = False
+    handoff_trigger_turn_id: int | None = None
+    handoff_error: str | None = None
+    handoff_result: dict[str, Any] | None = field(default=None, repr=False)
     prompt_scene: str = "default"
     prompt_snapshot: PromptSnapshot | None = None
     background_tasks: set[asyncio.Task] = field(default_factory=set, repr=False)
@@ -358,6 +370,7 @@ class FreeSwitchRealtimeGatewayServer:
         is_call_answered: CallAnsweredPredicate | None = None,
         prompt_snapshot_provider: PromptSnapshotProvider | None = None,
         call_context_provider: CallContextProvider | None = None,
+        handoff_requester: HandoffRequester | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("api_key is required")
@@ -428,6 +441,7 @@ class FreeSwitchRealtimeGatewayServer:
         self.opening_store = opening_store
         self._is_call_answered = is_call_answered
         self.call_context_provider = call_context_provider
+        self._handoff_requester = handoff_requester
 
     @property
     def address(self) -> tuple[str, int]:
@@ -1057,6 +1071,8 @@ class FreeSwitchRealtimeGatewayServer:
             return
 
         async with session.realtime_lock:
+            if session.handoff_requested:
+                return
             if session.interruption_repair_active:
                 session.repair_replay_frames_16k.append(frame_16k)
                 return
@@ -1268,6 +1284,15 @@ class FreeSwitchRealtimeGatewayServer:
         flushed_frame_count = 0
         tail_silence_frame_count = 0
 
+        handoff_reason = _detect_handoff_request(result.input_transcript)
+        if handoff_reason is not None and self._handoff_requester is not None:
+            await self._finalize_handoff_request_turn(
+                session,
+                result,
+                reason=handoff_reason,
+            )
+            return
+
         output_buffer = session.playback_buffers.pop(turn_id, None)
         if (
             result.status == "completed"
@@ -1348,12 +1373,224 @@ class FreeSwitchRealtimeGatewayServer:
             session.model_done_turns.discard(turn_id)
             session.jitter_prefilled_turns.discard(turn_id)
 
+    async def _finalize_handoff_request_turn(
+        self,
+        session: RealtimePhoneSessionStats,
+        result: RealtimeTurnResult,
+        *,
+        reason: str,
+    ) -> None:
+        turn_id = result.turn_id
+        session.model_done_turns.add(turn_id)
+        if result.status == "completed":
+            session.turns_completed += 1
+        else:
+            session.turns_failed += 1
+
+        self._commit_handoff_request_turn(
+            session,
+            turn_id,
+            input_transcript=result.input_transcript,
+        )
+        await self._trigger_handoff_from_turn(session, result, reason=reason)
+
+        LOGGER.info(
+            "realtime_phone_handoff_turn_done call_id=%s session_id=%s turn=%s "
+            "status=%s reason=%s response_id=%s input_transcript=%s "
+            "output_transcript_suppressed=%s model_input_bytes=%s "
+            "model_output_bytes=%s handoff_completed=%s handoff_error=%s",
+            session.call_id,
+            session.session_id,
+            turn_id,
+            result.status,
+            reason,
+            result.response_id,
+            result.input_transcript,
+            bool(result.output_transcript),
+            result.input_audio_bytes,
+            result.output_audio_bytes,
+            session.handoff_completed,
+            session.handoff_error,
+        )
+
+    async def _trigger_handoff_from_turn(
+        self,
+        session: RealtimePhoneSessionStats,
+        result: RealtimeTurnResult,
+        *,
+        reason: str,
+    ) -> None:
+        if session.handoff_requested:
+            LOGGER.info(
+                "realtime_phone_handoff_duplicate_ignored call_id=%s "
+                "session_id=%s turn=%s reason=%s",
+                session.call_id,
+                session.session_id,
+                result.turn_id,
+                reason,
+            )
+            return
+
+        session.handoff_requested = True
+        session.handoff_completed = False
+        session.handoff_trigger_turn_id = result.turn_id
+        session.handoff_error = None
+        await self._stop_ai_playback_for_handoff(session)
+
+        requester = self._handoff_requester
+        if requester is None:
+            return
+        payload = {
+            "trigger": "customer_requested",
+            "reason": reason,
+            "last_utterance": result.input_transcript.strip(),
+            "ai_turns": self._build_call_result_turns(session),
+        }
+        try:
+            handoff_result = await asyncio.to_thread(
+                requester,
+                session.call_id,
+                payload,
+            )
+        except Exception as err:
+            session.handoff_requested = False
+            session.handoff_error = str(err)
+            LOGGER.warning(
+                "realtime_phone_handoff_request_failed call_id=%s "
+                "session_id=%s turn=%s reason=%s error=%s",
+                session.call_id,
+                session.session_id,
+                result.turn_id,
+                reason,
+                err,
+                exc_info=True,
+            )
+            return
+
+        session.handoff_completed = True
+        session.handoff_result = dict(handoff_result)
+        await self._close_realtime_session_for_handoff(session)
+        LOGGER.info(
+            "realtime_phone_handoff_request_succeeded call_id=%s "
+            "session_id=%s turn=%s reason=%s",
+            session.call_id,
+            session.session_id,
+            result.turn_id,
+            reason,
+        )
+
+    async def _stop_ai_playback_for_handoff(
+        self,
+        session: RealtimePhoneSessionStats,
+    ) -> None:
+        session.interruptions += 1
+        interrupted_output_turn_id = session.current_output_turn_id
+        if interrupted_output_turn_id == OPENING_TURN_ID:
+            session.opening_playback_interrupted = True
+            session.opening_barge_in_detector = None
+        dropped_frames = self._clear_playback_queue(session)
+        session.dropped_playback_frames += dropped_frames
+        self._abandon_pending_turn(
+            session,
+            interrupted_output_turn_id,
+            reason="handoff_requested",
+        )
+        session.current_output_turn_id = None
+        session.playback_buffers.clear()
+        session.model_done_turns.clear()
+        session.freeswitch_completed_turns.clear()
+        session.jitter_prefilled_turns.clear()
+        session.playout_pacing_states.clear()
+        session.repair_replay_frames_16k.clear()
+        session.interruption_repair_active = False
+        session.playback_active = False
+
+        realtime_session = self._realtime_sessions.get(session.session_id)
+        if realtime_session is not None:
+            session.realtime_interrupt_requests += 1
+            try:
+                await asyncio.wait_for(realtime_session.cancel_response(), timeout=1)
+            except Exception:
+                session.realtime_interrupt_failures += 1
+                LOGGER.warning(
+                    "realtime_phone_handoff_cancel_response_failed call_id=%s "
+                    "session_id=%s",
+                    session.call_id,
+                    session.session_id,
+                    exc_info=True,
+                )
+
+        await self._break_freeswitch_playback(session, reason="handoff_requested")
+        LOGGER.info(
+            "realtime_phone_handoff_ai_playback_stopped call_id=%s "
+            "session_id=%s dropped_playback_frames=%s "
+            "freeswitch_break_requests=%s freeswitch_break_failures=%s "
+            "realtime_interrupt_requests=%s realtime_interrupt_failures=%s",
+            session.call_id,
+            session.session_id,
+            dropped_frames,
+            session.freeswitch_break_requests,
+            session.freeswitch_break_failures,
+            session.realtime_interrupt_requests,
+            session.realtime_interrupt_failures,
+        )
+
+    async def _close_realtime_session_for_handoff(
+        self,
+        session: RealtimePhoneSessionStats,
+    ) -> None:
+        realtime_session = self._realtime_sessions.pop(session.session_id, None)
+        if realtime_session is None:
+            return
+        await realtime_session.close()
+
+    def _commit_handoff_request_turn(
+        self,
+        session: RealtimePhoneSessionStats,
+        turn_id: int,
+        *,
+        input_transcript: str,
+    ) -> None:
+        if turn_id == OPENING_TURN_ID:
+            return
+        normalized_input = input_transcript.strip()
+        if not normalized_input:
+            return
+
+        session.pending_exchanges.pop(turn_id, None)
+        existing_exchange = next(
+            (
+                item
+                for item in session.committed_exchanges
+                if item.turn_id == turn_id
+            ),
+            None,
+        )
+        if existing_exchange is not None:
+            if not existing_exchange.input_transcript:
+                existing_exchange.input_transcript = normalized_input
+            return
+
+        exchange = ConversationExchange(
+            turn_id=turn_id,
+            status="handoff_requested",
+            input_transcript=normalized_input,
+            source="handoff_requested",
+            created_at_ms=int(time.time() * 1000),
+        )
+        session.committed_exchanges.append(exchange)
+        session.gateway_history_committed_turns += 1
+
     async def _queue_audio_delta(
         self,
         session: RealtimePhoneSessionStats,
         turn_id: int,
         model_audio_delta: bytes,
     ) -> None:
+        if session.handoff_requested:
+            session.dropped_stale_frames += 1
+            return
+
         if turn_id in session.closed_output_turn_ids:
             session.dropped_stale_frames += 1
             return
@@ -2210,6 +2447,13 @@ class FreeSwitchRealtimeGatewayServer:
         self._enqueue_call_result(session)
 
     def _enqueue_call_result(self, session: RealtimePhoneSessionStats) -> None:
+        if session.handoff_requested:
+            LOGGER.info(
+                "call_result_deferred_for_handoff call_id=%s session_id=%s",
+                session.call_id,
+                session.session_id,
+            )
+            return
         if self.call_result_writer is None:
             return
         payload = self._build_call_result_payload(session)
@@ -2589,6 +2833,15 @@ def _redact_spoken_amounts(text: str) -> str:
 
 def _contains_spoken_amount(text: str) -> bool:
     return SPOKEN_AMOUNT_RE.search(text) is not None
+
+
+def _detect_handoff_request(text: str) -> str | None:
+    normalized = re.sub(r"[\s，。！？、,.!?；;：:]+", "", text or "")
+    if not normalized:
+        return None
+    if HANDOFF_REQUEST_RE.search(normalized):
+        return "request_human"
+    return None
 
 
 def _best_playback_reference_match(

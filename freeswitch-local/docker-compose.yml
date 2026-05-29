@@ -10,11 +10,12 @@ services:
     ports:
       - "5060:5060/tcp"
       - "5060:5060/udp"
+      - "5066:5066/tcp"
       - "5080:5080/tcp"
       - "5080:5080/udp"
       - "5089:5089/udp"
       - "18021:8021/tcp"
-      - "26384-26484:16384-16484/udp"
+      - "16384-16484:16384-16484/udp"
     volumes:
       - ./conf:/etc/freeswitch
       - ./scripts:/usr/share/freeswitch/scripts

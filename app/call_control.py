@@ -369,6 +369,10 @@ def _handoff_recording_paths(
     )
 
 
+def _recording_stop_reply_is_terminal_ok(reply: str) -> bool:
+    return reply.strip().startswith("-ERR Cannot locate session")
+
+
 def originate_webrtc_agent_test_call(
     config: GatewayConfig,
     payload: dict[str, Any],
@@ -1055,7 +1059,9 @@ class OutboundCallManager:
             except (OSError, EOFError, EventSocketError) as err:
                 errors.append(str(err))
                 continue
-            if reply.startswith("-ERR"):
+            if reply.startswith("-ERR") and not _recording_stop_reply_is_terminal_ok(
+                reply
+            ):
                 errors.append(reply)
 
         with self._lock:

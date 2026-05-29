@@ -33,6 +33,13 @@
 - 网关 inbound RMS 诊断应通过 `inbound_rms_diagnostics_enabled` 开关控制，商用默认关闭；只有排查接通无声、AI 听不到用户或本地 RTP 问题时临时打开。
 - `uuid_record` 在 echo 或本地 RTP 转发场景下可能录到静音，不能单独作为“用户没有声音”的核心证据；更可靠的证据是 `9196 echo`、开启诊断后的网关 inbound RMS、FreeSWITCH 通道状态和真实 AI turn/transcript。
 
+## 转人工与 WebRTC 坐席注意事项
+
+- 转人工方案优先查阅 `docs/property-fee-human-handoff-technical-design.md`；WebRTC 坐席接入方案对比优先查阅 `docs/webrtc-seat-sip-wss-vs-verto.md`；线上最终验收按 `docs/property-fee-human-handoff-online-validation-checklist.md` 执行。
+- 当前 Python `call_id` 用作客户侧 FreeSWITCH 通道 UUID；桥接客户线路前必须确认它仍对应真实客户通道。
+- `agent_uuid` 表示人工坐席侧 FreeSWITCH 通道 UUID，应由后端生成并作为 `origination_uuid` 传给 FreeSWITCH；不要把它当业务单号、坐席账号或 `call_record` 主键。
+- 网页坐席接通但无声时，优先检查浏览器麦克风权限、FreeSWITCH RTP 端口范围、Docker UDP 映射、防火墙、STUN/TURN 和 `9196 echo`，不要只凭 SIP 注册或接通状态判断音频链路正常。
+
 ## 物业费催收提示词边界
 
 - 数据库催收策略、客户画像策略和客服语气配置优先决定沟通方式、推进节奏和语气风格；但不得突破身份核实、隐私保护、勿扰终止、支付安全、事实边界和法律红线。

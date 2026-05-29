@@ -294,7 +294,10 @@ class DoubaoS2SServerVadSession:
     async def _read_events(self) -> None:
         try:
             while True:
-                event = await self._require_session().recv_event()
+                session = self._session
+                if session is None:
+                    return
+                event = await session.recv_event()
 
                 if event.error and "DialogAudioIdleTimeoutError" in event.error:
                     await self._complete_active_response_on_idle()

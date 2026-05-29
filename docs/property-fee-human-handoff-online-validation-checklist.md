@@ -73,6 +73,14 @@ gateway_call_detail 独立表
 | Python 写 transcript | AI + 人工 turns 可写入同一个 `transcript.turns` |
 | Java callback | 整通电话结束且 transcript 写完后只回调一次 |
 
+### 3.4 人工阶段临时录音
+
+| 检查项 | 期望结果 | 说明 |
+|---|---|---|
+| `RECORDING_ENABLED` | 线上最终验收时为 `true` | 普通 PoC 可关闭，完整 transcript 验收必须打开 |
+| `RECORDING_DIR` | FreeSWITCH 进程可写，Python/ASR 后处理可读 | Docker 部署时要确认该目录是共享挂载 |
+| 临时录音策略 | 只服务 ASR，不作为长期质检录音 | ASR 成功或复核完成后再按策略清理 |
+
 ## 4. 分阶段验证步骤
 
 ### 4.1 坐席注册
@@ -208,6 +216,7 @@ bridge 失败：查客户 call_id 是否仍是客户 FreeSWITCH channel UUID，�
 ```text
 call status = completed
 handoff.state = completed
+handoff.recording_status = completed
 handoff.human_transcript_status = completed
 call_record.transcript.turns 同时包含 AI turns 和人工 turns
 人工 turns 可区分 human_agent 和 customer

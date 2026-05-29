@@ -566,8 +566,8 @@ Python 仍按现有约定更新：
 当前代码注意点：
 
 ```text
-当前 build_call_record_transcript_json 只保留 role=assistant/user 且只输出 role/text。
-因此如果要保存 speaker_type、agent_id 或人工阶段 turns，需要同步修改 Python transcript 生成逻辑和 Java analysis_result 的解析/提示词。
+当前 build_call_record_transcript_json 已保留 role/text，并允许透传 speaker_type、agent_id。
+Java analysis_result 如果只读取 role/text 可以继续兼容；如果要区分 AI 和人工，再读取 speaker_type。
 ```
 
 已确认写入 `call_record.transcript`：
@@ -619,13 +619,13 @@ Java 的 analysis_result 需要基于整通电话 transcript 生成，因此第�
 对现有代码的改动点：
 
 ```text
-1. bridge 成功后启动人工阶段录音或音频采集。
-2. 通话结束后提交人工阶段 ASR 任务。
+1. bridge 成功后，在 `RECORDING_ENABLED=true` 时启动客户侧和坐席侧临时录音。
+2. 人工通话结束后停止临时录音，handoff 中记录 recording_status、recording_dir 派生路径和错误。
 3. 新增 transcript 合并逻辑：AI turns + 人工 turns。
-4. 修改 build_call_record_transcript_json，允许保留 speaker_type、agent_id 等可选字段。
-5. call_record.transcript 的写入时机改为“整通电话结束且人工转写完成后”。
-6. Java callback 建议放在完整 transcript 写入之后。
-7. 第一版用任务状态和日志记录 human_transcript_status、recording_status、asr_failure_reason。
+4. build_call_record_transcript_json 保留 speaker_type、agent_id 等可选字段。
+5. `/calls/{call_id}/handoff/transcript` 只允许人工通话结束后调用，避免提前写 call_record 或提前 callback Java。
+6. call_record.transcript 的写入时机改为“整通电话结束且人工转写完成后”。
+7. 第一版用任务状态和日志记录 human_transcript_status、recording_status、human_transcript_error。
 8. 后续如果补建 gateway_call_detail，再把这些状态同步到 payload。
 ```
 

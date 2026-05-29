@@ -16,6 +16,7 @@ from app.call_control import (
 )
 from app.config import (
     EventSocketConfig,
+    FeatureConfig,
     FlowCallbackConfig,
     GatewayConfig,
     OutboundCallConfig,
@@ -175,6 +176,12 @@ def test_outbound_manager_handoff_creates_waiting_agent_before_claim():
             "bridge_reply": None,
             "human_transcript_status": None,
             "human_transcript_error": None,
+            "recording_status": None,
+            "recording_error": None,
+            "customer_recording_path": None,
+            "agent_recording_path": None,
+            "recording_started_at_ms": None,
+            "recording_stopped_at_ms": None,
             "ai_turns": [
                 {"role": "assistant", "text": "您好，这里是物业中心。"},
                 {"role": "user", "text": "我要转人工"},
@@ -216,6 +223,8 @@ def test_outbound_manager_handoff_creates_waiting_agent_before_claim():
         assert claimed_call["handoff"]["agent_originate_reply"] == "+OK agent-uuid-1"
         assert claimed_call["handoff"]["audio_stream_break_reply"] == "+OK"
         assert claimed_call["handoff"]["bridge_reply"] == "+OK uuid_bridge accepted"
+        assert claimed_call["handoff"]["human_transcript_status"] == "pending"
+        assert claimed_call["handoff"]["recording_status"] == "disabled"
         assert claimed_call["handoff"]["can_claim"] is False
         assert operations == [
             ("resolve", "sofia_contact:*/1001", None),
@@ -360,6 +369,163 @@ def test_outbound_manager_handoff_transcript_merges_ai_and_human_turns_after_han
                     },
                 ],
             }
+        ]
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_rejects_handoff_transcript_before_human_hangup():
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            return "+OK agent-uuid-1"
+
+        async def break_audio_stream(self, call_id: str) -> str:
+            return "+OK"
+
+        async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
+            return "+OK uuid_bridge accepted"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+    )
+
+    try:
+        call = manager.create_call({"destination": "1000"})
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=call_id)
+        )
+        manager.request_handoff(call_id, {"last_utterance": "我要转人工"})
+        manager.claim_handoff(
+            call_id,
+            {"agent_extension": "1001", "agent_uuid": "agent-uuid-1"},
+        )
+
+        with pytest.raises(CallControlError) as exc_info:
+            manager.complete_handoff_transcript(
+                call_id,
+                {"turns": [{"role": "assistant", "text": "您好，我是物业客服。"}]},
+            )
+
+        assert exc_info.value.status_code == 409
+        assert "human handoff is still active" in str(exc_info.value)
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_handoff_records_temp_audio_until_hangup_when_enabled():
+    operations: list[tuple[str, str, str]] = []
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            return "+OK agent-uuid-1"
+
+        async def break_audio_stream(self, call_id: str) -> str:
+            return "+OK"
+
+        async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
+            return "+OK uuid_bridge accepted"
+
+        async def start_recording(self, channel_uuid: str, path: str) -> str:
+            operations.append(("record_start", channel_uuid, path))
+            return "+OK Success"
+
+        async def stop_recording(self, channel_uuid: str, path: str) -> str:
+            operations.append(("record_stop", channel_uuid, path))
+            return "+OK Success"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+            features=FeatureConfig(
+                recording_enabled=True,
+                recording_dir="/tmp/recov_ten_handoff_test",
+            ),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+    )
+
+    try:
+        call = manager.create_call({"destination": "1000"})
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=call_id)
+        )
+        manager.request_handoff(call_id, {"last_utterance": "我要转人工"})
+
+        claimed_call = manager.claim_handoff(
+            call_id,
+            {
+                "agent_extension": "1001",
+                "agent_uuid": "agent-uuid-1",
+                "claimed_by": "agent-1001",
+            },
+        )
+
+        handoff = claimed_call["handoff"]
+        assert handoff["state"] == "human_active"
+        assert handoff["human_transcript_status"] == "pending"
+        assert handoff["recording_status"] == "recording"
+        assert handoff["customer_recording_path"] == (
+            f"/tmp/recov_ten_handoff_test/{call_id}-customer.wav"
+        )
+        assert handoff["agent_recording_path"] == (
+            f"/tmp/recov_ten_handoff_test/{call_id}-agent-uuid-1-agent.wav"
+        )
+        assert operations == [
+            (
+                "record_start",
+                call_id,
+                f"/tmp/recov_ten_handoff_test/{call_id}-customer.wav",
+            ),
+            (
+                "record_start",
+                "agent-uuid-1",
+                f"/tmp/recov_ten_handoff_test/{call_id}-agent-uuid-1-agent.wav",
+            ),
+        ]
+
+        manager.handle_channel_event(
+            ChannelStateEvent(
+                name="CHANNEL_HANGUP_COMPLETE",
+                call_id=call_id,
+                hangup_cause="NORMAL_CLEARING",
+            )
+        )
+
+        final_call = _wait_for_handoff_recording_status(manager, call_id, "completed")
+        assert final_call["handoff"]["state"] == "completed"
+        assert final_call["handoff"]["recording_stopped_at_ms"] is not None
+        assert operations[-2:] == [
+            (
+                "record_stop",
+                call_id,
+                f"/tmp/recov_ten_handoff_test/{call_id}-customer.wav",
+            ),
+            (
+                "record_stop",
+                "agent-uuid-1",
+                f"/tmp/recov_ten_handoff_test/{call_id}-agent-uuid-1-agent.wav",
+            ),
         ]
     finally:
         manager.shutdown()
@@ -1723,3 +1889,21 @@ def _wait_for_status(
             return call
         time.sleep(0.02)
     raise AssertionError(f"call {call_id} did not reach {status}")
+
+
+def _wait_for_handoff_recording_status(
+    manager: OutboundCallManager,
+    call_id: str,
+    status: str,
+) -> dict:
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        call = manager.get_call(call_id)
+        if (
+            call is not None
+            and call.get("handoff") is not None
+            and call["handoff"].get("recording_status") == status
+        ):
+            return call
+        time.sleep(0.02)
+    raise AssertionError(f"call {call_id} recording did not reach {status}")

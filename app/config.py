@@ -93,6 +93,7 @@ class VadConfig:
 class FeatureConfig:
     metrics_enabled: bool = True
     recording_enabled: bool = False
+    recording_dir: str = "/tmp/recov_ten_handoff_recordings"
     inbound_rms_diagnostics_enabled: bool = False
 
 
@@ -450,6 +451,12 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
                 "features",
                 "recording_enabled",
                 default=FeatureConfig.recording_enabled,
+            ),
+            recording_dir=_get(
+                raw,
+                "features",
+                "recording_dir",
+                default=FeatureConfig.recording_dir,
             ),
             inbound_rms_diagnostics_enabled=_get_bool(
                 raw,
@@ -910,6 +917,10 @@ def _apply_env_overrides(config: GatewayConfig) -> GatewayConfig:
             recording_enabled=_env_bool(
                 "RECORDING_ENABLED",
                 config.features.recording_enabled,
+            ),
+            recording_dir=os.getenv(
+                "RECORDING_DIR",
+                config.features.recording_dir,
             ),
             inbound_rms_diagnostics_enabled=_env_bool(
                 "INBOUND_RMS_DIAGNOSTICS_ENABLED",

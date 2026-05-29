@@ -98,6 +98,12 @@ class HandoffState:
     bridge_reply: str | None = None
     human_transcript_status: str | None = None
     human_transcript_error: str | None = None
+    recording_status: str | None = None
+    recording_error: str | None = None
+    customer_recording_path: str | None = None
+    agent_recording_path: str | None = None
+    recording_started_at_ms: int | None = None
+    recording_stopped_at_ms: int | None = None
     ai_turns: list[dict[str, Any]] = field(default_factory=list)
     human_turns: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
@@ -126,6 +132,12 @@ class HandoffState:
             "bridge_reply": self.bridge_reply,
             "human_transcript_status": self.human_transcript_status,
             "human_transcript_error": self.human_transcript_error,
+            "recording_status": self.recording_status,
+            "recording_error": self.recording_error,
+            "customer_recording_path": self.customer_recording_path,
+            "agent_recording_path": self.agent_recording_path,
+            "recording_started_at_ms": self.recording_started_at_ms,
+            "recording_stopped_at_ms": self.recording_stopped_at_ms,
             "ai_turns": list(self.ai_turns),
             "human_turns": list(self.human_turns),
             "turns": turns,
@@ -284,6 +296,23 @@ class FreeSwitchOutboundDialer:
         finally:
             await client.close()
 
+    async def start_recording(self, channel_uuid: str, path: str) -> str:
+        return await self._record(channel_uuid, "start", path)
+
+    async def stop_recording(self, channel_uuid: str, path: str) -> str:
+        return await self._record(channel_uuid, "stop", path)
+
+    async def _record(self, channel_uuid: str, action: str, path: str) -> str:
+        _require_safe_token(channel_uuid, "channel_uuid")
+        _require_safe_token(action, "recording_action")
+        _require_safe_token(path, "recording_path")
+        client = self._make_client()
+        try:
+            await client.connect()
+            return await client.api(f"uuid_record {channel_uuid} {action} {path}")
+        finally:
+            await client.close()
+
     def _make_client(self) -> FreeSwitchEventSocketClient:
         event_socket = self.config.event_socket
         password = os.getenv(event_socket.password_env, "")
@@ -322,6 +351,22 @@ def build_uuid_bridge_command(*, customer_call_id: str, agent_uuid: str) -> str:
     _require_safe_token(customer_call_id, "customer_call_id")
     _require_safe_token(agent_uuid, "agent_uuid")
     return f"uuid_bridge {customer_call_id} {agent_uuid}"
+
+
+def _handoff_recording_paths(
+    recording_dir: str,
+    *,
+    customer_call_id: str,
+    agent_uuid: str,
+) -> tuple[str, str]:
+    base_dir = recording_dir.rstrip("/")
+    _require_safe_token(base_dir, "recording_dir")
+    _require_safe_token(customer_call_id, "customer_call_id")
+    _require_safe_token(agent_uuid, "agent_uuid")
+    return (
+        f"{base_dir}/{customer_call_id}-customer.wav",
+        f"{base_dir}/{customer_call_id}-{agent_uuid}-agent.wav",
+    )
 
 
 def originate_webrtc_agent_test_call(
@@ -535,6 +580,7 @@ class OutboundCallManager:
         sync_context: dict[str, Any] | None = None
         sync_business_id: str | None = None
         sync_status: str | None = None
+        stop_handoff_recording_call_id: str | None = None
         with self._lock:
             record = self._calls.get(event.call_id)
             if record is None:
@@ -545,6 +591,19 @@ class OutboundCallManager:
                 sync_context = dict(record.context)
                 sync_business_id = _business_id(record)
                 sync_status = record.status
+            if (
+                record.handoff is not None
+                and record.handoff.state == "completed"
+                and record.handoff.recording_status == "recording"
+            ):
+                record.handoff.recording_status = "stopping"
+                record.handoff.updated_at_ms = _now_ms()
+                stop_handoff_recording_call_id = record.call_id
+        if stop_handoff_recording_call_id is not None:
+            self._executor.submit(
+                self._run_stop_handoff_recording_worker,
+                stop_handoff_recording_call_id,
+            )
         if self._sync_call_record_terminal(sync_context, sync_status):
             self._publish_flow_callback(
                 sync_context or {},
@@ -673,7 +732,12 @@ class OutboundCallManager:
                 raise CallControlError("call not found", status_code=404)
             if record.handoff is None:
                 raise CallControlError("handoff not requested", status_code=409)
-            if record.handoff.state not in {"human_active", "completed"}:
+            if record.handoff.state == "human_active":
+                raise CallControlError(
+                    "human handoff is still active",
+                    status_code=409,
+                )
+            if record.handoff.state != "completed":
                 raise CallControlError("human handoff is not active", status_code=409)
 
             now_ms = _now_ms()
@@ -933,6 +997,16 @@ class OutboundCallManager:
             LOGGER.exception("outbound_call_hangup_worker_failed call_id=%s", call_id)
             self._mark_failed(call_id, "internal hangup worker error")
 
+    def _run_stop_handoff_recording_worker(self, call_id: str) -> None:
+        try:
+            asyncio.run(self._stop_handoff_recording(call_id))
+        except Exception:
+            LOGGER.exception("handoff_recording_stop_worker_failed call_id=%s", call_id)
+            self._mark_handoff_recording_failed(
+                call_id,
+                "internal handoff recording stop worker error",
+            )
+
     async def _hangup(self, call_id: str, *, cause: str) -> None:
         reply = await self._dialer_factory().hangup(call_id, cause=cause)
         stripped = reply.strip()
@@ -958,6 +1032,45 @@ class OutboundCallManager:
                 message="外呼失败",
                 business_id=failed_business_id,
             )
+
+    async def _stop_handoff_recording(self, call_id: str) -> None:
+        with self._lock:
+            record = self._calls.get(call_id)
+            if record is None or record.handoff is None:
+                return
+            handoff = record.handoff
+            customer_path = handoff.customer_recording_path
+            agent_path = handoff.agent_recording_path
+            agent_uuid = handoff.agent_uuid
+
+        if not customer_path or not agent_path or not agent_uuid:
+            self._mark_handoff_recording_failed(call_id, "recording path is missing")
+            return
+
+        dialer = self._dialer_factory()
+        errors = []
+        for channel_uuid, path in ((call_id, customer_path), (agent_uuid, agent_path)):
+            try:
+                reply = (await dialer.stop_recording(channel_uuid, path)).strip()
+            except (OSError, EOFError, EventSocketError) as err:
+                errors.append(str(err))
+                continue
+            if reply.startswith("-ERR"):
+                errors.append(reply)
+
+        with self._lock:
+            record = self._calls.get(call_id)
+            if record is None or record.handoff is None:
+                return
+            now_ms = _now_ms()
+            record.handoff.recording_stopped_at_ms = now_ms
+            record.handoff.updated_at_ms = now_ms
+            if errors:
+                record.handoff.recording_status = "failed"
+                record.handoff.recording_error = "; ".join(errors)
+            else:
+                record.handoff.recording_status = "completed"
+                record.handoff.recording_error = None
 
     async def _handoff(self, call_id: str, request: HandoffClaimRequest) -> dict[str, Any]:
         dialer = self._dialer_factory()
@@ -997,6 +1110,31 @@ class OutboundCallManager:
         if bridge_reply.startswith("-ERR"):
             raise CallControlError(bridge_reply, status_code=503)
 
+        recording_status = "disabled"
+        recording_error = None
+        customer_recording_path = None
+        agent_recording_path = None
+        recording_started_at_ms = None
+        if self.config.features.recording_enabled:
+            recording_status = "recording"
+            recording_started_at_ms = _now_ms()
+            try:
+                customer_recording_path, agent_recording_path = _handoff_recording_paths(
+                    self.config.features.recording_dir,
+                    customer_call_id=call_id,
+                    agent_uuid=request.agent_uuid,
+                )
+                for channel_uuid, path in (
+                    (call_id, customer_recording_path),
+                    (request.agent_uuid, agent_recording_path),
+                ):
+                    reply = (await dialer.start_recording(channel_uuid, path)).strip()
+                    if reply.startswith("-ERR"):
+                        raise CallControlError(reply, status_code=503)
+            except Exception as err:
+                recording_status = "failed"
+                recording_error = str(err)
+
         with self._lock:
             record = self._calls[call_id]
             assert record.handoff is not None
@@ -1005,6 +1143,14 @@ class OutboundCallManager:
             record.handoff.audio_stream_break_reply = break_reply
             record.handoff.bridge_reply = bridge_reply
             record.handoff.bridged_at_ms = now_ms
+            record.handoff.human_transcript_status = (
+                record.handoff.human_transcript_status or "pending"
+            )
+            record.handoff.recording_status = recording_status
+            record.handoff.recording_error = recording_error
+            record.handoff.customer_recording_path = customer_recording_path
+            record.handoff.agent_recording_path = agent_recording_path
+            record.handoff.recording_started_at_ms = recording_started_at_ms
             record.handoff.updated_at_ms = now_ms
             self._set_status_locked(record, "human_active")
             return record.to_dict()
@@ -1016,6 +1162,16 @@ class OutboundCallManager:
                 return
             record.handoff.state = "failed"
             record.handoff.error = error
+            record.handoff.updated_at_ms = _now_ms()
+            record.updated_at_ms = record.handoff.updated_at_ms
+
+    def _mark_handoff_recording_failed(self, call_id: str, error: str) -> None:
+        with self._lock:
+            record = self._calls.get(call_id)
+            if record is None or record.handoff is None:
+                return
+            record.handoff.recording_status = "failed"
+            record.handoff.recording_error = error
             record.handoff.updated_at_ms = _now_ms()
             record.updated_at_ms = record.handoff.updated_at_ms
 

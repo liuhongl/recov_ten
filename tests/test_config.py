@@ -79,6 +79,7 @@ def test_load_config_from_toml(tmp_path):
             [features]
             metrics_enabled = true
             recording_enabled = false
+            recording_dir = "/tmp/recov_ten_handoff_test"
             inbound_rms_diagnostics_enabled = true
 
             [flow_callback]
@@ -159,6 +160,7 @@ def test_load_config_from_toml(tmp_path):
     assert config.vad.barge_in_enabled is True
     assert config.features.metrics_enabled is True
     assert config.features.recording_enabled is False
+    assert config.features.recording_dir == "/tmp/recov_ten_handoff_test"
     assert config.features.inbound_rms_diagnostics_enabled is True
     assert config.flow_callback.enabled is True
     assert config.flow_callback.topic == "recov-flow-callback"
@@ -213,6 +215,8 @@ def test_environment_overrides(monkeypatch):
     monkeypatch.setenv("VAD_END_SILENCE_MS", "600")
     monkeypatch.setenv("VAD_BARGE_IN_ENABLED", "true")
     monkeypatch.setenv("METRICS_ENABLED", "false")
+    monkeypatch.setenv("RECORDING_ENABLED", "true")
+    monkeypatch.setenv("RECORDING_DIR", "/tmp/env-recordings")
     monkeypatch.setenv("FLOW_CALLBACK_ENABLED", "true")
     monkeypatch.setenv("FLOW_CALLBACK_TOPIC", "env-flow-callback")
     monkeypatch.setenv("FLOW_CALLBACK_PRODUCER_GROUP", "env-producer")
@@ -270,6 +274,8 @@ def test_environment_overrides(monkeypatch):
     assert config.vad.end_silence_ms == 600
     assert config.vad.barge_in_enabled is True
     assert config.features.metrics_enabled is False
+    assert config.features.recording_enabled is True
+    assert config.features.recording_dir == "/tmp/env-recordings"
     assert config.features.inbound_rms_diagnostics_enabled is True
     assert config.flow_callback.enabled is True
     assert config.flow_callback.topic == "env-flow-callback"

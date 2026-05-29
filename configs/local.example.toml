@@ -65,6 +65,7 @@ barge_in_enabled = false
 [features]
 metrics_enabled = true
 recording_enabled = false
+recording_dir = "/tmp/recov_ten_handoff_recordings"
 inbound_rms_diagnostics_enabled = false
 
 [flow_callback]

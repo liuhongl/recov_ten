@@ -602,6 +602,10 @@ class OutboundCallManager:
         stop_handoff_recording_call_id: str | None = None
         cancel_handoff_timeout_call_id: str | None = None
         handoff_failed_callback: tuple[dict[str, Any], str | None] | None = None
+        handoff_connection_failed_callback: tuple[
+            dict[str, Any],
+            str | None,
+        ] | None = None
         with self._lock:
             record = self._calls.get(event.call_id)
             if record is None:
@@ -623,6 +627,9 @@ class OutboundCallManager:
                 record.handoff.updated_at_ms = _now_ms()
                 stop_handoff_recording_call_id = record.call_id
             handoff_failed_callback = self._handoff_failed_callback_locked(record)
+            handoff_connection_failed_callback = (
+                self._handoff_connection_failed_callback_locked(record)
+            )
         if stop_handoff_recording_call_id is not None:
             self._executor.submit(
                 self._run_stop_handoff_recording_worker,
@@ -632,7 +639,17 @@ class OutboundCallManager:
             self._cancel_handoff_timeout(cancel_handoff_timeout_call_id)
         if handoff_failed_callback is not None:
             self._publish_handoff_failed_callback(*handoff_failed_callback)
-        if self._sync_call_record_terminal(sync_context, sync_status):
+        if handoff_connection_failed_callback is not None:
+            self._publish_handoff_connection_failed_callback(
+                *handoff_connection_failed_callback
+            )
+        handoff_terminal_callback_sent = (
+            handoff_failed_callback is not None
+            or handoff_connection_failed_callback is not None
+        )
+        if self._sync_call_record_terminal(sync_context, sync_status) and (
+            not handoff_terminal_callback_sent
+        ):
             self._publish_flow_callback(
                 sync_context or {},
                 status="FAILED",
@@ -1597,6 +1614,24 @@ class OutboundCallManager:
         record.updated_at_ms = handoff.updated_at_ms
         return dict(record.context), _business_id(record)
 
+    def _handoff_connection_failed_callback_locked(
+        self,
+        record: OutboundCallRecord,
+    ) -> tuple[dict[str, Any], str | None] | None:
+        handoff = record.handoff
+        if handoff is None:
+            return None
+        if handoff.state != "handoff_failed":
+            return None
+        if not _is_terminal_status(record.status):
+            return None
+        if handoff.terminal_callback_status is not None:
+            return None
+        handoff.terminal_callback_status = "FAILED"
+        handoff.updated_at_ms = _now_ms()
+        record.updated_at_ms = handoff.updated_at_ms
+        return dict(record.context), _business_id(record)
+
     def _publish_handoff_failed_callback(
         self,
         context: dict[str, Any],
@@ -1606,6 +1641,18 @@ class OutboundCallManager:
             context,
             status="FAILED",
             message="人工转写失败",
+            business_id=business_id,
+        )
+
+    def _publish_handoff_connection_failed_callback(
+        self,
+        context: dict[str, Any],
+        business_id: str | None,
+    ) -> None:
+        self._publish_flow_callback(
+            context,
+            status="FAILED",
+            message="转人工失败",
             business_id=business_id,
         )
 

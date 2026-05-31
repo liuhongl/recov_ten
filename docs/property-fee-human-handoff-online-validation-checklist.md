@@ -239,6 +239,7 @@ FreeSWITCH `show channels` 为 0 total
 人工录音或 ASR 失败时，handoff.human_transcript_status = failed
 Python 只回调一次 Java FAILED
 迟到的重复 transcript 结果不能覆盖已发送的 SUCCESS / FAILED 终态
+接上人工前转人工失败并结束通话时，Python 只回调一次 Java FAILED
 ```
 
 ## 5. 最终验收标准

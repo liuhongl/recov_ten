@@ -1147,6 +1147,7 @@ waiting_agent 超时无人接
   -> AI 播放未接通话术
   -> 记录转人工失败原因
   -> 礼貌结束通话
+  -> 通话结束后回调 Java FAILED
 ```
 
 ```text
@@ -1161,6 +1162,7 @@ waiting_agent / agent_claimed 期间客户先挂断
   -> handoff_failed
   -> 取消待接管超时任务
   -> 待接管列表不再允许 claim
+  -> 通话结束后回调 Java FAILED
 ```
 
 ```text

@@ -302,6 +302,173 @@ def test_outbound_manager_expires_waiting_handoff_and_hangs_up_customer():
         manager.shutdown()
 
 
+def test_outbound_manager_emits_failed_callback_after_handoff_expires_and_call_ends():
+    flow_events: list[FlowCallbackEvent] = []
+
+    class FakeFlowCallbackWriter:
+        def publish(self, event):
+            flow_events.append(event)
+            return True
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            return "+OK customer-call"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+        flow_callback_writer=FakeFlowCallbackWriter(),
+    )
+
+    try:
+        call = manager.create_call(
+            {
+                "destination": "1000",
+                "context": {
+                    "tenantId": "000000",
+                    "taskId": "task-1",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            }
+        )
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=call_id)
+        )
+        manager.request_handoff(
+            call_id,
+            {"last_utterance": "我要转人工", "wait_timeout_seconds": 1},
+        )
+        with manager._lock:
+            record = manager._calls[call_id]
+            assert record.handoff is not None
+            expired_at_ms = record.handoff.requested_at_ms - 1
+            record.handoff.expires_at_ms = expired_at_ms
+
+        manager._expire_handoff_request(call_id, expired_at_ms)
+        _wait_for_status(manager, call_id, "hangup_sent")
+        manager.handle_channel_event(
+            ChannelStateEvent(
+                name="CHANNEL_HANGUP_COMPLETE",
+                call_id=call_id,
+                hangup_cause="NORMAL_CLEARING",
+            )
+        )
+
+        assert [event.status for event in flow_events] == ["ACCEPTED", "FAILED"]
+        assert flow_events[-1].task_id == "task-1"
+        assert flow_events[-1].business_id == "990000000000032001"
+        assert flow_events[-1].message == "转人工失败"
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_does_not_emit_duplicate_callback_for_handoff_terminal_failure():
+    flow_events: list[FlowCallbackEvent] = []
+    call_record_events: list[tuple[str, dict]] = []
+
+    class FakeFlowCallbackWriter:
+        def publish(self, event):
+            flow_events.append(event)
+            return True
+
+    class FakeCallRecordUpdater:
+        def mark_started(self, context):
+            call_record_events.append(("started", context))
+            return True
+
+        def mark_failed(self, context):
+            call_record_events.append(("failed", context))
+            return True
+
+        def mark_no_answer(self, context):
+            call_record_events.append(("no_answer", context))
+            return True
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            return "+OK customer-call"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+        call_record_updater=FakeCallRecordUpdater(),
+        flow_callback_writer=FakeFlowCallbackWriter(),
+    )
+
+    try:
+        call = manager.create_call(
+            {
+                "destination": "1000",
+                "context": {
+                    "tenantId": "000000",
+                    "taskId": "task-1",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            }
+        )
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=call_id)
+        )
+        manager.request_handoff(call_id, {"last_utterance": "我要转人工"})
+
+        manager.handle_channel_event(
+            ChannelStateEvent(
+                name="CHANNEL_HANGUP_COMPLETE",
+                call_id=call_id,
+                hangup_cause="ORIGINATOR_CANCEL",
+            )
+        )
+
+        assert [event.status for event in flow_events] == ["ACCEPTED", "FAILED"]
+        assert flow_events[-1].message == "转人工失败"
+        assert call_record_events == [
+            (
+                "started",
+                {
+                    "tenantId": "000000",
+                    "taskId": "task-1",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            ),
+            (
+                "failed",
+                {
+                    "tenantId": "000000",
+                    "taskId": "task-1",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            ),
+        ]
+    finally:
+        manager.shutdown()
+
+
 def test_outbound_manager_hangs_up_customer_when_claim_finds_expired_handoff():
     operations: list[tuple[str, str, str | None]] = []
 

@@ -16,6 +16,8 @@ from app.call_control import (
     build_originate_command,
     originate_webrtc_agent_test_call,
     parse_create_call_request,
+    parse_handoff_claim_request,
+    parse_handoff_request,
 )
 from app.config import (
     EventSocketConfig,
@@ -88,6 +90,20 @@ def test_build_uuid_bridge_command_uses_customer_and_agent_uuids():
     )
 
     assert command == "uuid_bridge customer-uuid-1 agent-uuid-1"
+
+
+def test_parse_handoff_request_rejects_zero_wait_timeout():
+    with pytest.raises(CallControlError) as exc_info:
+        parse_handoff_request({"wait_timeout_seconds": 0})
+
+    assert "wait_timeout_seconds must be between 1 and 300" in str(exc_info.value)
+
+
+def test_parse_handoff_claim_request_rejects_zero_timeout():
+    with pytest.raises(CallControlError) as exc_info:
+        parse_handoff_claim_request({"timeout_seconds": 0})
+
+    assert "timeout_seconds must be between 1 and 120" in str(exc_info.value)
 
 
 def test_originate_webrtc_agent_test_call_maps_event_socket_failure(monkeypatch):
@@ -532,6 +548,12 @@ def test_outbound_manager_hangs_up_customer_when_claim_finds_expired_handoff():
 
 def test_outbound_manager_marks_waiting_handoff_failed_when_customer_hangs_up():
     operations: list[tuple[str, str, str | None]] = []
+    flow_events: list[FlowCallbackEvent] = []
+
+    class FakeFlowCallbackWriter:
+        def publish(self, event):
+            flow_events.append(event)
+            return True
 
     class FakeDialer:
         async def resolve_endpoint(self, endpoint: str) -> str:
@@ -550,10 +572,21 @@ def test_outbound_manager_marks_waiting_handoff_failed_when_customer_hangs_up():
             outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
         ),
         dialer_factory=lambda: FakeDialer(),
+        flow_callback_writer=FakeFlowCallbackWriter(),
     )
 
     try:
-        call = manager.create_call({"destination": "1000"})
+        call = manager.create_call(
+            {
+                "destination": "1000",
+                "context": {
+                    "tenantId": "000000",
+                    "taskId": "task-1",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            }
+        )
         call_id = call["call_id"]
         _wait_for_status(manager, call_id, "originated")
         manager.handle_channel_event(
@@ -580,6 +613,10 @@ def test_outbound_manager_marks_waiting_handoff_failed_when_customer_hangs_up():
             "customer hung up before handoff connected"
         )
         assert final_call["handoff"]["can_claim"] is False
+        assert [event.status for event in flow_events] == ["ACCEPTED", "FAILED"]
+        assert flow_events[-1].task_id == "task-1"
+        assert flow_events[-1].business_id == "990000000000032001"
+        assert flow_events[-1].message == "转人工失败"
         assert operations == []
     finally:
         manager.shutdown()

@@ -1909,7 +1909,9 @@ def parse_create_call_request(payload: dict[str, Any]) -> CreateCallRequest:
 def parse_handoff_request(payload: dict[str, Any]) -> HandoffRequest:
     if not isinstance(payload, dict):
         raise CallControlError("request body must be a JSON object")
-    wait_timeout_seconds = _optional_int(payload, "wait_timeout_seconds") or 15
+    wait_timeout_seconds = _optional_int(payload, "wait_timeout_seconds")
+    if wait_timeout_seconds is None:
+        wait_timeout_seconds = 15
     if not 1 <= wait_timeout_seconds <= 300:
         raise CallControlError("wait_timeout_seconds must be between 1 and 300")
     return HandoffRequest(
@@ -1927,7 +1929,9 @@ def parse_handoff_claim_request(payload: dict[str, Any]) -> HandoffClaimRequest:
         raise CallControlError("request body must be a JSON object")
     agent_extension = _optional_safe_str(payload, "agent_extension") or "1001"
     agent_uuid = _optional_safe_str(payload, "agent_uuid") or uuid.uuid4().hex
-    timeout_seconds = _optional_int(payload, "timeout_seconds") or 20
+    timeout_seconds = _optional_int(payload, "timeout_seconds")
+    if timeout_seconds is None:
+        timeout_seconds = 20
     if not 1 <= timeout_seconds <= 120:
         raise CallControlError("timeout_seconds must be between 1 and 120")
     return HandoffClaimRequest(

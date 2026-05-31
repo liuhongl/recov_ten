@@ -2851,6 +2851,54 @@ def test_outbound_manager_requires_task_id_when_flow_callback_enabled():
         manager.shutdown()
 
 
+def test_outbound_manager_rejects_flow_callback_call_without_persistence_wiring():
+    flow_events: list[FlowCallbackEvent] = []
+
+    class FakeFlowCallbackWriter:
+        def publish(self, event):
+            flow_events.append(event)
+            return True
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            raise AssertionError("call must be rejected before originate")
+
+        async def originate(self, command: str) -> str:
+            raise AssertionError("call must be rejected before originate")
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            flow_callback=FlowCallbackConfig(enabled=True),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+        flow_callback_writer=FakeFlowCallbackWriter(),
+    )
+
+    try:
+        with pytest.raises(CallControlError, match="call_record persistence") as err:
+            manager.create_call(
+                {
+                    "destination": "1000",
+                    "context": {
+                        "tenantId": "000000",
+                        "taskId": "task-1",
+                        "callId": "990000000000032001",
+                        "debtId": "2049810626160668673",
+                    },
+                }
+            )
+
+        assert err.value.status_code == 503
+        assert manager.list_calls() == []
+        assert flow_events == []
+    finally:
+        manager.shutdown()
+
+
 def test_outbound_manager_syncs_call_record_failed_when_originate_fails():
     call_record_events: list[tuple[str, dict]] = []
 

@@ -510,6 +510,7 @@ class OutboundCallManager:
 
         request = parse_create_call_request(payload)
         self._validate_flow_callback_context(request.context)
+        self._validate_flow_callback_runtime_ready()
         request = self._resolve_call_destination(request)
         idempotency_key = _idempotency_key(request)
         if idempotency_key is not None:
@@ -1824,6 +1825,20 @@ class OutboundCallManager:
         if _context_text(context.get("taskId")) is None:
             raise CallControlError(
                 "context.taskId is required when flow callback is enabled"
+            )
+
+    def _validate_flow_callback_runtime_ready(self) -> None:
+        if not self.config.flow_callback.enabled:
+            return
+        if self._flow_callback_writer is None:
+            raise CallControlError(
+                "flow callback writer is unavailable",
+                status_code=503,
+            )
+        if self._call_record_updater is None or self._call_result_writer is None:
+            raise CallControlError(
+                "flow callback requires call_record persistence",
+                status_code=503,
             )
 
     def _resolve_call_destination(

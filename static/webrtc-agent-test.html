@@ -838,7 +838,8 @@
         }
       }
 
-      async function refreshHandoffCalls() {
+      async function refreshHandoffCalls(options = {}) {
+        const preserveSelected = Boolean(options.preserveSelected);
         try {
           const response = await fetch("/calls?status=active&limit=50");
           const payload = await response.json();
@@ -846,18 +847,21 @@
           waitingHandoffCalls = (payload.calls || []).filter((call) => {
             return call.handoff && call.handoff.state === "waiting_agent";
           });
-          renderHandoffList();
+          renderHandoffList({ preserveSelected });
           log("待接通话已刷新", { count: waitingHandoffCalls.length });
         } catch (error) {
           log("刷新待接通话失败", { error: error.message });
         }
       }
 
-      function renderHandoffList() {
+      function renderHandoffList(options = {}) {
+        const preserveSelected = Boolean(options.preserveSelected);
         if (!waitingHandoffCalls.length) {
           els.handoffList.innerHTML = '<div class="empty">暂无待接通话</div>';
-          selectedHandoffCall = null;
-          renderHandoffTimeline(null);
+          if (!(preserveSelected && selectedHandoffCall)) {
+            selectedHandoffCall = null;
+            renderHandoffTimeline(null);
+          }
           setControls();
           return;
         }
@@ -932,7 +936,7 @@
           selectedHandoffCall = payload.call;
           renderHandoffTimeline(selectedHandoffCall);
           log("坐席 claim 已完成，等待浏览器来电并点击接听", payload.call.handoff);
-          await refreshHandoffCalls();
+          await refreshHandoffCalls({ preserveSelected: true });
         } catch (error) {
           log("坐席 claim 失败", { call_id: callId, error: error.message });
         } finally {

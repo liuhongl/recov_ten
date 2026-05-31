@@ -183,6 +183,12 @@ def test_handoff_request_detection_is_conservative():
     assert _detect_handoff_request("我要转人工") == "request_human"
     assert _detect_handoff_request("麻烦帮我转接人工客服") == "request_human"
     assert _detect_handoff_request("我想找真人客服") == "request_human"
+    assert _detect_handoff_request("我要找物业客服") == "request_human"
+    assert _detect_handoff_request("让工作人员跟我说") == "request_human"
+    assert _detect_handoff_request("我不想跟机器人说") == "request_human"
+    assert _detect_handoff_request("不要机器人") == "request_human"
+    assert _detect_handoff_request("你是机器人吗") is None
+    assert _detect_handoff_request("叫负责人来") is None
     assert _detect_handoff_request("这个人工费是什么") is None
     assert _detect_handoff_request("我要人工费明细") is None
     assert _detect_handoff_request("人工智能能处理吗") is None

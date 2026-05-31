@@ -1496,6 +1496,8 @@ class OutboundCallManager:
         if self._handoff_transcript_processor is None:
             return
 
+        handoff_failed_callback: tuple[dict[str, Any], str | None] | None = None
+        job: dict[str, Any] | None = None
         with self._lock:
             record = self._calls.get(call_id)
             if record is None or record.handoff is None:
@@ -1516,21 +1518,28 @@ class OutboundCallManager:
                 handoff.human_transcript_error = "recording path is missing"
                 handoff.updated_at_ms = _now_ms()
                 record.updated_at_ms = handoff.updated_at_ms
-                return
+                handoff_failed_callback = self._handoff_failed_callback_locked(record)
+            else:
+                agent_id = (
+                    handoff.claimed_by or handoff.agent_extension or handoff.agent_uuid
+                )
+                job = {
+                    "call_id": record.call_id,
+                    "context": dict(record.context),
+                    "agent_id": agent_id,
+                    "agent_uuid": handoff.agent_uuid,
+                    "customer_recording_path": handoff.customer_recording_path,
+                    "agent_recording_path": handoff.agent_recording_path,
+                }
+                handoff.human_transcript_status = "processing"
+                handoff.human_transcript_error = None
+                handoff.updated_at_ms = _now_ms()
+                record.updated_at_ms = handoff.updated_at_ms
 
-            agent_id = handoff.claimed_by or handoff.agent_extension or handoff.agent_uuid
-            job = {
-                "call_id": record.call_id,
-                "context": dict(record.context),
-                "agent_id": agent_id,
-                "agent_uuid": handoff.agent_uuid,
-                "customer_recording_path": handoff.customer_recording_path,
-                "agent_recording_path": handoff.agent_recording_path,
-            }
-            handoff.human_transcript_status = "processing"
-            handoff.human_transcript_error = None
-            handoff.updated_at_ms = _now_ms()
-            record.updated_at_ms = handoff.updated_at_ms
+        if handoff_failed_callback is not None:
+            self._publish_handoff_failed_callback(*handoff_failed_callback)
+        if job is None:
+            return
 
         self._executor.submit(
             self._run_handoff_transcript_processor_worker,

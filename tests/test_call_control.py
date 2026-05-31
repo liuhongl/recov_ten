@@ -1521,6 +1521,99 @@ def test_outbound_manager_emits_failed_flow_callback_when_handoff_recording_fail
         manager.shutdown()
 
 
+def test_outbound_manager_emits_failed_callback_when_handoff_recording_paths_are_missing():
+    flow_events: list[FlowCallbackEvent] = []
+
+    class FakeFlowCallbackWriter:
+        def publish(self, event):
+            flow_events.append(event)
+            return True
+
+    class FakeProcessor:
+        def process(self, job):
+            raise AssertionError("processor should not run without recording paths")
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            return "+OK agent-uuid-1"
+
+        async def break_audio_stream(self, call_id: str) -> str:
+            return "+OK"
+
+        async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
+            return "+OK uuid_bridge accepted"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+        flow_callback_writer=FakeFlowCallbackWriter(),
+        handoff_transcript_processor=FakeProcessor(),
+    )
+
+    try:
+        call = manager.create_call(
+            {
+                "destination": "1000",
+                "context": {
+                    "tenantId": "000000",
+                    "taskId": "task-1",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            }
+        )
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=call_id)
+        )
+        manager.request_handoff(call_id, {"last_utterance": "我要转人工"})
+        manager.claim_handoff(
+            call_id,
+            {
+                "agent_extension": "1001",
+                "agent_uuid": "agent-uuid-1",
+                "claimed_by": "agent-1001",
+            },
+        )
+        manager.handle_channel_event(
+            ChannelStateEvent(
+                name="CHANNEL_HANGUP_COMPLETE",
+                call_id=call_id,
+                hangup_cause="NORMAL_CLEARING",
+            )
+        )
+        with manager._lock:
+            record = manager._calls[call_id]
+            assert record.handoff is not None
+            record.handoff.recording_status = "completed"
+            record.handoff.customer_recording_path = None
+            record.handoff.agent_recording_path = None
+
+        manager._maybe_submit_handoff_transcript_processor(call_id)
+
+        final_call = _wait_for_handoff_transcript_status(manager, call_id, "failed")
+        assert final_call["handoff"]["human_transcript_error"] == (
+            "recording path is missing"
+        )
+        _wait_for_flow_event_count(flow_events, 2)
+        assert [event.status for event in flow_events] == ["ACCEPTED", "FAILED"]
+        assert flow_events[-1].task_id == "task-1"
+        assert flow_events[-1].business_id == "990000000000032001"
+        assert flow_events[-1].message == "人工转写失败"
+    finally:
+        manager.shutdown()
+
+
 def test_outbound_manager_auto_transcript_writes_record_before_success_callback():
     writer_events = []
 

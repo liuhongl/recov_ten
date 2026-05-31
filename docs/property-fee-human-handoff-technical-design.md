@@ -232,8 +232,10 @@ stateDiagram-v2
   waiting_agent --> agent_claimed: 坐席点击接听
   agent_claimed --> human_active: WebRTC通道建立并bridge成功
   waiting_agent --> handoff_failed: 超时无人接
+  waiting_agent --> handoff_failed: 客户已挂断
   agent_claimed --> waiting_agent: 坐席通道建立失败且未超时
   agent_claimed --> handoff_failed: 坐席通道建立失败且已超时
+  agent_claimed --> handoff_failed: 客户已挂断
   human_active --> completed: 人工通话结束
   handoff_failed --> completed: 记录失败并结束
 ```
@@ -1152,6 +1154,13 @@ agent_claimed 后坐席 WebRTC 通道未建立
   -> 释放坐席锁
   -> 若总等待未超时，回到 waiting_agent
   -> 若总等待已超时，进入 handoff_failed
+```
+
+```text
+waiting_agent / agent_claimed 期间客户先挂断
+  -> handoff_failed
+  -> 取消待接管超时任务
+  -> 待接管列表不再允许 claim
 ```
 
 第一版不做回访任务：

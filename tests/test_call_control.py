@@ -363,6 +363,61 @@ def test_outbound_manager_hangs_up_customer_when_claim_finds_expired_handoff():
         manager.shutdown()
 
 
+def test_outbound_manager_marks_waiting_handoff_failed_when_customer_hangs_up():
+    operations: list[tuple[str, str, str | None]] = []
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            return "+OK customer-call"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            operations.append(("hangup", call_id, cause))
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+    )
+
+    try:
+        call = manager.create_call({"destination": "1000"})
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=call_id)
+        )
+        manager.request_handoff(
+            call_id,
+            {"last_utterance": "我要转人工", "wait_timeout_seconds": 30},
+        )
+
+        manager.handle_channel_event(
+            ChannelStateEvent(
+                name="CHANNEL_HANGUP_COMPLETE",
+                call_id=call_id,
+                hangup_cause="NORMAL_CLEARING",
+            )
+        )
+
+        final_call = manager.get_call(call_id)
+        assert final_call is not None
+        assert final_call["status"] == "completed"
+        assert final_call["handoff"]["state"] == "handoff_failed"
+        assert final_call["handoff"]["error"] == (
+            "customer hung up before handoff connected"
+        )
+        assert final_call["handoff"]["can_claim"] is False
+        assert operations == []
+    finally:
+        manager.shutdown()
+
+
 def test_outbound_manager_handoff_transcript_merges_ai_and_human_turns_after_hangup():
     enqueued_payloads = []
 

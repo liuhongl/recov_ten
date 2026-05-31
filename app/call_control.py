@@ -600,6 +600,7 @@ class OutboundCallManager:
         sync_business_id: str | None = None
         sync_status: str | None = None
         stop_handoff_recording_call_id: str | None = None
+        cancel_handoff_timeout_call_id: str | None = None
         handoff_failed_callback: tuple[dict[str, Any], str | None] | None = None
         with self._lock:
             record = self._calls.get(event.call_id)
@@ -611,6 +612,8 @@ class OutboundCallManager:
                 sync_context = dict(record.context)
                 sync_business_id = _business_id(record)
                 sync_status = record.status
+                if record.handoff is not None:
+                    cancel_handoff_timeout_call_id = record.call_id
             if (
                 record.handoff is not None
                 and record.handoff.state == "completed"
@@ -625,6 +628,8 @@ class OutboundCallManager:
                 self._run_stop_handoff_recording_worker,
                 stop_handoff_recording_call_id,
             )
+        if cancel_handoff_timeout_call_id is not None:
+            self._cancel_handoff_timeout(cancel_handoff_timeout_call_id)
         if handoff_failed_callback is not None:
             self._publish_handoff_failed_callback(*handoff_failed_callback)
         if self._sync_call_record_terminal(sync_context, sync_status):
@@ -1579,6 +1584,15 @@ class OutboundCallManager:
                 record.handoff.human_ended_at_ms = (
                     record.handoff.human_ended_at_ms or now_ms
                 )
+                record.handoff.updated_at_ms = now_ms
+            elif record.handoff is not None and record.handoff.state in {
+                "waiting_agent",
+                "agent_claimed",
+                "agent_ringing",
+                "bridging",
+            }:
+                record.handoff.state = "handoff_failed"
+                record.handoff.error = "customer hung up before handoff connected"
                 record.handoff.updated_at_ms = now_ms
             self._set_status_locked(record, _terminal_status_for_cause(record))
             self._discard_opening_locked(record.call_id)

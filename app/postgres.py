@@ -777,11 +777,11 @@ class PostgresCallResultWriter:
     async def _run(self) -> None:
         while True:
             payload = await self.queue.get()
+            context = payload.get("context")
+            if not isinstance(context, Mapping):
+                context = {}
             try:
                 transcript_json = build_call_record_transcript_json(payload)
-                context = payload.get("context")
-                if not isinstance(context, Mapping):
-                    context = {}
                 updated = await self.store.mark_transcript_completed(
                     context,
                     transcript_json,
@@ -791,6 +791,7 @@ class PostgresCallResultWriter:
                         "call_record_transcript_update_noop call_id=%s",
                         payload.get("call_id"),
                     )
+                    self._publish_failure_callback(payload, context)
                 else:
                     self._publish_success_callback(payload, context)
             except Exception:
@@ -799,6 +800,7 @@ class PostgresCallResultWriter:
                     payload.get("call_id"),
                     exc_info=True,
                 )
+                self._publish_failure_callback(payload, context)
             finally:
                 self.queue.task_done()
 
@@ -821,6 +823,29 @@ class PostgresCallResultWriter:
         except Exception:
             LOGGER.warning(
                 "flow_callback_success_publish_failed call_id=%s",
+                payload.get("call_id"),
+                exc_info=True,
+            )
+
+    def _publish_failure_callback(
+        self,
+        payload: Mapping[str, Any],
+        context: Mapping[str, Any],
+    ) -> None:
+        if self.flow_callback_writer is None:
+            return
+        try:
+            event = build_flow_callback_event(
+                context,
+                status="FAILED",
+                message="转写写入失败",
+                business_id=_prompt_text(payload.get("business_id")),
+            )
+            if event is not None:
+                self.flow_callback_writer.publish(event)
+        except Exception:
+            LOGGER.warning(
+                "flow_callback_transcript_failure_publish_failed call_id=%s",
                 payload.get("call_id"),
                 exc_info=True,
             )

@@ -1435,7 +1435,7 @@ def test_postgres_call_result_writer_enqueue_is_thread_safe():
     asyncio.run(assert_writer())
 
 
-def test_postgres_call_result_writer_does_not_emit_success_when_transcript_update_noops():
+def test_postgres_call_result_writer_emits_failed_when_transcript_update_noops():
     async def assert_writer():
         flow_events: list[FlowCallbackEvent] = []
 
@@ -1470,7 +1470,55 @@ def test_postgres_call_result_writer_does_not_emit_success_when_transcript_updat
         finally:
             await writer.stop()
 
-        assert flow_events == []
+        assert len(flow_events) == 1
+        assert flow_events[0].status == "FAILED"
+        assert flow_events[0].tenant_id == "000000"
+        assert flow_events[0].task_id == "task-1"
+        assert flow_events[0].business_id == "990000000000032001"
+        assert flow_events[0].message == "转写写入失败"
+
+    asyncio.run(assert_writer())
+
+
+def test_postgres_call_result_writer_emits_failed_when_transcript_update_raises():
+    async def assert_writer():
+        flow_events: list[FlowCallbackEvent] = []
+
+        class Store:
+            async def mark_transcript_completed(self, context, transcript_json):
+                raise RuntimeError("database unavailable")
+
+        class FakeFlowCallbackWriter:
+            def publish(self, event):
+                flow_events.append(event)
+                return True
+
+        writer = PostgresCallResultWriter(
+            Store(),
+            flow_callback_writer=FakeFlowCallbackWriter(),
+        )
+        writer.start()
+        try:
+            assert writer.enqueue_nowait(
+                {
+                    "call_id": "internal-media-call",
+                    "context": {
+                        "tenantId": "000000",
+                        "taskId": "task-1",
+                        "callId": "990000000000032001",
+                        "debtId": "2049810626160668673",
+                    },
+                    "turns": [{"role": "assistant", "text": "您好"}],
+                }
+            )
+            await asyncio.wait_for(writer.queue.join(), timeout=1.0)
+        finally:
+            await writer.stop()
+
+        assert len(flow_events) == 1
+        assert flow_events[0].status == "FAILED"
+        assert flow_events[0].business_id == "990000000000032001"
+        assert flow_events[0].message == "转写写入失败"
 
     asyncio.run(assert_writer())
 

@@ -302,6 +302,67 @@ def test_outbound_manager_expires_waiting_handoff_and_hangs_up_customer():
         manager.shutdown()
 
 
+def test_outbound_manager_hangs_up_customer_when_claim_finds_expired_handoff():
+    operations: list[tuple[str, str, str | None]] = []
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            return "+OK customer-call"
+
+        async def break_audio_stream(self, call_id: str) -> str:
+            return "+OK"
+
+        async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
+            return "+OK uuid_bridge accepted"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            operations.append(("hangup", call_id, cause))
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+    )
+
+    try:
+        call = manager.create_call({"destination": "1000"})
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=call_id)
+        )
+        handoff_call = manager.request_handoff(
+            call_id,
+            {"last_utterance": "我要转人工", "wait_timeout_seconds": 1},
+        )
+        with manager._lock:
+            record = manager._calls[call_id]
+            assert record.handoff is not None
+            record.handoff.expires_at_ms = handoff_call["handoff"]["requested_at_ms"] - 1
+
+        with pytest.raises(CallControlError) as exc_info:
+            manager.claim_handoff(
+                call_id,
+                {"agent_extension": "1001", "agent_uuid": "agent-uuid-1"},
+            )
+        expired_call = _wait_for_status(manager, call_id, "hangup_sent")
+
+        assert exc_info.value.status_code == 409
+        assert "handoff request expired" in str(exc_info.value)
+        assert expired_call["handoff"]["state"] == "handoff_failed"
+        assert expired_call["handoff"]["error"] == "handoff request expired"
+        assert expired_call["handoff"]["can_claim"] is False
+        assert operations == [("hangup", call_id, "NORMAL_CLEARING")]
+    finally:
+        manager.shutdown()
+
+
 def test_outbound_manager_handoff_transcript_merges_ai_and_human_turns_after_hangup():
     enqueued_payloads = []
 

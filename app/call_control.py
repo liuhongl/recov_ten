@@ -708,6 +708,7 @@ class OutboundCallManager:
             )
         _require_safe_token(call_id, "call_id")
         request = parse_handoff_claim_request(payload)
+        expired_error: str | None = None
         with self._lock:
             record = self._calls.get(call_id)
             if record is None:
@@ -720,18 +721,27 @@ class OutboundCallManager:
                 raise CallControlError("handoff already claimed", status_code=409)
             now_ms = _now_ms()
             if record.handoff.expires_at_ms is not None and record.handoff.expires_at_ms <= now_ms:
+                expired_error = "handoff request expired"
                 record.handoff.state = "handoff_failed"
-                record.handoff.error = "handoff request expired"
+                record.handoff.error = expired_error
                 record.handoff.updated_at_ms = now_ms
                 self._set_status_locked(record, "handoff_failed")
-                raise CallControlError("handoff request expired", status_code=409)
-            record.handoff.state = "agent_claimed"
-            record.handoff.claimed_at_ms = now_ms
-            record.handoff.claimed_by = request.claimed_by or request.agent_extension
-            record.handoff.agent_extension = request.agent_extension
-            record.handoff.agent_uuid = request.agent_uuid
-            record.handoff.updated_at_ms = now_ms
-            self._set_status_locked(record, "agent_claimed")
+            else:
+                record.handoff.state = "agent_claimed"
+                record.handoff.claimed_at_ms = now_ms
+                record.handoff.claimed_by = request.claimed_by or request.agent_extension
+                record.handoff.agent_extension = request.agent_extension
+                record.handoff.agent_uuid = request.agent_uuid
+                record.handoff.updated_at_ms = now_ms
+                self._set_status_locked(record, "agent_claimed")
+
+        if expired_error is not None:
+            self._cancel_handoff_timeout(call_id)
+            self._submit_handoff_failure_hangup(
+                call_id,
+                "handoff_expired_claim_hangup_submit_failed",
+            )
+            raise CallControlError(expired_error, status_code=409)
 
         self._cancel_handoff_timeout(call_id)
         try:
@@ -1128,18 +1138,20 @@ class OutboundCallManager:
             should_hangup = True
 
         if should_hangup:
-            try:
-                self._executor.submit(
-                    self._run_hangup_worker,
-                    call_id,
-                    "NORMAL_CLEARING",
-                )
-            except RuntimeError:
-                LOGGER.warning(
-                    "handoff_timeout_hangup_submit_failed call_id=%s",
-                    call_id,
-                    exc_info=True,
-                )
+            self._submit_handoff_failure_hangup(
+                call_id,
+                "handoff_timeout_hangup_submit_failed",
+            )
+
+    def _submit_handoff_failure_hangup(self, call_id: str, log_event: str) -> None:
+        try:
+            self._executor.submit(
+                self._run_hangup_worker,
+                call_id,
+                "NORMAL_CLEARING",
+            )
+        except RuntimeError:
+            LOGGER.warning("%s call_id=%s", log_event, call_id, exc_info=True)
 
     async def _hangup(self, call_id: str, *, cause: str) -> None:
         reply = await self._dialer_factory().hangup(call_id, cause=cause)
@@ -1378,18 +1390,10 @@ class OutboundCallManager:
         if reschedule_expires_at_ms is not None:
             self._schedule_handoff_timeout(call_id, reschedule_expires_at_ms)
         if should_hangup:
-            try:
-                self._executor.submit(
-                    self._run_hangup_worker,
-                    call_id,
-                    "NORMAL_CLEARING",
-                )
-            except RuntimeError:
-                LOGGER.warning(
-                    "handoff_failed_hangup_submit_failed call_id=%s",
-                    call_id,
-                    exc_info=True,
-                )
+            self._submit_handoff_failure_hangup(
+                call_id,
+                "handoff_failed_hangup_submit_failed",
+            )
 
     def _mark_handoff_recording_failed(self, call_id: str, error: str) -> None:
         handoff_failed_callback: tuple[dict[str, Any], str | None] | None = None

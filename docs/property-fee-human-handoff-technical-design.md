@@ -1319,7 +1319,7 @@ MVP 验收至少包括：
 4. 多坐席同时点击同一通，只能一个 claim 成功。
 5. claim 成功后 FreeSWITCH bridge 成功，客户和坐席可双向通话。
 6. bridge 后 AI 不再下行说话。
-7. 坐席未接或 WebRTC 建立失败时进入 handoff_failed，并结束通话。
+7. 坐席未接或 WebRTC 建立失败时，若总等待未超时则释放坐席锁回到 waiting_agent；若已超时则进入 handoff_failed，并结束通话。
 8. 人工通话结束后完成异步 ASR。
 9. 详情页能展示统一 timeline。
 10. call_record.transcript 包含 AI、人工坐席、客户的完整文字 turns。

@@ -465,6 +465,7 @@ def test_outbound_manager_handoff_transcript_merges_ai_and_human_turns_after_han
         assert enqueued_payloads == [
             {
                 "call_id": call_id,
+                "business_id": "990000000000032001",
                 "context": {
                     "tenantId": "000000",
                     "taskId": "task-1",
@@ -1204,6 +1205,7 @@ def test_outbound_manager_processes_handoff_recordings_after_recording_completed
         assert enqueued_payloads == [
             {
                 "call_id": call_id,
+                "business_id": "990000000000032001",
                 "context": {
                     "tenantId": "000000",
                     "taskId": "task-1",
@@ -1629,7 +1631,7 @@ def test_outbound_manager_auto_transcript_writes_record_before_success_callback(
         assert callback_event.status == "SUCCESS"
         assert callback_event.tenant_id == "000000"
         assert callback_event.task_id == "task-1"
-        assert callback_event.business_id == call_id
+        assert callback_event.business_id == "990000000000032001"
         assert callback_event.message == "外呼完成，转写已写入"
     finally:
         manager.shutdown()

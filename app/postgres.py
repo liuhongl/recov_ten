@@ -814,7 +814,7 @@ class PostgresCallResultWriter:
                 context,
                 status="SUCCESS",
                 message="外呼完成，转写已写入",
-                business_id=_prompt_text(payload.get("call_id")),
+                business_id=_prompt_text(payload.get("business_id")),
             )
             if event is not None:
                 self.flow_callback_writer.publish(event)

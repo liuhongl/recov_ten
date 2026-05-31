@@ -1335,8 +1335,51 @@ def test_postgres_call_result_writer_emits_success_flow_callback_after_transcrip
         assert flow_events[0].status == "SUCCESS"
         assert flow_events[0].tenant_id == "000000"
         assert flow_events[0].task_id == "task-1"
-        assert flow_events[0].business_id == "internal-media-call"
+        assert flow_events[0].business_id == "990000000000032001"
         assert flow_events[0].message == "外呼完成，转写已写入"
+
+    asyncio.run(assert_writer())
+
+
+def test_postgres_call_result_writer_uses_explicit_business_id_for_success_callback():
+    async def assert_writer():
+        flow_events: list[FlowCallbackEvent] = []
+
+        class Store:
+            async def mark_transcript_completed(self, context, transcript_json):
+                return True
+
+        class FakeFlowCallbackWriter:
+            def publish(self, event):
+                flow_events.append(event)
+                return True
+
+        writer = PostgresCallResultWriter(
+            Store(),
+            flow_callback_writer=FakeFlowCallbackWriter(),
+        )
+        writer.start()
+        try:
+            assert writer.enqueue_nowait(
+                {
+                    "call_id": "internal-media-call",
+                    "business_id": "biz-call-1",
+                    "context": {
+                        "tenantId": "000000",
+                        "taskId": "task-1",
+                        "callId": "990000000000032001",
+                        "debtId": "2049810626160668673",
+                    },
+                    "turns": [{"role": "assistant", "text": "您好"}],
+                }
+            )
+            await asyncio.wait_for(writer.queue.join(), timeout=1.0)
+        finally:
+            await writer.stop()
+
+        assert len(flow_events) == 1
+        assert flow_events[0].business_id == "biz-call-1"
+        assert flow_events[0].status == "SUCCESS"
 
     asyncio.run(assert_writer())
 

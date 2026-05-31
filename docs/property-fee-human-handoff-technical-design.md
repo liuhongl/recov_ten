@@ -1167,6 +1167,10 @@ AI 播放未接通人工的结束话术。
 
 本轮已确认：整通电话结束后再 callback Java。
 
+callback 标识语义保持业务侧可关联：`businessId` 优先使用 Java 请求里的业务
+`businessId`，没有时使用 `context.callId`。Python 内部媒体 `call_id` / FreeSWITCH
+通道 UUID 只用于网关和桥接控制，不能作为最终 callback 的业务标识。
+
 现有约定是：
 
 ```text

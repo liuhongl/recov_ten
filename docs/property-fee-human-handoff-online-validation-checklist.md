@@ -72,6 +72,7 @@ gateway_call_detail 独立表
 | `call_record` 初始记录 | Java 已先创建 |
 | Python 写 transcript | AI + 人工 turns 可写入同一个 `transcript.turns` |
 | Java callback | 整通电话结束且 transcript 写完后只回调一次 |
+| callback `businessId` | 优先使用请求里的业务 `businessId`，没有则使用 Java `callId`，不能使用 Python 内部媒体 call_id |
 
 ### 3.4 人工阶段临时录音
 

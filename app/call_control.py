@@ -818,6 +818,7 @@ class OutboundCallManager:
                 record.handoff.human_transcript_error = None
                 result_payload = {
                     "call_id": record.call_id,
+                    "business_id": _business_id(record),
                     "context": dict(record.context),
                     "turns": [*record.handoff.ai_turns, *record.handoff.human_turns],
                 }

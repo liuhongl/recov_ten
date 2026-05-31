@@ -201,6 +201,7 @@ handoff.bridge_reply 为 +OK
 ```text
 claim 409：该通电话已被抢接、已过期或不是 waiting_agent。
 客户已挂断：`GET /calls/{call_id}` 应显示 handoff.state = handoff_failed，can_claim = false，待接管列表不再允许 claim。
+坐席通道已呼起但尚未 bridge 成功时客户挂断：后端应挂断 agent_uuid，且不再执行 uuid_bridge。
 originate 失败：查坐席 SIP 注册、WSS、contact、浏览器是否在线。
 bridge 失败：查客户 call_id 是否仍是客户 FreeSWITCH channel UUID，查 agent_uuid 是否还在线。
 originate 或 bridge 失败但总等待未超时：`GET /calls/{call_id}` 应回到 status = waiting_agent，保留 handoff.error，并允许其他坐席继续 claim。

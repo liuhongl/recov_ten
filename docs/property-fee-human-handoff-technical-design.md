@@ -1163,6 +1163,14 @@ waiting_agent / agent_claimed 期间客户先挂断
   -> 待接管列表不再允许 claim
 ```
 
+```text
+坐席通道已呼起但尚未 bridge 成功时客户先挂断
+  -> 停止后续 break / bridge
+  -> 挂断已呼起的 agent_uuid
+  -> handoff_failed
+  -> 保留客户通话的 completed 终态
+```
+
 第一版不做回访任务：
 
 ```text

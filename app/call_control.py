@@ -1246,6 +1246,9 @@ class OutboundCallManager:
         endpoint = await dialer.resolve_endpoint(
             f"sofia_contact:*/{request.agent_extension}"
         )
+        inactive_error = self._handoff_customer_inactive_error(call_id)
+        if inactive_error is not None:
+            raise CallControlError(inactive_error, status_code=409)
         with self._lock:
             record = self._calls[call_id]
             assert record.handoff is not None
@@ -1263,6 +1266,14 @@ class OutboundCallManager:
         originate_reply = (await dialer.originate(command)).strip()
         if originate_reply.startswith("-ERR"):
             raise CallControlError(originate_reply, status_code=503)
+        inactive_error = self._handoff_customer_inactive_error(call_id)
+        if inactive_error is not None:
+            await self._cleanup_aborted_agent_call(
+                dialer,
+                call_id=call_id,
+                agent_uuid=request.agent_uuid,
+            )
+            raise CallControlError(inactive_error, status_code=409)
 
         with self._lock:
             record = self._calls[call_id]
@@ -1275,6 +1286,14 @@ class OutboundCallManager:
             self._set_status_locked(record, "bridging")
 
         break_reply = (await dialer.break_audio_stream(call_id)).strip()
+        inactive_error = self._handoff_customer_inactive_error(call_id)
+        if inactive_error is not None:
+            await self._cleanup_aborted_agent_call(
+                dialer,
+                call_id=call_id,
+                agent_uuid=request.agent_uuid,
+            )
+            raise CallControlError(inactive_error, status_code=409)
         with self._lock:
             record = self._calls[call_id]
             assert record.handoff is not None
@@ -1283,16 +1302,20 @@ class OutboundCallManager:
 
         bridge_reply = (await dialer.bridge(call_id, request.agent_uuid)).strip()
         if bridge_reply.startswith("-ERR"):
-            try:
-                await dialer.hangup(request.agent_uuid, cause="NORMAL_CLEARING")
-            except (OSError, EOFError, EventSocketError):
-                LOGGER.warning(
-                    "handoff_agent_cleanup_failed call_id=%s agent_uuid=%s",
-                    call_id,
-                    request.agent_uuid,
-                    exc_info=True,
-                )
+            await self._cleanup_aborted_agent_call(
+                dialer,
+                call_id=call_id,
+                agent_uuid=request.agent_uuid,
+            )
             raise CallControlError(bridge_reply, status_code=503)
+        inactive_error = self._handoff_customer_inactive_error(call_id)
+        if inactive_error is not None:
+            await self._cleanup_aborted_agent_call(
+                dialer,
+                call_id=call_id,
+                agent_uuid=request.agent_uuid,
+            )
+            raise CallControlError(inactive_error, status_code=409)
 
         recording_status = "disabled"
         recording_error = None
@@ -1318,6 +1341,15 @@ class OutboundCallManager:
             except Exception as err:
                 recording_status = "failed"
                 recording_error = str(err)
+
+        inactive_error = self._handoff_customer_inactive_error(call_id)
+        if inactive_error is not None:
+            await self._cleanup_aborted_agent_call(
+                dialer,
+                call_id=call_id,
+                agent_uuid=request.agent_uuid,
+            )
+            raise CallControlError(inactive_error, status_code=409)
 
         with self._lock:
             record = self._calls[call_id]
@@ -1347,6 +1379,42 @@ class OutboundCallManager:
             self._set_status_locked(record, "human_active")
             return record.to_dict()
 
+    def _handoff_customer_inactive_error(self, call_id: str) -> str | None:
+        with self._lock:
+            record = self._calls.get(call_id)
+            if record is None:
+                return "call not found"
+            if _is_terminal_status(record.status):
+                return "customer call ended before handoff connected"
+            if record.handoff is None:
+                return "handoff not requested"
+            if record.handoff.state == "handoff_failed":
+                return record.handoff.error or "handoff failed"
+            if record.handoff.state not in {
+                "agent_claimed",
+                "agent_ringing",
+                "bridging",
+            }:
+                return f"handoff is no longer active: {record.handoff.state}"
+        return None
+
+    async def _cleanup_aborted_agent_call(
+        self,
+        dialer: Any,
+        *,
+        call_id: str,
+        agent_uuid: str,
+    ) -> None:
+        try:
+            await dialer.hangup(agent_uuid, cause="NORMAL_CLEARING")
+        except (OSError, EOFError, EventSocketError):
+            LOGGER.warning(
+                "handoff_agent_cleanup_failed call_id=%s agent_uuid=%s",
+                call_id,
+                agent_uuid,
+                exc_info=True,
+            )
+
     def _mark_handoff_failed(self, call_id: str, error: str) -> None:
         with self._lock:
             record = self._calls.get(call_id)
@@ -1366,6 +1434,12 @@ class OutboundCallManager:
                 return
             handoff = record.handoff
             now_ms = _now_ms()
+            if _is_terminal_status(record.status):
+                handoff.state = "handoff_failed"
+                handoff.error = error
+                handoff.updated_at_ms = now_ms
+                record.updated_at_ms = now_ms
+                return
             if (
                 handoff.expires_at_ms is not None
                 and handoff.expires_at_ms > now_ms

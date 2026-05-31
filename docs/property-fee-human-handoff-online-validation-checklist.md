@@ -175,6 +175,8 @@ handoff.ai_turns 包含转人工前的 AI 对话记录
 页面看不到：查 `/calls?status=active` 过滤和 handoff state。
 ```
 
+本地 Playwright 自动化验证时，必须确认输出里的 `autoTriggered=true`，否则只是脚本超时后手动调用 `/handoff` 的兜底路径，不能证明“客户说转人工后系统自动进入 waiting_agent”。测试音频应使用带尾部静音的样本，例如 `outputs/handoff-test/handoff-request-with-silence.wav`；过短且无静音的假麦克风音频可能被浏览器循环播放，导致 VAD 无法提交用户 turn。
+
 ### 4.5 坐席 claim 与 bridge
 
 操作：

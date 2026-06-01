@@ -1101,6 +1101,70 @@ def test_outbound_manager_rejects_handoff_transcript_before_human_hangup():
         manager.shutdown()
 
 
+def test_outbound_manager_hangs_up_agent_channel_after_human_handoff_ends():
+    operations: list[tuple[str, str, str | None]] = []
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            return "+OK agent-uuid-1"
+
+        async def break_audio_stream(self, call_id: str) -> str:
+            return "+OK"
+
+        async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
+            return "+OK uuid_bridge accepted"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            operations.append(("hangup", call_id, cause))
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+    )
+
+    try:
+        call = manager.create_call({"destination": "1000"})
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=call_id)
+        )
+        manager.request_handoff(call_id, {"last_utterance": "我要转人工"})
+        manager.claim_handoff(
+            call_id,
+            {"agent_extension": "1001", "agent_uuid": "agent-uuid-1"},
+        )
+
+        manager.handle_channel_event(
+            ChannelStateEvent(
+                name="CHANNEL_HANGUP_COMPLETE",
+                call_id=call_id,
+                hangup_cause="NORMAL_CLEARING",
+            )
+        )
+
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if ("hangup", "agent-uuid-1", "NORMAL_CLEARING") in operations:
+                break
+            time.sleep(0.02)
+
+        final_call = manager.get_call(call_id)
+        assert final_call is not None
+        assert final_call["status"] == "completed"
+        assert final_call["handoff"]["state"] == "completed"
+        assert ("hangup", "agent-uuid-1", "NORMAL_CLEARING") in operations
+    finally:
+        manager.shutdown()
+
+
 def test_outbound_manager_handoff_records_temp_audio_until_hangup_when_enabled():
     operations: list[tuple[str, str, str]] = []
 

@@ -602,6 +602,7 @@ class OutboundCallManager:
         sync_status: str | None = None
         stop_handoff_recording_call_id: str | None = None
         cancel_handoff_timeout_call_id: str | None = None
+        cleanup_handoff_agent: tuple[str, str] | None = None
         handoff_failed_callback: tuple[dict[str, Any], str | None] | None = None
         handoff_connection_failed_callback: tuple[
             dict[str, Any],
@@ -619,6 +620,14 @@ class OutboundCallManager:
                 sync_status = record.status
                 if record.handoff is not None:
                     cancel_handoff_timeout_call_id = record.call_id
+                    if (
+                        record.handoff.state == "completed"
+                        and record.handoff.agent_uuid
+                    ):
+                        cleanup_handoff_agent = (
+                            record.call_id,
+                            record.handoff.agent_uuid,
+                        )
             if (
                 record.handoff is not None
                 and record.handoff.state == "completed"
@@ -638,6 +647,8 @@ class OutboundCallManager:
             )
         if cancel_handoff_timeout_call_id is not None:
             self._cancel_handoff_timeout(cancel_handoff_timeout_call_id)
+        if cleanup_handoff_agent is not None:
+            self._submit_handoff_agent_cleanup_hangup(*cleanup_handoff_agent)
         if handoff_failed_callback is not None:
             self._publish_handoff_failed_callback(*handoff_failed_callback)
         if handoff_connection_failed_callback is not None:
@@ -1176,6 +1187,45 @@ class OutboundCallManager:
             )
         except RuntimeError:
             LOGGER.warning("%s call_id=%s", log_event, call_id, exc_info=True)
+
+    def _submit_handoff_agent_cleanup_hangup(
+        self,
+        call_id: str,
+        agent_uuid: str,
+    ) -> None:
+        try:
+            self._executor.submit(
+                self._run_handoff_agent_cleanup_hangup_worker,
+                call_id,
+                agent_uuid,
+            )
+        except RuntimeError:
+            LOGGER.warning(
+                "handoff_agent_cleanup_submit_failed call_id=%s agent_uuid=%s",
+                call_id,
+                agent_uuid,
+                exc_info=True,
+            )
+
+    def _run_handoff_agent_cleanup_hangup_worker(
+        self,
+        call_id: str,
+        agent_uuid: str,
+    ) -> None:
+        try:
+            asyncio.run(
+                self._dialer_factory().hangup(
+                    agent_uuid,
+                    cause="NORMAL_CLEARING",
+                )
+            )
+        except Exception:
+            LOGGER.warning(
+                "handoff_agent_cleanup_failed call_id=%s agent_uuid=%s",
+                call_id,
+                agent_uuid,
+                exc_info=True,
+            )
 
     async def _hangup(self, call_id: str, *, cause: str) -> None:
         reply = await self._dialer_factory().hangup(call_id, cause=cause)

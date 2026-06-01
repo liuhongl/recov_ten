@@ -8,6 +8,7 @@ from urllib.request import Request, urlopen
 from app.browser_prompt_test import BrowserPromptTestStore
 from app.config import (
     GatewayConfig,
+    HumanTranscriptConfig,
     RocketMQAclConfig,
     RocketMQConfig,
     ServerConfig,
@@ -99,6 +100,39 @@ def test_ready_endpoint_exposes_rocketmq_non_secret_config():
             },
         }
         assert "secret-value" not in body
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
+def test_ready_endpoint_exposes_human_transcript_config():
+    config = GatewayConfig(
+        server=ServerConfig(host="127.0.0.1", port=0),
+        human_transcript=HumanTranscriptConfig(
+            enabled=True,
+            provider="http_json",
+            http_url="http://127.0.0.1:9220/transcribe",
+            timeout_seconds=12.5,
+        ),
+    )
+    server = HealthServer(config)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.address
+        with urlopen(f"http://{host}:{port}/ready", timeout=3) as response:
+            body = response.read().decode("utf-8")
+            payload = json.loads(body)
+
+        assert response.status == 200
+        assert payload["config"]["human_transcript"] == {
+            "enabled": True,
+            "provider": "http_json",
+            "http_url": "http://127.0.0.1:9220/transcribe",
+            "timeout_seconds": 12.5,
+        }
+        assert "test-secret-value" not in body
     finally:
         server.shutdown()
         thread.join(timeout=3)

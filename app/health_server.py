@@ -146,6 +146,9 @@ class HealthServer:
                                     ),
                                 },
                                 "features": asdict(config.features),
+                                "human_transcript": asdict(
+                                    config.human_transcript
+                                ),
                                 "flow_callback": asdict(config.flow_callback),
                                 "rocketmq": asdict(config.rocketmq),
                                 "outbound": {

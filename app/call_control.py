@@ -704,7 +704,7 @@ class OutboundCallManager:
             record = self._calls.get(call_id)
             if record is None:
                 raise CallControlError("call not found", status_code=404)
-            if _is_terminal_status(record.status):
+            if _is_handoff_inactive_status(record.status):
                 raise CallControlError("call is not active", status_code=409)
             if record.handoff is not None and record.handoff.state in {
                 "waiting_agent",
@@ -747,7 +747,7 @@ class OutboundCallManager:
             record = self._calls.get(call_id)
             if record is None:
                 raise CallControlError("call not found", status_code=404)
-            if _is_terminal_status(record.status):
+            if _is_handoff_inactive_status(record.status):
                 raise CallControlError("call is not active", status_code=409)
             if record.handoff is None:
                 raise CallControlError("handoff not requested", status_code=409)
@@ -1468,7 +1468,7 @@ class OutboundCallManager:
             record = self._calls.get(call_id)
             if record is None:
                 return "call not found"
-            if _is_terminal_status(record.status):
+            if _is_handoff_inactive_status(record.status):
                 return "customer call ended before handoff connected"
             if record.handoff is None:
                 return "handoff not requested"
@@ -2393,6 +2393,13 @@ def _is_terminal_status(status: str) -> bool:
         "no_answer",
         "canceled",
         "hangup_failed",
+    }
+
+
+def _is_handoff_inactive_status(status: str) -> bool:
+    return _is_terminal_status(status) or status in {
+        "hangup_requested",
+        "hangup_sent",
     }
 
 

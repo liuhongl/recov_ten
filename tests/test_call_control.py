@@ -1051,7 +1051,7 @@ def test_outbound_manager_ignores_late_transcript_updates_after_completed():
         manager.shutdown()
 
 
-def test_outbound_manager_ignores_late_transcript_success_after_failed_callback():
+def test_outbound_manager_defaults_error_and_ignores_late_success_after_failed_callback():
     enqueued_payloads = []
     flow_events: list[FlowCallbackEvent] = []
 
@@ -1121,10 +1121,7 @@ def test_outbound_manager_ignores_late_transcript_success_after_failed_callback(
             )
         )
 
-        failed_call = manager.complete_handoff_transcript(
-            call_id,
-            {"status": "failed", "error": "asr unavailable"},
-        )
+        failed_call = manager.complete_handoff_transcript(call_id, {"status": "failed"})
         late_success_call = manager.complete_handoff_transcript(
             call_id,
             {
@@ -1139,9 +1136,12 @@ def test_outbound_manager_ignores_late_transcript_success_after_failed_callback(
         )
 
         assert failed_call["handoff"]["human_transcript_status"] == "failed"
+        assert failed_call["handoff"]["human_transcript_error"] == (
+            "human transcript failed"
+        )
         assert late_success_call["handoff"]["human_transcript_status"] == "failed"
         assert late_success_call["handoff"]["human_transcript_error"] == (
-            "asr unavailable"
+            "human transcript failed"
         )
         assert enqueued_payloads == []
         assert [event.status for event in flow_events] == ["ACCEPTED", "FAILED"]

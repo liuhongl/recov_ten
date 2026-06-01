@@ -843,7 +843,9 @@ class OutboundCallManager:
             record.handoff.updated_at_ms = now_ms
             if status == "failed":
                 record.handoff.human_transcript_status = "failed"
-                record.handoff.human_transcript_error = _optional_str(payload, "error")
+                record.handoff.human_transcript_error = (
+                    _optional_str(payload, "error") or "human transcript failed"
+                )
                 record.updated_at_ms = now_ms
                 handoff_failed_callback = self._handoff_failed_callback_locked(record)
                 call_payload = record.to_dict()

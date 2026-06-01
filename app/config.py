@@ -670,7 +670,7 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
     config = _apply_env_overrides(config)
     _validate_media_contract(config.freeswitch)
     _validate_postgres_config(config.postgres)
-    _validate_human_transcript_config(config.human_transcript)
+    _validate_human_transcript_config(config.human_transcript, config.features)
     _validate_flow_callback_config(config.flow_callback)
     _validate_rocketmq_config(config.rocketmq)
     return config
@@ -1127,13 +1127,18 @@ def _validate_postgres_config(config: PostgresConfig) -> None:
         raise ValueError("postgres.command_timeout_seconds must be positive")
 
 
-def _validate_human_transcript_config(config: HumanTranscriptConfig) -> None:
+def _validate_human_transcript_config(
+    config: HumanTranscriptConfig,
+    features: FeatureConfig,
+) -> None:
     if config.timeout_seconds <= 0:
         raise ValueError("human_transcript.timeout_seconds must be positive")
     if config.provider != "http_json":
         raise ValueError("human_transcript.provider must be http_json")
     if config.enabled and not config.http_url.strip():
         raise ValueError("human_transcript.http_url is required when enabled")
+    if config.enabled and not features.recording_enabled:
+        raise ValueError("recording must be enabled when human_transcript is enabled")
 
 
 def _validate_flow_callback_config(config: FlowCallbackConfig) -> None:

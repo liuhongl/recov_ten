@@ -78,7 +78,7 @@ def test_load_config_from_toml(tmp_path):
 
             [features]
             metrics_enabled = true
-            recording_enabled = false
+            recording_enabled = true
             recording_dir = "/tmp/recov_ten_handoff_test"
             inbound_rms_diagnostics_enabled = true
 
@@ -165,7 +165,7 @@ def test_load_config_from_toml(tmp_path):
     assert config.vad.end_silence_ms == 700
     assert config.vad.barge_in_enabled is True
     assert config.features.metrics_enabled is True
-    assert config.features.recording_enabled is False
+    assert config.features.recording_enabled is True
     assert config.features.recording_dir == "/tmp/recov_ten_handoff_test"
     assert config.features.inbound_rms_diagnostics_enabled is True
     assert config.human_transcript.enabled is True
@@ -320,6 +320,19 @@ def test_environment_overrides(monkeypatch):
     assert config.postgres.dsn_env == "LOCAL_POSTGRES_DSN"
     assert config.postgres.max_pool_size == 9
     assert config.postgres.command_timeout_seconds == 2.5
+
+
+def test_human_transcript_requires_recording_enabled(monkeypatch):
+    monkeypatch.setenv("HUMAN_TRANSCRIPT_ENABLED", "true")
+    monkeypatch.setenv("HUMAN_TRANSCRIPT_HTTP_URL", "http://asr.example/transcribe")
+    monkeypatch.setenv("RECORDING_ENABLED", "false")
+
+    with pytest.raises(ValueError) as exc_info:
+        load_config()
+
+    assert "recording must be enabled when human_transcript is enabled" in str(
+        exc_info.value
+    )
 
 
 def test_default_outbound_caller_avoids_local_self_call():

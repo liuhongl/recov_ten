@@ -86,6 +86,11 @@ HANDOFF_NEGATED_REQUEST_RE = re.compile(
     r"(?:转|转接|接|找|叫|换)?(?:人工|人工客服|真人客服|物业客服|客服)"
     r"|不是(?:要)?(?:转|转接|找|叫)?(?:人工|人工客服|真人客服|物业客服|客服)"
 )
+HANDOFF_IDENTITY_QUESTION_RE = re.compile(
+    r"(?:你|您|电话那边|这|这个|现在)(?:是|是不是)"
+    r"(?:人工客服|真人客服|人工坐席|真人坐席|人工|真人|客服|"
+    r"机器人|机器客服|智能客服|AI|ai)(?:吗|嘛|么)$"
+)
 OPENING_BUSINESS_GUARD = "\n".join(
     [
         "这是待缴费用确认电话，不是闲聊。",
@@ -2848,6 +2853,8 @@ def _detect_handoff_request(text: str) -> str | None:
     if not normalized:
         return None
     if HANDOFF_NEGATED_REQUEST_RE.search(normalized):
+        return None
+    if HANDOFF_IDENTITY_QUESTION_RE.search(normalized):
         return None
     if HANDOFF_REQUEST_RE.search(normalized):
         return "request_human"

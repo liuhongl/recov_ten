@@ -192,6 +192,8 @@ def test_handoff_request_detection_is_conservative():
     assert _detect_handoff_request("先别找客服") is None
     assert _detect_handoff_request("我不是要转人工") is None
     assert _detect_handoff_request("你是机器人吗") is None
+    assert _detect_handoff_request("你是人工客服吗") is None
+    assert _detect_handoff_request("你是真人客服吗") is None
     assert _detect_handoff_request("叫负责人来") is None
     assert _detect_handoff_request("这个人工费是什么") is None
     assert _detect_handoff_request("我要人工费明细") is None

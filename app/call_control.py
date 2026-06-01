@@ -1518,7 +1518,7 @@ class OutboundCallManager:
                 return
             handoff = record.handoff
             now_ms = _now_ms()
-            if _is_terminal_status(record.status):
+            if _is_handoff_inactive_status(record.status):
                 handoff.state = "handoff_failed"
                 handoff.error = error
                 handoff.updated_at_ms = now_ms
@@ -1527,7 +1527,7 @@ class OutboundCallManager:
             if (
                 handoff.expires_at_ms is not None
                 and handoff.expires_at_ms > now_ms
-                and not _is_terminal_status(record.status)
+                and not _is_handoff_inactive_status(record.status)
             ):
                 handoff.state = "waiting_agent"
                 handoff.claimed_at_ms = None

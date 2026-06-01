@@ -2382,6 +2382,80 @@ def test_outbound_manager_stops_handoff_when_customer_hangs_up_after_agent_origi
         manager.shutdown()
 
 
+def test_outbound_manager_does_not_reopen_handoff_when_hangup_sent_during_claim():
+    operations: list[tuple[str, str, str | None]] = []
+    manager: OutboundCallManager
+    customer_call_id = ""
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            if "&park()" in command:
+                manager.request_hangup(customer_call_id)
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    call = manager.get_call(customer_call_id)
+                    if call and call["status"] == "hangup_sent":
+                        break
+                    time.sleep(0.02)
+                return "+OK agent-uuid-1"
+            return "+OK customer-call"
+
+        async def break_audio_stream(self, call_id: str) -> str:
+            operations.append(("break_audio_stream", call_id, None))
+            return "+OK"
+
+        async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
+            operations.append(("bridge", customer_call_id, agent_uuid))
+            return "+OK uuid_bridge accepted"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            operations.append(("hangup", call_id, cause))
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+    )
+
+    try:
+        call = manager.create_call({"destination": "1000"})
+        customer_call_id = call["call_id"]
+        _wait_for_status(manager, customer_call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=customer_call_id)
+        )
+        manager.request_handoff(customer_call_id, {"last_utterance": "我要转人工"})
+
+        with pytest.raises(CallControlError) as exc_info:
+            manager.claim_handoff(
+                customer_call_id,
+                {"agent_extension": "1001", "agent_uuid": "agent-uuid-1"},
+            )
+
+        final_call = manager.get_call(customer_call_id)
+        assert final_call is not None
+        assert exc_info.value.status_code == 409
+        assert "customer call ended before handoff connected" in str(exc_info.value)
+        assert final_call["status"] == "hangup_sent"
+        assert final_call["handoff"]["state"] == "handoff_failed"
+        assert final_call["handoff"]["error"] == (
+            "customer call ended before handoff connected"
+        )
+        assert final_call["handoff"]["can_claim"] is False
+        assert ("hangup", customer_call_id, "NORMAL_CLEARING") in operations
+        assert ("hangup", "agent-uuid-1", "NORMAL_CLEARING") in operations
+        assert ("break_audio_stream", customer_call_id, None) not in operations
+        assert ("bridge", customer_call_id, "agent-uuid-1") not in operations
+    finally:
+        manager.shutdown()
+
+
 def test_outbound_manager_hangs_up_customer_when_failed_claim_expires_wait():
     operations: list[tuple[str, str, str]] = []
 

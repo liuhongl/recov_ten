@@ -335,6 +335,18 @@ def test_human_transcript_requires_recording_enabled(monkeypatch):
     )
 
 
+def test_flow_callback_requires_postgres_enabled(monkeypatch):
+    monkeypatch.setenv("FLOW_CALLBACK_ENABLED", "true")
+    monkeypatch.setenv("POSTGRES_ENABLED", "false")
+
+    with pytest.raises(ValueError) as exc_info:
+        load_config()
+
+    assert "postgres must be enabled when flow_callback is enabled" in str(
+        exc_info.value
+    )
+
+
 def test_default_outbound_caller_avoids_local_self_call():
     config = load_config()
 

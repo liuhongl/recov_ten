@@ -672,6 +672,7 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
     _validate_postgres_config(config.postgres)
     _validate_human_transcript_config(config.human_transcript, config.features)
     _validate_flow_callback_config(config.flow_callback)
+    _validate_cross_feature_config(config)
     _validate_rocketmq_config(config.rocketmq)
     return config
 
@@ -1157,6 +1158,11 @@ def _validate_flow_callback_config(config: FlowCallbackConfig) -> None:
         raise ValueError("flow_callback.http.client_id is required when enabled")
     if http.enabled and not http.secret_env.strip():
         raise ValueError("flow_callback.http.secret_env is required when enabled")
+
+
+def _validate_cross_feature_config(config: GatewayConfig) -> None:
+    if config.flow_callback.enabled and not config.postgres.enabled:
+        raise ValueError("postgres must be enabled when flow_callback is enabled")
 
 
 def _validate_rocketmq_config(config: RocketMQConfig) -> None:

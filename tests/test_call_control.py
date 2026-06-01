@@ -635,7 +635,11 @@ def test_outbound_manager_rejects_handoff_claim_after_hangup_is_sent():
         assert exc_info.value.status_code == 409
         assert "call is not active" in str(exc_info.value)
         assert final_call["status"] == "hangup_sent"
-        assert final_call["handoff"]["state"] == "waiting_agent"
+        assert final_call["handoff"]["state"] == "handoff_failed"
+        assert final_call["handoff"]["error"] == (
+            "customer hangup requested before handoff connected"
+        )
+        assert final_call["handoff"]["can_claim"] is False
     finally:
         manager.shutdown()
 

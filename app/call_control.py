@@ -688,12 +688,28 @@ class OutboundCallManager:
 
     def request_hangup(self, call_id: str, *, cause: str = "NORMAL_CLEARING") -> dict[str, Any]:
         _require_safe_token(cause, "cause")
+        cancel_handoff_timeout = False
         with self._lock:
             record = self._calls.get(call_id)
             if record is None:
                 raise CallControlError("call not found", status_code=404)
+            if record.handoff is not None and record.handoff.state in {
+                "waiting_agent",
+                "agent_claimed",
+                "agent_ringing",
+                "bridging",
+            }:
+                now_ms = _now_ms()
+                record.handoff.state = "handoff_failed"
+                record.handoff.error = (
+                    "customer hangup requested before handoff connected"
+                )
+                record.handoff.updated_at_ms = now_ms
+                cancel_handoff_timeout = True
             self._set_status_locked(record, "hangup_requested")
 
+        if cancel_handoff_timeout:
+            self._cancel_handoff_timeout(call_id)
         self._executor.submit(self._run_hangup_worker, call_id, cause)
         return record.to_dict()
 

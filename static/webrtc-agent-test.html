@@ -847,10 +847,22 @@
           waitingHandoffCalls = (payload.calls || []).filter((call) => {
             return call.handoff && call.handoff.state === "waiting_agent";
           });
+          discardStaleSelectedHandoffCall();
           renderHandoffList({ preserveSelected });
           log("待接通话已刷新", { count: waitingHandoffCalls.length });
         } catch (error) {
           log("刷新待接通话失败", { error: error.message });
+        }
+      }
+
+      function discardStaleSelectedHandoffCall() {
+        if (!selectedHandoffCall || !selectedHandoffCall.handoff) return;
+        const selectedStillWaiting = waitingHandoffCalls.some((call) => {
+          return call.call_id === selectedHandoffCall.call_id;
+        });
+        if (!selectedStillWaiting && selectedHandoffCall.handoff.can_claim) {
+          selectedHandoffCall = null;
+          renderHandoffTimeline(null);
         }
       }
 

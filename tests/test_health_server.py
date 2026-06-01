@@ -359,6 +359,9 @@ def test_webrtc_agent_test_page_is_served():
         assert "renderHandoffList({ preserveSelected });" in body
         assert "await refreshHandoffCalls({ preserveSelected: true });" in body
         assert "preserveSelected && selectedHandoffCall" in body
+        assert "const selectedStillWaiting =" in body
+        assert "selectedHandoffCall.handoff.can_claim" in body
+        assert "renderHandoffTimeline(null);" in body
         assert "ws://127.0.0.1:5066" in body
         assert "new JsSIP.WebSocketInterface" in body
         assert "new JsSIP.UA" in body

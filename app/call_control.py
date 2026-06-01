@@ -1353,7 +1353,15 @@ class OutboundCallManager:
             record.handoff.updated_at_ms = now_ms
             self._set_status_locked(record, "bridging")
 
-        break_reply = (await dialer.break_audio_stream(call_id)).strip()
+        try:
+            break_reply = (await dialer.break_audio_stream(call_id)).strip()
+        except Exception:
+            await self._cleanup_aborted_agent_call(
+                dialer,
+                call_id=call_id,
+                agent_uuid=request.agent_uuid,
+            )
+            raise
         inactive_error = self._handoff_customer_inactive_error(call_id)
         if inactive_error is not None:
             await self._cleanup_aborted_agent_call(
@@ -1368,7 +1376,15 @@ class OutboundCallManager:
             record.handoff.audio_stream_break_reply = break_reply
             record.handoff.updated_at_ms = _now_ms()
 
-        bridge_reply = (await dialer.bridge(call_id, request.agent_uuid)).strip()
+        try:
+            bridge_reply = (await dialer.bridge(call_id, request.agent_uuid)).strip()
+        except Exception:
+            await self._cleanup_aborted_agent_call(
+                dialer,
+                call_id=call_id,
+                agent_uuid=request.agent_uuid,
+            )
+            raise
         if bridge_reply.startswith("-ERR"):
             await self._cleanup_aborted_agent_call(
                 dialer,
@@ -1475,7 +1491,7 @@ class OutboundCallManager:
     ) -> None:
         try:
             await dialer.hangup(agent_uuid, cause="NORMAL_CLEARING")
-        except (OSError, EOFError, EventSocketError):
+        except Exception:
             LOGGER.warning(
                 "handoff_agent_cleanup_failed call_id=%s agent_uuid=%s",
                 call_id,

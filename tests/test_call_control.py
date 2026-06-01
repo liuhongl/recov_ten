@@ -2161,6 +2161,62 @@ def test_outbound_manager_releases_handoff_claim_and_hangs_up_agent_when_bridge_
         manager.shutdown()
 
 
+def test_outbound_manager_hangs_up_agent_when_break_audio_stream_fails():
+    operations: list[tuple[str, str, str | None]] = []
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            return "+OK agent-uuid-1"
+
+        async def break_audio_stream(self, call_id: str) -> str:
+            operations.append(("break_audio_stream", call_id, None))
+            raise CallControlError("-ERR audio stream not found", status_code=503)
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            operations.append(("hangup", call_id, cause))
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+    )
+
+    try:
+        call = manager.create_call({"destination": "1000"})
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=call_id)
+        )
+        manager.request_handoff(call_id, {"last_utterance": "我要转人工"})
+
+        with pytest.raises(CallControlError) as exc_info:
+            manager.claim_handoff(
+                call_id,
+                {"agent_extension": "1001", "agent_uuid": "agent-uuid-1"},
+            )
+
+        failed_call = manager.get_call(call_id)
+        assert failed_call is not None
+        assert exc_info.value.status_code == 503
+        assert failed_call["status"] == "waiting_agent"
+        assert failed_call["handoff"]["state"] == "waiting_agent"
+        assert failed_call["handoff"]["agent_uuid"] is None
+        assert failed_call["handoff"]["error"] == "-ERR audio stream not found"
+        assert operations == [
+            ("break_audio_stream", call_id, None),
+            ("hangup", "agent-uuid-1", "NORMAL_CLEARING"),
+        ]
+    finally:
+        manager.shutdown()
+
+
 def test_outbound_manager_stops_handoff_when_customer_hangs_up_after_agent_originate():
     operations: list[tuple[str, str, str | None]] = []
     manager: OutboundCallManager

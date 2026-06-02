@@ -8,9 +8,11 @@ __pycache__/
 *.py[cod]
 *.log
 artifacts/
+outputs/
 freeswitch-local/conf/tls/
 uv.lock
 docs/obsidian-sip-gateway/.obsidian/workspace.json
+docs/property-fee-human-handoff-preview.html
 *.pcm
 *.wav
 *.jsonl

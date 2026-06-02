@@ -526,7 +526,7 @@ async def _assert_realtime_gateway_triggers_handoff_from_asr_before_model_audio(
     )
     server._realtime_sessions[session.session_id] = fake_realtime_session
 
-    await server._handle_input_transcript_available(session, 4, "我要转人工")
+    await server._handle_input_transcript_available(session, 4, "接人工")
     await server._queue_audio_delta(session, 4, samples_to_pcm_s16le([1600] * 480))
 
     assert fake_handoff.requests == [
@@ -535,10 +535,10 @@ async def _assert_realtime_gateway_triggers_handoff_from_asr_before_model_audio(
             {
                 "trigger": "customer_requested",
                 "reason": "request_human",
-                "last_utterance": "我要转人工",
+                "last_utterance": "接人工",
                 "wait_timeout_seconds": 180,
                 "ai_turns": [
-                    {"role": "user", "text": "我要转人工"},
+                    {"role": "user", "text": "接人工"},
                 ],
             },
         )
@@ -554,7 +554,7 @@ async def _assert_realtime_gateway_triggers_handoff_from_asr_before_model_audio(
         (item.status, item.input_transcript, item.output_transcript)
         for item in session.committed_exchanges
     ]
-    assert committed == [("handoff_requested", "我要转人工", "")]
+    assert committed == [("handoff_requested", "接人工", "")]
 
 
 def test_realtime_gateway_drops_late_audio_for_closed_interrupted_turn():

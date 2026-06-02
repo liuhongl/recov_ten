@@ -125,6 +125,13 @@
         opacity: 0.55;
       }
 
+      .button.attention:not(:disabled) {
+        border-color: var(--amber);
+        background: var(--amber);
+        color: #ffffff;
+        box-shadow: 0 0 0 4px rgba(154, 91, 19, 0.18);
+      }
+
       .shell {
         width: min(1360px, calc(100% - 24px));
         margin: 22px auto 40px;
@@ -142,6 +149,33 @@
         border-radius: 8px;
         background: var(--surface);
         box-shadow: var(--shadow);
+      }
+
+      .incoming-banner {
+        min-height: 54px;
+        border: 1px solid #fedf89;
+        border-radius: 8px;
+        padding: 12px 16px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        background: var(--amber-soft);
+        color: var(--amber);
+        box-shadow: var(--shadow);
+      }
+
+      .incoming-banner[hidden] {
+        display: none;
+      }
+
+      .incoming-banner strong {
+        font-size: 15px;
+      }
+
+      .incoming-banner span {
+        color: #7a470f;
+        font-size: 13px;
       }
 
       h1,
@@ -264,6 +298,17 @@
         display: flex;
         flex-wrap: wrap;
         gap: 10px;
+      }
+
+      .claim-hint {
+        margin-bottom: 10px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .claim-hint.ready {
+        color: var(--green);
+        font-weight: 600;
       }
 
       .meter {
@@ -430,7 +475,7 @@
       <div class="topbar-inner">
         <div class="brand">
           <strong>WebRTC 坐席接入测试</strong>
-          <span>localhost + FreeSWITCH WS PoC</span>
+          <span>FreeSWITCH WS/WSS PoC</span>
         </div>
         <nav class="nav" aria-label="主导航">
           <a href="/outbound-test">外呼测试</a>
@@ -452,6 +497,11 @@
         <div id="agentStatus" class="status-pill">idle</div>
       </section>
 
+      <section id="incomingCallBanner" class="incoming-banner" aria-live="assertive" hidden>
+        <strong>正在呼入</strong>
+        <span>浏览器已收到坐席来电，请点击上方“接听来电”。</span>
+      </section>
+
       <section class="workspace">
         <section class="panel">
           <div class="panel-header">
@@ -462,11 +512,15 @@
             <div class="field-grid">
               <div class="field wide">
                 <label for="wsUrl">WebSocket URL</label>
-                <input id="wsUrl" value="ws://127.0.0.1:5066" autocomplete="off" />
+                <input id="wsUrl" autocomplete="off" />
               </div>
               <div class="field wide">
                 <label for="iceServers">ICE Servers</label>
-                <input id="iceServers" value="" autocomplete="off" />
+                <input
+                  id="iceServers"
+                  value="stun:stun.l.google.com:19302,stun:stun.cloudflare.com:3478"
+                  autocomplete="off"
+                />
               </div>
               <div class="field">
                 <label for="sipUri">坐席 SIP URI</label>
@@ -474,7 +528,7 @@
               </div>
               <div class="field">
                 <label for="password">坐席密码</label>
-                <input id="password" type="password" autocomplete="current-password" />
+                <input id="password" type="password" value="tenlocal1000" autocomplete="current-password" />
               </div>
               <div class="field">
                 <label for="displayName">显示名称</label>
@@ -543,10 +597,13 @@
             <h2>待接通话</h2>
             <div class="button-row">
               <button id="refreshHandoffButton" class="button" type="button">刷新</button>
-              <button id="claimHandoffButton" class="button primary" type="button" disabled>接听选中通话</button>
+              <button id="claimHandoffButton" class="button primary" type="button" disabled aria-describedby="claimHandoffHint">
+                接听选中通话
+              </button>
             </div>
           </div>
           <div class="panel-body">
+            <div id="claimHandoffHint" class="claim-hint">暂无待接通话</div>
             <div class="handoff-layout">
               <div>
                 <label>等待人工</label>
@@ -585,8 +642,10 @@
         answerButton: document.getElementById("answerButton"),
         rejectButton: document.getElementById("rejectButton"),
         hangupButton: document.getElementById("hangupButton"),
+        incomingCallBanner: document.getElementById("incomingCallBanner"),
         refreshHandoffButton: document.getElementById("refreshHandoffButton"),
         claimHandoffButton: document.getElementById("claimHandoffButton"),
+        claimHandoffHint: document.getElementById("claimHandoffHint"),
         clearLogButton: document.getElementById("clearLogButton"),
         micState: document.getElementById("micState"),
         socketState: document.getElementById("socketState"),
@@ -628,6 +687,14 @@
         els.agentStatus.className = `status-pill${kind ? ` ${kind}` : ""}`;
       }
 
+      function defaultWebSocketUrl() {
+        const secure = window.location.protocol === "https:";
+        const protocol = secure ? "wss" : "ws";
+        const port = secure ? "7443" : "5066";
+        const host = window.location.hostname || "127.0.0.1";
+        return `${protocol}://${host}:${port}`;
+      }
+
       function setControls() {
         const registered = ua && ua.isRegistered();
         const activeCall = Boolean(currentSession);
@@ -637,16 +704,36 @@
         els.callButton.disabled = !registered || activeCall || incomingCall;
         els.agentCallButton.disabled = !registered || activeCall || incomingCall;
         els.answerButton.disabled = !incomingCall;
+        els.answerButton.classList.toggle("attention", incomingCall);
+        els.incomingCallBanner.hidden = !incomingCall;
         els.rejectButton.disabled = !incomingCall;
         els.hangupButton.disabled = !activeCall;
-        els.claimHandoffButton.disabled =
-          !registered ||
-          !selectedHandoffCall ||
-          !selectedHandoffCall.handoff ||
-          !selectedHandoffCall.handoff.can_claim ||
-          activeCall ||
-          incomingCall ||
-          claimInFlight;
+        const claimDisabledReason = handoffClaimDisabledReason({
+          registered,
+          activeCall,
+          incomingCall,
+        });
+        els.claimHandoffButton.disabled = Boolean(claimDisabledReason);
+        els.claimHandoffButton.title = claimDisabledReason || "可以接听选中通话";
+        els.claimHandoffHint.textContent = claimDisabledReason || "选中通话可接听";
+        els.claimHandoffHint.classList.toggle("ready", !claimDisabledReason);
+      }
+
+      function handoffClaimDisabledReason({ registered, activeCall, incomingCall }) {
+        if (!registered) return "坐席未上线";
+        if (claimInFlight) return "正在提交 claim";
+        if (activeCall) return "当前已有通话";
+        if (incomingCall) return "已有来电待接听";
+        if (!selectedHandoffCall) {
+          return waitingHandoffCalls.length ? "请先选择待接通话" : "暂无待接通话";
+        }
+        const handoff = selectedHandoffCall.handoff;
+        if (!handoff) return "选中通话没有转人工请求";
+        if (!handoff.can_claim) {
+          if (handoff.error) return handoff.error;
+          return `当前状态：${handoff.state || "不可接听"}`;
+        }
+        return "";
       }
 
       function stopMicMeter() {
@@ -657,19 +744,24 @@
         els.meterBar.style.width = "0%";
       }
 
+      function buildAudioMediaConstraints() {
+        return {
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+          video: false,
+        };
+      }
+
       async function checkMicrophone() {
         try {
           if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             throw new Error("当前浏览器不支持 getUserMedia");
           }
           if (!micStream) {
-            micStream = await navigator.mediaDevices.getUserMedia({
-              audio: {
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
-              },
-            });
+            micStream = await navigator.mediaDevices.getUserMedia(buildAudioMediaConstraints());
           }
           setTag(els.micState, "可用", "ok");
           log("麦克风授权成功");
@@ -808,7 +900,7 @@
         const session = ua.call(target, {
           pcConfig: buildPeerConnectionConfig(),
           mediaStream: micStream,
-          mediaConstraints: { audio: true, video: false },
+          mediaConstraints: buildAudioMediaConstraints(),
           rtcOfferConstraints: {
             offerToReceiveAudio: true,
             offerToReceiveVideo: false,
@@ -847,23 +939,32 @@
           waitingHandoffCalls = (payload.calls || []).filter((call) => {
             return call.handoff && call.handoff.state === "waiting_agent";
           });
-          discardStaleSelectedHandoffCall();
+          const autoSelectCallId = nextAutoSelectHandoffCallId({ preserveSelected });
           renderHandoffList({ preserveSelected });
+          if (autoSelectCallId) {
+            await selectHandoffCall(autoSelectCallId, { silent: true });
+          }
           log("待接通话已刷新", { count: waitingHandoffCalls.length });
         } catch (error) {
           log("刷新待接通话失败", { error: error.message });
         }
       }
 
-      function discardStaleSelectedHandoffCall() {
-        if (!selectedHandoffCall || !selectedHandoffCall.handoff) return;
-        const selectedStillWaiting = waitingHandoffCalls.some((call) => {
-          return call.call_id === selectedHandoffCall.call_id;
-        });
-        if (!selectedStillWaiting && selectedHandoffCall.handoff.can_claim) {
-          selectedHandoffCall = null;
-          renderHandoffTimeline(null);
+      function nextAutoSelectHandoffCallId({ preserveSelected }) {
+        const selectedStillWaiting =
+          selectedHandoffCall &&
+          waitingHandoffCalls.some((call) => call.call_id === selectedHandoffCall.call_id);
+        if (selectedStillWaiting) return "";
+        if (!waitingHandoffCalls.length) {
+          if (!(preserveSelected && selectedHandoffCall)) {
+            selectedHandoffCall = null;
+            renderHandoffTimeline(null);
+          }
+          return "";
         }
+        if (preserveSelected && selectedHandoffCall) return "";
+        selectedHandoffCall = waitingHandoffCalls[0];
+        return selectedHandoffCall.call_id;
       }
 
       function renderHandoffList(options = {}) {
@@ -892,7 +993,8 @@
         setControls();
       }
 
-      async function selectHandoffCall(callId) {
+      async function selectHandoffCall(callId, options = {}) {
+        const silent = Boolean(options.silent);
         try {
           const response = await fetch(`/calls/${encodeURIComponent(callId)}`);
           const payload = await response.json();
@@ -900,7 +1002,7 @@
           selectedHandoffCall = payload.call;
           renderHandoffList();
           renderHandoffTimeline(selectedHandoffCall);
-          log("已加载待接通话详情", { call_id: callId });
+          log(silent ? "已自动选中待接通话" : "已加载待接通话详情", { call_id: callId });
         } catch (error) {
           log("加载待接通话详情失败", { call_id: callId, error: error.message });
         } finally {
@@ -1052,7 +1154,7 @@
           pendingIncomingSession.answer({
             pcConfig: buildPeerConnectionConfig(),
             mediaStream: micStream,
-            mediaConstraints: { audio: true, video: false },
+            mediaConstraints: buildAudioMediaConstraints(),
             rtcAnswerConstraints: {
               offerToReceiveAudio: true,
               offerToReceiveVideo: false,
@@ -1096,6 +1198,7 @@
       });
 
       window.addEventListener("load", () => {
+        els.wsUrl.value = defaultWebSocketUrl();
         if (window.JsSIP) {
           setTag(els.libraryState, "JsSIP 已加载", "ok");
           log("页面已就绪");

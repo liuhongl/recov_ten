@@ -649,6 +649,10 @@
                   债务记录 debtId
                   <input id="debtId" name="debtId" value="2056600544053252097" />
                 </label>
+                <label>
+                  租户 tenantId
+                  <input id="tenantId" name="tenantId" value="000000" />
+                </label>
               </div>
               <div class="form-actions">
                 <button id="submitButton" class="primary-action" type="submit">发起呼叫</button>
@@ -701,6 +705,11 @@
       const dialplanContextInput = document.getElementById("dialplanContext");
       const endpointInput = document.getElementById("endpoint");
       const metadataSceneInput = document.getElementById("metadataScene");
+      const callIdInput = document.getElementById("callId");
+      const taskIdInput = document.getElementById("taskId");
+      const identityNameInput = document.getElementById("identityName");
+      const debtIdInput = document.getElementById("debtId");
+      const tenantIdInput = document.getElementById("tenantId");
 
       let currentCallId = null;
 
@@ -718,7 +727,7 @@
           destination: "1000",
           caller: "9000",
           callerName: "AI_Assistant",
-          endpoint: "",
+          endpoint: "sofia_contact:*/1000",
           timeout: "30",
           scene: "local-outbound-test",
         },
@@ -931,7 +940,7 @@
           context.scene = payload.metadata_scene;
         }
         delete payload.metadata_scene;
-        for (const key of ["callId", "taskId", "identityName", "debtId"]) {
+        for (const key of ["callId", "taskId", "identityName", "debtId", "tenantId"]) {
           if (payload[key]) {
             context[key] = payload[key];
           }
@@ -964,6 +973,44 @@
         }
       }
 
+      function syncBusinessFieldsForSubmit() {
+        const callId = callIdInput.value.trim();
+        const taskId = taskIdInput.value.trim();
+        if (callId && !taskId) {
+          taskIdInput.value = callId;
+        }
+        if (taskId && !callId) {
+          callIdInput.value = taskId;
+        }
+      }
+
+      function applyQueryOverrides() {
+        const params = new URLSearchParams(window.location.search);
+        const preset = params.get("preset") || params.get("scenario");
+        if (preset && scenarioPresets[preset]) {
+          scenarioPreset.value = preset;
+          applyScenarioPreset();
+        }
+
+        const fieldParams = [
+          ["destination", destinationInput],
+          ["endpoint", endpointInput],
+          ["callId", callIdInput],
+          ["taskId", taskIdInput],
+          ["identityName", identityNameInput],
+          ["debtId", debtIdInput],
+          ["tenantId", tenantIdInput],
+          ["scene", metadataSceneInput],
+        ];
+        for (const [name, input] of fieldParams) {
+          const value = params.get(name);
+          if (value !== null) {
+            input.value = value;
+          }
+        }
+        syncBusinessFieldsForSubmit();
+      }
+
       function applyScenarioPreset() {
         const preset = scenarioPresets[scenarioPreset.value];
         if (!preset) return;
@@ -985,18 +1032,20 @@
 
       callForm.addEventListener("submit", async (event) => {
         event.preventDefault();
+        syncBusinessFieldsForSubmit();
+        const payload = formPayload();
         submitButton.disabled = true;
         setBadge(currentCallBadge, "提交中", "warn");
         try {
-          const payload = await fetchJson("/calls", {
+          const response = await fetchJson("/calls", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(formPayload()),
+            body: JSON.stringify(payload),
           });
-          currentCallId = payload.call?.call_id || null;
+          currentCallId = response.call?.call_id || null;
           hangupButton.disabled = !currentCallId;
           setBadge(currentCallBadge, currentCallId || "已提交", "ok");
-          setResult(payload);
+          setResult(response);
           await refreshCalls();
         } catch (error) {
           setBadge(currentCallBadge, "提交失败", "error");
@@ -1029,8 +1078,9 @@
         await Promise.all([refreshReady(), refreshCalls()]);
       });
 
-      Promise.all([refreshReady(), refreshCalls()]);
       applyScenarioPreset();
+      applyQueryOverrides();
+      Promise.all([refreshReady(), refreshCalls()]);
       window.setInterval(refreshCalls, 2500);
     </script>
   </body>

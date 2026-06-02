@@ -219,6 +219,8 @@ def test_outbound_test_page_is_served():
         assert "数据库业务参数" in body
         assert '<option value="manual-sip-provider" selected>' in body
         assert '<option value="sandbox-answer" selected>' not in body
+        assert '"local-1000": {' in body
+        assert 'endpoint: "sofia_contact:*/1000",' in body
         assert "sipProviderEndpoint" in body
         assert "syncDynamicEndpoint" in body
         assert 'id="callId"' in body
@@ -227,6 +229,14 @@ def test_outbound_test_page_is_served():
         assert 'id="taskId"' in body
         assert 'name="taskId"' in body
         assert "流程任务 taskId" in body
+        assert "function syncBusinessFieldsForSubmit()" in body
+        assert "function applyQueryOverrides()" in body
+        assert "new URLSearchParams(window.location.search)" in body
+        assert "syncBusinessFieldsForSubmit();" in body
+        assert "applyQueryOverrides();" in body
+        assert "handoff-local-" not in body
+        assert "localPocOpeningPayload" not in body
+        assert "formPayload()" in body
         assert 'id="identityName"' in body
         assert 'name="identityName"' in body
         assert 'value="项目员工"' in body
@@ -237,6 +247,9 @@ def test_outbound_test_page_is_served():
         assert 'id="debtId"' in body
         assert 'name="debtId"' in body
         assert 'value="2056600544053252097"' in body
+        assert 'id="tenantId"' in body
+        assert 'name="tenantId"' in body
+        assert 'value="000000"' in body
         assert "启用手工开场白" not in body
         assert "开场白音色" not in body
         assert "业主姓名" not in body
@@ -246,7 +259,10 @@ def test_outbound_test_page_is_served():
         assert 'id="ownerName"' not in body
         assert 'id="arrearsAmount"' not in body
         assert "const context = {};" in body
-        assert 'for (const key of ["callId", "taskId", "identityName", "debtId"])' in body
+        assert (
+            'for (const key of ["callId", "taskId", "identityName", "debtId", "tenantId"])'
+            in body
+        )
         assert "payload.context = context;" in body
         assert 'payload.opening = {' not in body
         assert 'delete payload.opening_enabled' not in body
@@ -372,9 +388,10 @@ def test_webrtc_agent_test_page_is_served():
         assert response.status == 200
         assert "WebRTC 坐席接入测试" in body
         assert "JsSIP" in body
-        assert 'id="wsUrl" value="ws://127.0.0.1:5066"' in body
-        assert 'id="iceServers" value=""' in body
+        assert 'id="wsUrl" autocomplete="off"' in body
+        assert "stun:stun.l.google.com:19302,stun:stun.cloudflare.com:3478" in body
         assert 'id="sipUri" value="sip:1001@111.229.146.182"' in body
+        assert 'id="password" type="password" value="tenlocal1000"' in body
         assert 'id="targetUri" value="sip:9196@111.229.146.182"' in body
         assert 'src="/vendor/jssip.min.js"' in body
         assert "检查麦克风" in body
@@ -382,10 +399,17 @@ def test_webrtc_agent_test_page_is_served():
         assert "拨打测试" in body
         assert "呼叫本座席" in body
         assert "接听来电" in body
+        assert 'id="incomingCallBanner"' in body
+        assert "正在呼入" in body
+        assert 'answerButton.classList.toggle("attention", incomingCall);' in body
         assert "拒接" in body
         assert "挂断" in body
         assert "待接通话" in body
         assert "接听选中通话" in body
+        assert 'id="claimHandoffHint"' in body
+        assert "function handoffClaimDisabledReason" in body
+        assert "nextAutoSelectHandoffCallId" in body
+        assert "已自动选中待接通话" in body
         assert "/webrtc-agent-test/call" in body
         assert "/calls?status=active&limit=50" in body
         assert "/handoff/claim" in body
@@ -394,9 +418,18 @@ def test_webrtc_agent_test_page_is_served():
         assert "await refreshHandoffCalls({ preserveSelected: true });" in body
         assert "preserveSelected && selectedHandoffCall" in body
         assert "const selectedStillWaiting =" in body
-        assert "selectedHandoffCall.handoff.can_claim" in body
+        assert "handoff.can_claim" in body
         assert "renderHandoffTimeline(null);" in body
-        assert "ws://127.0.0.1:5066" in body
+        assert "function defaultWebSocketUrl()" in body
+        assert 'const protocol = secure ? "wss" : "ws";' in body
+        assert 'const port = secure ? "7443" : "5066";' in body
+        assert 'els.wsUrl.value = defaultWebSocketUrl();' in body
+        assert "function buildAudioMediaConstraints()" in body
+        assert "echoCancellation: true" in body
+        assert "noiseSuppression: true" in body
+        assert "autoGainControl: true" in body
+        assert "mediaConstraints: buildAudioMediaConstraints()" in body
+        assert "mediaConstraints: { audio: true, video: false }" not in body
         assert "new JsSIP.WebSocketInterface" in body
         assert "new JsSIP.UA" in body
         assert "register: true" in body

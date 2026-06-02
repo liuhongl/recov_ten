@@ -20,6 +20,7 @@ from app.call_control import (
     parse_handoff_request,
 )
 from app.config import (
+    CallRecordingConfig,
     EventSocketConfig,
     FeatureConfig,
     FlowCallbackConfig,
@@ -67,6 +68,58 @@ def test_build_originate_command_uses_local_dialplan():
     assert command.endswith("}user/1000 9199 XML default")
 
 
+def test_outbound_manager_adds_full_call_recording_path_from_business_call_id():
+    commands: list[str] = []
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return endpoint
+
+        async def originate(self, command: str) -> str:
+            commands.append(command)
+            return "+OK call-1"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+            call_recording=CallRecordingConfig(
+                enabled=True,
+                directory="/var/lib/freeswitch/recordings",
+            ),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+    )
+
+    try:
+        call = manager.create_call(
+            {
+                "destination": "1000",
+                "context": {
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            }
+        )
+
+        final_call = _wait_for_status(manager, call["call_id"], "originated")
+
+        assert final_call["recording_path"] == (
+            "/var/lib/freeswitch/recordings/990000000000032001.wav"
+        )
+        assert commands
+        assert (
+            "sip_realtime_recording_path="
+            "/var/lib/freeswitch/recordings/990000000000032001.wav"
+        ) in commands[0]
+        assert f"origination_uuid={call['call_id']}" in commands[0]
+    finally:
+        manager.shutdown()
+
+
 def test_build_webrtc_agent_originate_command_parks_known_agent_uuid():
     command = build_webrtc_agent_originate_command(
         agent_uuid="agent-uuid-1",
@@ -97,6 +150,12 @@ def test_parse_handoff_request_rejects_zero_wait_timeout():
         parse_handoff_request({"wait_timeout_seconds": 0})
 
     assert "wait_timeout_seconds must be between 1 and 300" in str(exc_info.value)
+
+
+def test_parse_handoff_request_defaults_to_sixty_second_wait_timeout():
+    request = parse_handoff_request({"last_utterance": "我要转人工"})
+
+    assert request.wait_timeout_seconds == 60
 
 
 def test_parse_handoff_claim_request_rejects_zero_timeout():
@@ -2794,6 +2853,21 @@ def test_parse_create_call_accepts_java_ai_call_trigger_without_destination():
 
     assert request.destination is None
     assert request.context["debtId"] == "2050000000000200001"
+
+
+def test_parse_create_call_rejects_local_placeholder_business_ids():
+    with pytest.raises(CallControlError, match="real call_record"):
+        parse_create_call_request(
+            {
+                "destination": "1000",
+                "context": {
+                    "callId": "handoff-local-20260602081728-4966",
+                    "taskId": "handoff-local-20260602081728-4966",
+                    "identityName": "项目员工",
+                    "debtId": "2999000003846686611",
+                },
+            }
+        )
 
 
 def test_outbound_manager_originates_in_background():

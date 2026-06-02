@@ -4,7 +4,10 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from app.handoff_transcript import HttpHumanHandoffTranscriptProcessor
+from app.handoff_transcript import (
+    HttpHumanHandoffTranscriptProcessor,
+    MockHumanHandoffTranscriptProcessor,
+)
 
 
 def test_http_human_handoff_transcript_processor_posts_recording_paths():
@@ -83,4 +86,25 @@ def test_http_human_handoff_transcript_processor_posts_recording_paths():
             "speaker_type": "customer",
             "text": "我想确认一下费用。",
         },
+    ]
+
+
+def test_mock_human_handoff_transcript_processor_returns_human_agent_turn():
+    processor = MockHumanHandoffTranscriptProcessor()
+
+    turns = processor.process(
+        {
+            "agent_id": "agent-1001",
+            "customer_recording_path": "/tmp/call-1-customer.wav",
+            "agent_recording_path": "/tmp/call-1-agent.wav",
+        }
+    )
+
+    assert turns == [
+        {
+            "role": "assistant",
+            "speaker_type": "human_agent",
+            "agent_id": "agent-1001",
+            "text": "人工坐席已接入并完成通话。",
+        }
     ]

@@ -14,7 +14,10 @@ from .config import load_config
 from .env_loader import load_env_file
 from .flow_callback import HttpFlowCallbackWriter, LoggingFlowCallbackWriter
 from .freeswitch_media import FreeSwitchMediaEchoServer
-from .handoff_transcript import HttpHumanHandoffTranscriptProcessor
+from .handoff_transcript import (
+    HttpHumanHandoffTranscriptProcessor,
+    MockHumanHandoffTranscriptProcessor,
+)
 from .health_server import HealthServer
 from .logging_config import configure_logging
 from .opening import (
@@ -155,6 +158,7 @@ async def _serve(config, *, media_mode: str) -> None:
 
         def session_factory(
             on_speech_started,
+            on_input_transcript,
             on_audio_delta,
             on_turn_completed,
             turn_id_start,
@@ -175,6 +179,7 @@ async def _serve(config, *, media_mode: str) -> None:
                 ),
                 turn_id_start=turn_id_start,
                 on_speech_started=on_speech_started,
+                on_input_transcript=on_input_transcript,
                 on_audio_delta=on_audio_delta,
                 on_turn_completed=on_turn_completed,
             )
@@ -258,6 +263,8 @@ def _build_handoff_transcript_processor(config):
     human_transcript = config.human_transcript
     if not human_transcript.enabled:
         return None
+    if human_transcript.provider == "mock":
+        return MockHumanHandoffTranscriptProcessor()
     if human_transcript.provider == "http_json":
         return HttpHumanHandoffTranscriptProcessor(
             human_transcript.http_url,

@@ -35,6 +35,7 @@ from .opening import (
 
 LOGGER = logging.getLogger(__name__)
 POSTGRES_APPLICATION_NAME = "recov_ten_gateway"
+LOCAL_OUTBOUND_TEST_SCENE = "local-outbound-test"
 
 IDENTITY_NAME_SQL = """
 select name
@@ -791,7 +792,14 @@ class PostgresCallResultWriter:
                         "call_record_transcript_update_noop call_id=%s",
                         payload.get("call_id"),
                     )
-                    self._publish_failure_callback(payload, context)
+                    if _is_local_outbound_test_context(context):
+                        self._publish_success_callback(
+                            payload,
+                            context,
+                            message="外呼完成，本地测试未写入 call_record",
+                        )
+                    else:
+                        self._publish_failure_callback(payload, context)
                 else:
                     self._publish_success_callback(payload, context)
             except Exception:
@@ -808,6 +816,8 @@ class PostgresCallResultWriter:
         self,
         payload: Mapping[str, Any],
         context: Mapping[str, Any],
+        *,
+        message: str = "外呼完成，转写已写入",
     ) -> None:
         if self.flow_callback_writer is None:
             return
@@ -815,7 +825,7 @@ class PostgresCallResultWriter:
             event = build_flow_callback_event(
                 context,
                 status="SUCCESS",
-                message="外呼完成，转写已写入",
+                message=message,
                 business_id=_prompt_text(payload.get("business_id")),
             )
             if event is not None:
@@ -890,22 +900,27 @@ class ThreadsafeBusinessPromptPreparer:
         self.timeout_seconds = timeout_seconds
 
     def prepare(self, context: Mapping[str, Any]) -> BusinessPromptPreparation | None:
-        future = asyncio.run_coroutine_threadsafe(
-            self.store.prepare_business_prompt(
-                context,
-                fallback_instructions=self.fallback_instructions,
-            ),
-            self.loop,
-        )
-        try:
-            return future.result(timeout=self.timeout_seconds)
-        except FutureTimeoutError:
-            future.cancel()
-            LOGGER.warning("business_prompt_prepare_timeout", exc_info=True)
-            return None
-        except Exception:
-            LOGGER.warning("business_prompt_prepare_failed", exc_info=True)
-            return None
+        for attempt in range(2):
+            future = asyncio.run_coroutine_threadsafe(
+                self.store.prepare_business_prompt(
+                    context,
+                    fallback_instructions=self.fallback_instructions,
+                ),
+                self.loop,
+            )
+            try:
+                return future.result(timeout=self.timeout_seconds)
+            except FutureTimeoutError:
+                future.cancel()
+                LOGGER.warning("business_prompt_prepare_timeout", exc_info=True)
+                return None
+            except Exception:
+                if attempt == 0:
+                    LOGGER.warning("business_prompt_prepare_retry", exc_info=True)
+                    continue
+                LOGGER.warning("business_prompt_prepare_failed", exc_info=True)
+                return None
+        return None
 
 
 class PostgresRuntime:
@@ -1036,6 +1051,10 @@ def _business_call_record_params(
     if call_id is None or debt_id is None:
         return None
     return BusinessCallRecordRef(call_id=call_id, debt_id=debt_id)
+
+
+def _is_local_outbound_test_context(context: Mapping[str, Any]) -> bool:
+    return _context_text(context.get("scene")) == LOCAL_OUTBOUND_TEST_SCENE
 
 
 def _historical_summary_params(

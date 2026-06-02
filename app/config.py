@@ -98,6 +98,12 @@ class FeatureConfig:
 
 
 @dataclass(frozen=True)
+class CallRecordingConfig:
+    enabled: bool = False
+    directory: str = "/var/lib/freeswitch/recordings"
+
+
+@dataclass(frozen=True)
 class PostgresConfig:
     enabled: bool = False
     dsn_env: str = "POSTGRES_DSN"
@@ -165,6 +171,7 @@ class GatewayConfig:
     playback: PlaybackConfig = PlaybackConfig()
     vad: VadConfig = VadConfig()
     features: FeatureConfig = FeatureConfig()
+    call_recording: CallRecordingConfig = CallRecordingConfig()
     postgres: PostgresConfig = PostgresConfig()
     human_transcript: HumanTranscriptConfig = HumanTranscriptConfig()
     flow_callback: FlowCallbackConfig = FlowCallbackConfig()
@@ -474,6 +481,20 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
                 default=FeatureConfig.inbound_rms_diagnostics_enabled,
             ),
         ),
+        call_recording=CallRecordingConfig(
+            enabled=_get_bool(
+                raw,
+                "call_recording",
+                "enabled",
+                default=CallRecordingConfig.enabled,
+            ),
+            directory=_get(
+                raw,
+                "call_recording",
+                "directory",
+                default=CallRecordingConfig.directory,
+            ),
+        ),
         postgres=PostgresConfig(
             enabled=_get_bool(
                 raw,
@@ -670,6 +691,7 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
     config = _apply_env_overrides(config)
     _validate_media_contract(config.freeswitch)
     _validate_postgres_config(config.postgres)
+    _validate_call_recording_config(config.call_recording)
     _validate_human_transcript_config(config.human_transcript, config.features)
     _validate_flow_callback_config(config.flow_callback)
     _validate_cross_feature_config(config)
@@ -964,6 +986,16 @@ def _apply_env_overrides(config: GatewayConfig) -> GatewayConfig:
                 config.features.inbound_rms_diagnostics_enabled,
             ),
         ),
+        call_recording=CallRecordingConfig(
+            enabled=_env_bool(
+                "CALL_RECORDING_ENABLED",
+                config.call_recording.enabled,
+            ),
+            directory=os.getenv(
+                "CALL_RECORDING_DIR",
+                config.call_recording.directory,
+            ),
+        ),
         postgres=PostgresConfig(
             enabled=_env_bool("POSTGRES_ENABLED", config.postgres.enabled),
             dsn_env=os.getenv("POSTGRES_DSN_ENV", config.postgres.dsn_env),
@@ -1128,15 +1160,29 @@ def _validate_postgres_config(config: PostgresConfig) -> None:
         raise ValueError("postgres.command_timeout_seconds must be positive")
 
 
+def _validate_call_recording_config(config: CallRecordingConfig) -> None:
+    if not config.directory.strip():
+        raise ValueError("call_recording.directory is required")
+    forbidden = (" ", "\t", "\n", "\r", ",", "{", "}")
+    if any(char in config.directory for char in forbidden):
+        raise ValueError(
+            "call_recording.directory must not contain whitespace, comma, or braces"
+        )
+
+
 def _validate_human_transcript_config(
     config: HumanTranscriptConfig,
     features: FeatureConfig,
 ) -> None:
     if config.timeout_seconds <= 0:
         raise ValueError("human_transcript.timeout_seconds must be positive")
-    if config.provider != "http_json":
-        raise ValueError("human_transcript.provider must be http_json")
-    if config.enabled and not config.http_url.strip():
+    if config.provider not in {"http_json", "mock"}:
+        raise ValueError("human_transcript.provider must be http_json or mock")
+    if (
+        config.enabled
+        and config.provider == "http_json"
+        and not config.http_url.strip()
+    ):
         raise ValueError("human_transcript.http_url is required when enabled")
     if config.enabled and not features.recording_enabled:
         raise ValueError("recording must be enabled when human_transcript is enabled")

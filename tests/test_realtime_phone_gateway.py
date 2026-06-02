@@ -97,6 +97,10 @@ def test_realtime_phone_gateway_locally_interrupts_opening_before_provider_vad()
     asyncio.run(_assert_realtime_phone_gateway_locally_interrupts_opening())
 
 
+def test_realtime_phone_gateway_ignores_opening_playback_echo():
+    asyncio.run(_assert_realtime_phone_gateway_ignores_opening_playback_echo())
+
+
 def test_realtime_phone_gateway_ignores_opening_barge_in_before_playback_starts():
     asyncio.run(
         _assert_realtime_phone_gateway_ignores_opening_barge_in_before_playback_starts()
@@ -181,6 +185,10 @@ def test_realtime_phone_gateway_skips_inbound_audio_rms_when_diagnostics_disable
 
 def test_handoff_request_detection_is_conservative():
     assert _detect_handoff_request("我要转人工") == "request_human"
+    assert _detect_handoff_request("转工") == "request_human"
+    assert _detect_handoff_request("帮我转工") == "request_human"
+    assert _detect_handoff_request("我要转客服") == "request_human"
+    assert _detect_handoff_request("接人工") == "request_human"
     assert _detect_handoff_request("麻烦帮我转接人工客服") == "request_human"
     assert _detect_handoff_request("我想找真人客服") == "request_human"
     assert _detect_handoff_request("我要找物业客服") == "request_human"
@@ -202,6 +210,10 @@ def test_handoff_request_detection_is_conservative():
 
 def test_realtime_gateway_triggers_handoff_and_suppresses_model_output():
     asyncio.run(_assert_realtime_gateway_triggers_handoff_and_suppresses_model_output())
+
+
+def test_realtime_gateway_triggers_handoff_from_asr_before_model_audio():
+    asyncio.run(_assert_realtime_gateway_triggers_handoff_from_asr_before_model_audio())
 
 
 def test_realtime_gateway_defers_call_result_when_handoff_is_requested():
@@ -460,6 +472,7 @@ async def _assert_realtime_gateway_triggers_handoff_and_suppresses_model_output(
                 "trigger": "customer_requested",
                 "reason": "request_human",
                 "last_utterance": "我要转人工",
+                "wait_timeout_seconds": 180,
                 "ai_turns": [
                     {"role": "user", "text": "我要转人工"},
                 ],
@@ -488,6 +501,60 @@ async def _assert_realtime_gateway_triggers_handoff_and_suppresses_model_output(
     assert session.playback_queue.empty()
     assert session.dropped_stale_frames == 1
     assert len(fake_handoff.requests) == 1
+
+
+async def _assert_realtime_gateway_triggers_handoff_from_asr_before_model_audio():
+    fake_handoff = FakeHandoffRequester()
+    fake_playback_control = FakePlaybackControl()
+    fake_realtime_session = FakeRealtimeSession(
+        b"",
+        auto_provider_events=False,
+        restart_on_interruption=False,
+    )
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+        playback_control=fake_playback_control,
+        handoff_requester=fake_handoff,
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="customer-call",
+        session_id="test-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+    )
+    server._realtime_sessions[session.session_id] = fake_realtime_session
+
+    await server._handle_input_transcript_available(session, 4, "我要转人工")
+    await server._queue_audio_delta(session, 4, samples_to_pcm_s16le([1600] * 480))
+
+    assert fake_handoff.requests == [
+        (
+            "customer-call",
+            {
+                "trigger": "customer_requested",
+                "reason": "request_human",
+                "last_utterance": "我要转人工",
+                "wait_timeout_seconds": 180,
+                "ai_turns": [
+                    {"role": "user", "text": "我要转人工"},
+                ],
+            },
+        )
+    ]
+    assert session.handoff_requested is True
+    assert session.handoff_completed is True
+    assert session.playback_queue.empty()
+    assert session.dropped_stale_frames == 1
+    assert fake_playback_control.break_calls == ["customer-call"]
+    assert fake_realtime_session.cancel_calls == 1
+    assert fake_realtime_session.close_calls == 1
+    committed = [
+        (item.status, item.input_transcript, item.output_transcript)
+        for item in session.committed_exchanges
+    ]
+    assert committed == [("handoff_requested", "我要转人工", "")]
 
 
 def test_realtime_gateway_drops_late_audio_for_closed_interrupted_turn():
@@ -894,6 +961,7 @@ def test_realtime_gateway_passes_dialog_config_to_realtime_factory():
 
     def session_factory(
         on_speech_started,
+        on_input_transcript,
         on_delta,
         on_turn_completed,
         turn_id_start,
@@ -904,6 +972,7 @@ def test_realtime_gateway_passes_dialog_config_to_realtime_factory():
         captured["dialog_config"] = dialog_config
         return FakeRealtimeSession(b"").bind(
             on_speech_started,
+            on_input_transcript,
             on_delta,
             on_turn_completed,
             turn_id_start,
@@ -1611,7 +1680,7 @@ async def _assert_realtime_phone_gateway_locally_interrupts_opening() -> None:
             playback = await asyncio.wait_for(ws.recv(), timeout=3)
             assert playback == _phone_frame(800)
             await asyncio.sleep(0.35)
-            await ws.send(_phone_frame(1200))
+            await ws.send(_speech_frame(1200))
             await asyncio.sleep(0.1)
     finally:
         await server.stop()
@@ -1621,13 +1690,64 @@ async def _assert_realtime_phone_gateway_locally_interrupts_opening() -> None:
     assert stats.interruptions == 1
     assert stats.opening_trigger_rms == 1200
     assert stats.opening_trigger_rms_max == 1200
-    assert stats.opening_trigger_best_playback_correlation == 1.0
+    assert stats.opening_trigger_best_playback_correlation < 0.4
     assert stats.opening_trigger_best_playback_rms == 800
     assert stats.opening_trigger_last_playback_age_ms is not None
     assert stats.opening_trigger_last_playback_age_ms >= 0
     assert playback_control.break_calls == ["test-opening-local-barge-call"]
     assert fake_session.speech_started_turns == []
     assert fake_session.interruption_calls == [opening_text]
+
+
+async def _assert_realtime_phone_gateway_ignores_opening_playback_echo() -> None:
+    opening_text = "您好，请问是测试业主吗？这边有一项物业费事项想和您本人核实一下。"
+    store = OpeningAudioStore()
+    store.put(
+        PreparedOpeningAudio(
+            call_id="test-opening-echo-call",
+            opening_text=opening_text,
+            opening_text_hash="hash-opening-echo",
+            voice="male",
+            speaker="zh_male_yunzhou_jupiter_bigtts",
+            phone_frames=[_phone_frame(800) for _ in range(20)],
+            source_sample_rate=24000,
+            source_audio_bytes=6400,
+            generation_ms=1200,
+        )
+    )
+    playback_control = FakePlaybackControl()
+    fake_session = FakeRealtimeSession(
+        samples_to_pcm_s16le([1600] * 240),
+        auto_provider_events=False,
+        restart_on_interruption=False,
+    )
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+        realtime_session_factory=fake_session.bind,
+        playback_control=playback_control,
+        opening_store=store,
+    )
+    await server.start()
+    try:
+        host, port = server.address
+        async with connect(
+            f"ws://{host}:{port}/media/fs/test-opening-echo-call",
+            ping_interval=None,
+        ) as ws:
+            playback = await asyncio.wait_for(ws.recv(), timeout=3)
+            assert playback == _phone_frame(800)
+            await asyncio.sleep(0.35)
+            await ws.send(_phone_frame(800))
+            await asyncio.sleep(0.1)
+    finally:
+        await server.stop()
+
+    stats = server.completed_sessions[0]
+    assert stats.opening_playback_interrupted is False
+    assert stats.interruptions == 0
+    assert playback_control.break_calls == []
+    assert fake_session.interruption_calls == []
 
 
 async def _assert_realtime_phone_gateway_ignores_opening_barge_in_before_playback_starts() -> None:
@@ -1747,6 +1867,7 @@ async def _assert_realtime_phone_gateway_uses_opening_speaker() -> None:
 
     def session_factory(
         on_speech_started,
+        on_input_transcript,
         on_delta,
         on_turn_completed,
         turn_id_start,
@@ -1756,6 +1877,7 @@ async def _assert_realtime_phone_gateway_uses_opening_speaker() -> None:
         captured_speakers.append(extra[0] if extra else None)
         return fake_session.bind(
             on_speech_started,
+            on_input_transcript,
             on_delta,
             on_turn_completed,
             turn_id_start,
@@ -1908,12 +2030,14 @@ class FakeRealtimeSession:
         self.second_turn_announced = False
         self.completed_first_turn = False
         self.on_speech_started: Callable[[int], Awaitable[None]] | None = None
+        self.on_input_transcript: Callable[[int, str], Awaitable[None]] | None = None
         self.on_delta: Callable[[int, bytes], Awaitable[None]] | None = None
         self.on_turn_completed: Callable[[RealtimeTurnResult], Awaitable[None]] | None = None
 
     def bind(
         self,
         on_speech_started: Callable[[int], Awaitable[None]],
+        on_input_transcript: Callable[[int, str], Awaitable[None]],
         on_delta: Callable[[int, bytes], Awaitable[None]],
         on_turn_completed: Callable[[RealtimeTurnResult], Awaitable[None]],
         turn_id_start: int,
@@ -1922,6 +2046,7 @@ class FakeRealtimeSession:
         dialog_config: RealtimeDialogConfig | None = None,
     ):
         self.on_speech_started = on_speech_started
+        self.on_input_transcript = on_input_transcript
         self.on_delta = on_delta
         self.on_turn_completed = on_turn_completed
         self.turn_id_starts.append(turn_id_start)
@@ -2037,3 +2162,7 @@ def _test_config(
 
 def _phone_frame(value: int) -> bytes:
     return samples_to_pcm_s16le([value] * 160)
+
+
+def _speech_frame(value: int) -> bytes:
+    return samples_to_pcm_s16le([value, -value] * 80)

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from app.config import GatewayConfig, HumanTranscriptConfig
+from app.handoff_transcript import MockHumanHandoffTranscriptProcessor
 from app.main import (
     DOUBAO_DIALOG_FIELD_COMPAT_SYSTEM_PROMPT,
     _browser_first_prompt_snapshot_provider,
+    _build_handoff_transcript_processor,
     _system_prompt_for_doubao_session,
 )
 from app.postgres import PromptSnapshot
@@ -56,3 +59,16 @@ def test_browser_first_prompt_snapshot_provider_prefers_browser_store():
     assert provider("browser-1") is browser_snapshot
     assert provider("real-1") is outbound_snapshot
     assert provider("missing") is None
+
+
+def test_build_handoff_transcript_processor_supports_mock_provider():
+    processor = _build_handoff_transcript_processor(
+        GatewayConfig(
+            human_transcript=HumanTranscriptConfig(
+                enabled=True,
+                provider="mock",
+            )
+        )
+    )
+
+    assert isinstance(processor, MockHumanHandoffTranscriptProcessor)

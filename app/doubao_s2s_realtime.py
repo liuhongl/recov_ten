@@ -54,6 +54,7 @@ class _DoubaoTurnState:
     asr_ended_ms: int | None = None
     input_transcript: str = ""
     output_transcript_parts: list[str] | None = None
+    notified_input_transcript: str = ""
     status: str = "in_progress"
     invalidated: bool = False
 
@@ -81,10 +82,12 @@ class DoubaoS2SServerVadSession:
         on_speech_started: Callable[[int], Awaitable[None]],
         on_audio_delta: Callable[[int, bytes], Awaitable[None]],
         on_turn_completed: Callable[[RealtimeTurnResult], Awaitable[None]],
+        on_input_transcript: Callable[[int, str], Awaitable[None]] | None = None,
     ) -> None:
         self.credentials = credentials
         self.config = config
         self.on_speech_started = on_speech_started
+        self.on_input_transcript = on_input_transcript
         self.on_audio_delta = on_audio_delta
         self.on_turn_completed = on_turn_completed
         self._session: DoubaoS2SRealtimeSession | None = None
@@ -332,7 +335,7 @@ class DoubaoS2SServerVadSession:
                 if event.event == EVENT_ASR_ENDED:
                     if self._hot_restart_in_progress:
                         continue
-                    self._handle_asr_ended(event)
+                    await self._handle_asr_ended(event)
                     continue
 
                 if event.event in {
@@ -359,8 +362,10 @@ class DoubaoS2SServerVadSession:
         state.event_counts[str(event.event)] += 1
         if event.text:
             state.input_transcript = event.text
+        if event.is_final:
+            await self._notify_input_transcript(state)
 
-    def _handle_asr_ended(self, event: DoubaoS2SEvent) -> None:
+    async def _handle_asr_ended(self, event: DoubaoS2SEvent) -> None:
         state = self._state_for_input_event()
         if state is None:
             return
@@ -368,7 +373,17 @@ class DoubaoS2SServerVadSession:
         if event.text:
             state.input_transcript = event.text
         state.asr_ended_ms = int((time.monotonic() - state.started_at) * 1000)
+        await self._notify_input_transcript(state)
         self._mark_input_finished(state.turn_id)
+
+    async def _notify_input_transcript(self, state: _DoubaoTurnState) -> None:
+        if self.on_input_transcript is None:
+            return
+        transcript = state.input_transcript.strip()
+        if not transcript or transcript == state.notified_input_transcript:
+            return
+        state.notified_input_transcript = transcript
+        await self.on_input_transcript(state.turn_id, transcript)
 
     def _handle_response_event(self, event: DoubaoS2SEvent) -> None:
         if self._hot_restart_in_progress:

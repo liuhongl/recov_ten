@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
-from .config import GatewayConfig, OutboundCallConfig
+from .config import CallRecordingConfig, GatewayConfig, OutboundCallConfig
 from .freeswitch_event_socket import (
     ChannelStateEvent,
     EventSocketError,
@@ -35,6 +35,7 @@ from .postgres import BusinessPromptPreparation, PromptSnapshot
 LOGGER = logging.getLogger(__name__)
 
 SAFE_TOKEN_RE = re.compile(r"^[^\s{},]+$")
+LOCAL_PLACEHOLDER_BUSINESS_ID_PREFIX = "handoff-local"
 
 
 class CallControlError(ValueError):
@@ -64,7 +65,7 @@ class HandoffRequest:
     last_utterance: str | None = None
     summary: str | None = None
     ai_turns: list[dict[str, Any]] = field(default_factory=list)
-    wait_timeout_seconds: int = 15
+    wait_timeout_seconds: int = 60
 
 
 @dataclass(frozen=True)
@@ -182,6 +183,7 @@ class OutboundCallRecord:
     opening: OpeningCallMetadata | None = None
     prompt_snapshot: PromptSnapshot | None = None
     handoff: HandoffState | None = None
+    recording_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         diagnostics = _build_call_diagnostics(self)
@@ -217,6 +219,7 @@ class OutboundCallRecord:
             "last_event_name": self.last_event_name,
             "last_event_at_ms": self.last_event_at_ms,
             "opening": None if self.opening is None else self.opening.to_dict(),
+            "recording_path": self.recording_path,
             "handoff": handoff_payload,
             "turns": turns,
             "recent_turns": turns[-8:],
@@ -927,6 +930,12 @@ class OutboundCallManager:
         _require_safe_token(caller_id_number, "caller_id_number")
         _require_safe_token(outbound.dialplan_extension, "dialplan_extension")
         _require_safe_token(outbound.dialplan_context, "dialplan_context")
+        recording_path = build_call_recording_path(
+            self.config.call_recording,
+            media_call_id=call_id,
+            external_call_id=request.external_call_id,
+            context=request.context,
+        )
 
         return OutboundCallRecord(
             call_id=call_id,
@@ -945,6 +954,7 @@ class OutboundCallManager:
                 or outbound.originate_timeout_seconds
             ),
             context=request.context,
+            recording_path=recording_path,
         )
 
     def _prepare_business_prompt(
@@ -1957,6 +1967,7 @@ def parse_create_call_request(payload: dict[str, Any]) -> CreateCallRequest:
 
     _validate_node_code(payload)
     context = _normalized_context(payload)
+    _validate_no_local_placeholder_business_ids(context)
     destination = _optional_str(payload, "destination")
     if destination is not None:
         _require_safe_token(destination, "destination")
@@ -2010,7 +2021,7 @@ def parse_handoff_request(payload: dict[str, Any]) -> HandoffRequest:
         raise CallControlError("request body must be a JSON object")
     wait_timeout_seconds = _optional_int(payload, "wait_timeout_seconds")
     if wait_timeout_seconds is None:
-        wait_timeout_seconds = 15
+        wait_timeout_seconds = 60
     if not 1 <= wait_timeout_seconds <= 300:
         raise CallControlError("wait_timeout_seconds must be between 1 and 300")
     return HandoffRequest(
@@ -2090,6 +2101,16 @@ def _validate_node_code(payload: dict[str, Any]) -> None:
         raise CallControlError("nodeCode must be ai_call")
 
 
+def _validate_no_local_placeholder_business_ids(context: dict[str, Any]) -> None:
+    for key in ("callId", "taskId", "businessId"):
+        value = _optional_str(context, key)
+        if value is not None and value.startswith(LOCAL_PLACEHOLDER_BUSINESS_ID_PREFIX):
+            raise CallControlError(
+                f"{key} must reference a real call_record; local placeholder "
+                "business IDs are not allowed",
+            )
+
+
 def build_originate_command(record: OutboundCallRecord) -> str:
     variables = {
         "origination_uuid": record.call_id,
@@ -2102,11 +2123,34 @@ def build_originate_command(record: OutboundCallRecord) -> str:
     }
     if record.external_call_id:
         variables["sip_realtime_external_call_id"] = record.external_call_id
+    if record.recording_path:
+        variables["sip_realtime_recording_path"] = record.recording_path
 
     return (
         f"originate {_format_originate_variables(variables)}{record.endpoint} "
         f"{record.dialplan_extension} XML {record.dialplan_context}"
     )
+
+
+def build_call_recording_path(
+    config: CallRecordingConfig,
+    *,
+    media_call_id: str,
+    external_call_id: str | None,
+    context: dict[str, Any],
+) -> str | None:
+    if not config.enabled:
+        return None
+
+    business_call_id = (
+        _context_text(context.get("callId"))
+        or _context_text(external_call_id)
+        or media_call_id
+    )
+    _require_safe_token(business_call_id, "recording_call_id")
+    directory = config.directory.rstrip("/")
+    _require_safe_token(directory, "call_recording.directory")
+    return f"{directory}/{business_call_id}.wav"
 
 
 def _make_event_socket_client(config: GatewayConfig) -> FreeSwitchEventSocketClient:

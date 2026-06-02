@@ -19,3 +19,4 @@ services:
     volumes:
       - ./conf:/etc/freeswitch
       - ./scripts:/usr/share/freeswitch/scripts
+      - ./recordings:/var/lib/freeswitch/recordings

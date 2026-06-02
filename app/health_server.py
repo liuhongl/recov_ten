@@ -146,6 +146,7 @@ class HealthServer:
                                     ),
                                 },
                                 "features": asdict(config.features),
+                                "call_recording": asdict(config.call_recording),
                                 "human_transcript": asdict(
                                     config.human_transcript
                                 ),

@@ -68,6 +68,10 @@ recording_enabled = false
 recording_dir = "/tmp/recov_ten_handoff_recordings"
 inbound_rms_diagnostics_enabled = false
 
+[call_recording]
+enabled = false
+directory = "/var/lib/freeswitch/recordings"
+
 [flow_callback]
 enabled = false
 topic = "recov-flow-callback"

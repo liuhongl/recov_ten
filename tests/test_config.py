@@ -82,6 +82,10 @@ def test_load_config_from_toml(tmp_path):
             recording_dir = "/tmp/recov_ten_handoff_test"
             inbound_rms_diagnostics_enabled = true
 
+            [call_recording]
+            enabled = true
+            directory = "/var/lib/freeswitch/recordings"
+
             [human_transcript]
             enabled = true
             provider = "http_json"
@@ -168,6 +172,8 @@ def test_load_config_from_toml(tmp_path):
     assert config.features.recording_enabled is True
     assert config.features.recording_dir == "/tmp/recov_ten_handoff_test"
     assert config.features.inbound_rms_diagnostics_enabled is True
+    assert config.call_recording.enabled is True
+    assert config.call_recording.directory == "/var/lib/freeswitch/recordings"
     assert config.human_transcript.enabled is True
     assert config.human_transcript.provider == "http_json"
     assert config.human_transcript.http_url == "http://asr.example/transcribe"
@@ -227,6 +233,8 @@ def test_environment_overrides(monkeypatch):
     monkeypatch.setenv("METRICS_ENABLED", "false")
     monkeypatch.setenv("RECORDING_ENABLED", "true")
     monkeypatch.setenv("RECORDING_DIR", "/tmp/env-recordings")
+    monkeypatch.setenv("CALL_RECORDING_ENABLED", "true")
+    monkeypatch.setenv("CALL_RECORDING_DIR", "/var/lib/env-recordings")
     monkeypatch.setenv("HUMAN_TRANSCRIPT_ENABLED", "true")
     monkeypatch.setenv("HUMAN_TRANSCRIPT_PROVIDER", "http_json")
     monkeypatch.setenv("HUMAN_TRANSCRIPT_HTTP_URL", "http://env-asr.example/transcribe")
@@ -291,6 +299,8 @@ def test_environment_overrides(monkeypatch):
     assert config.features.recording_enabled is True
     assert config.features.recording_dir == "/tmp/env-recordings"
     assert config.features.inbound_rms_diagnostics_enabled is True
+    assert config.call_recording.enabled is True
+    assert config.call_recording.directory == "/var/lib/env-recordings"
     assert config.human_transcript.enabled is True
     assert config.human_transcript.provider == "http_json"
     assert config.human_transcript.http_url == "http://env-asr.example/transcribe"
@@ -333,6 +343,19 @@ def test_human_transcript_requires_recording_enabled(monkeypatch):
     assert "recording must be enabled when human_transcript is enabled" in str(
         exc_info.value
     )
+
+
+def test_human_transcript_allows_mock_provider(monkeypatch):
+    monkeypatch.setenv("HUMAN_TRANSCRIPT_ENABLED", "true")
+    monkeypatch.setenv("HUMAN_TRANSCRIPT_PROVIDER", "mock")
+    monkeypatch.setenv("HUMAN_TRANSCRIPT_HTTP_URL", "")
+    monkeypatch.setenv("RECORDING_ENABLED", "true")
+
+    config = load_config()
+
+    assert config.human_transcript.enabled is True
+    assert config.human_transcript.provider == "mock"
+    assert config.human_transcript.http_url == ""
 
 
 def test_flow_callback_requires_postgres_enabled(monkeypatch):

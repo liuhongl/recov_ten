@@ -74,6 +74,7 @@ LATEST_UTTERANCE_GUARD = (
 SPOKEN_AMOUNT_RE = re.compile(r"\d+(?:\.\d+)?\s*元")
 HANDOFF_REQUEST_RE = re.compile(
     r"(?:转接|转|接|找|换|叫|要)(?:一下|个)?人工(?!费|智能)"
+    r"|(?:转接|转)(?:一下|个)?工"
     r"|(?:转接|转|找)(?:一下|个)?(?:物业)?客服"
     r"|人工(?:客服|坐席)"
     r"|真人(?:客服|坐席)"
@@ -110,6 +111,8 @@ MAX_COMMITTED_HISTORY_CHARS = 1400
 OPENING_TURN_ID = 0
 OPENING_BARGE_IN_MIN_SENT_FRAMES = 10
 OPENING_BARGE_IN_MIN_PLAYBACK_MS = 300
+OPENING_ECHO_CORRELATION_THRESHOLD = 0.4
+OPENING_ECHO_MAX_LAST_PLAYBACK_AGE_MS = 120
 DEFAULT_DIALOG_MODEL = "1.2.1.1"
 MAX_DIALOG_BOT_NAME_CHARS = 20
 DIALOG_PROMPT_SOFT_LIMIT_CHARS = 12000
@@ -185,6 +188,7 @@ class CallResultWriterProtocol:
 RealtimeSessionFactory = Callable[
     [
         Callable[[int], Awaitable[None]],
+        Callable[[int, str], Awaitable[None]],
         Callable[[int, bytes], Awaitable[None]],
         Callable[[RealtimeTurnResult], Awaitable[None]],
         int,
@@ -272,6 +276,7 @@ class RealtimePhoneSessionStats:
     opening_trigger_best_playback_frame: int | None = None
     opening_trigger_best_playback_rms: int | None = None
     opening_trigger_last_playback_age_ms: int | None = None
+    opening_echo_suppressed_frames: int = 0
     opening_answer_wait_ms: int | None = None
     pending_exchanges: dict[int, ConversationExchange] = field(default_factory=dict)
     committed_exchanges: list[ConversationExchange] = field(default_factory=list)
@@ -705,6 +710,9 @@ class FreeSwitchRealtimeGatewayServer:
         async def on_speech_started(turn_id: int) -> None:
             await self._handle_server_vad_speech_started(session, turn_id)
 
+        async def on_input_transcript(turn_id: int, text: str) -> None:
+            await self._handle_input_transcript_available(session, turn_id, text)
+
         async def on_audio_delta(turn_id: int, audio_delta_24k: bytes) -> None:
             await self._queue_audio_delta(session, turn_id, audio_delta_24k)
 
@@ -714,6 +722,7 @@ class FreeSwitchRealtimeGatewayServer:
         if self._realtime_session_factory is not None:
             return self._realtime_session_factory(
                 on_speech_started,
+                on_input_transcript,
                 on_audio_delta,
                 on_turn_completed,
                 session.last_realtime_turn_id,
@@ -1132,6 +1141,30 @@ class FreeSwitchRealtimeGatewayServer:
         )
         reference_match = _best_playback_reference_match(session, payload)
         last_playback_age_ms = _elapsed_ms(session.opening_last_playback_at)
+        if _opening_barge_in_looks_like_playback_echo(
+            reference_match,
+            last_playback_age_ms,
+        ):
+            detector.reset()
+            session.opening_echo_suppressed_frames += 1
+            LOGGER.info(
+                "realtime_phone_opening_echo_suppressed call_id=%s "
+                "session_id=%s trigger_rms=%s opening_sent_frames=%s "
+                "opening_last_playback_rms=%s opening_last_playback_age_ms=%s "
+                "opening_best_playback_correlation=%s "
+                "opening_best_playback_frame=%s opening_best_playback_rms=%s",
+                session.call_id,
+                session.session_id,
+                inbound_rms,
+                session.opening_playback_sent_frames,
+                session.opening_last_playback_rms,
+                last_playback_age_ms,
+                _format_correlation(reference_match.correlation),
+                reference_match.frame_number,
+                reference_match.rms,
+            )
+            return True
+
         session.opening_trigger_rms = inbound_rms
         session.opening_trigger_rms_min = rms_min
         session.opening_trigger_rms_max = rms_max
@@ -1280,6 +1313,49 @@ class FreeSwitchRealtimeGatewayServer:
         finally:
             if session.interruption_repair_active:
                 session.interruption_repair_active = False
+
+    async def _handle_input_transcript_available(
+        self,
+        session: RealtimePhoneSessionStats,
+        turn_id: int,
+        transcript: str,
+    ) -> None:
+        if self._handoff_requester is None or session.handoff_requested:
+            return
+        normalized = transcript.strip()
+        handoff_reason = _detect_handoff_request(normalized)
+        if handoff_reason is None:
+            return
+
+        LOGGER.info(
+            "realtime_phone_handoff_detected_from_asr call_id=%s session_id=%s "
+            "turn=%s reason=%s input_transcript=%s",
+            session.call_id,
+            session.session_id,
+            turn_id,
+            handoff_reason,
+            normalized,
+        )
+        self._commit_handoff_request_turn(
+            session,
+            turn_id,
+            input_transcript=normalized,
+        )
+        await self._trigger_handoff_from_turn(
+            session,
+            RealtimeTurnResult(
+                turn_id=turn_id,
+                input_audio_bytes=0,
+                output_audio_bytes=0,
+                input_transcript=normalized,
+                output_transcript="",
+                event_counts={},
+                first_audio_delta_ms=None,
+                response_done_ms=None,
+                status="handoff_requested",
+            ),
+            reason=handoff_reason,
+        )
 
     async def _finalize_server_vad_turn(
         self,
@@ -1457,6 +1533,7 @@ class FreeSwitchRealtimeGatewayServer:
             "trigger": "customer_requested",
             "reason": reason,
             "last_utterance": result.input_transcript.strip(),
+            "wait_timeout_seconds": 180,
             "ai_turns": self._build_call_result_turns(session),
         }
         try:
@@ -2884,6 +2961,19 @@ def _best_playback_reference_match(
         frame_number=best_frame_number,
         rms=best_rms,
     )
+
+
+def _opening_barge_in_looks_like_playback_echo(
+    reference_match: PlaybackReferenceMatch,
+    last_playback_age_ms: int | None,
+) -> bool:
+    if reference_match.correlation is None:
+        return False
+    if reference_match.correlation < OPENING_ECHO_CORRELATION_THRESHOLD:
+        return False
+    if last_playback_age_ms is None:
+        return False
+    return last_playback_age_ms <= OPENING_ECHO_MAX_LAST_PLAYBACK_AGE_MS
 
 
 def _pcm_abs_correlation(left_pcm: bytes, right_pcm: bytes) -> float | None:

@@ -1296,6 +1296,23 @@ def test_call_record_transcript_json_preserves_handoff_speaker_metadata():
     }
 
 
+def test_call_record_transcript_json_drops_unsupported_human_role():
+    transcript_json = build_call_record_transcript_json(
+        {
+            "turns": [
+                {
+                    "role": "human",
+                    "speaker_type": "human_agent",
+                    "agent_id": "agent-1001",
+                    "text": "您好，我是物业客服。",
+                }
+            ]
+        }
+    )
+
+    assert json.loads(transcript_json) == {"turns": []}
+
+
 def test_postgres_call_result_writer_emits_success_flow_callback_after_transcript_update():
     async def assert_writer():
         flow_events: list[FlowCallbackEvent] = []
@@ -1480,6 +1497,52 @@ def test_postgres_call_result_writer_emits_failed_when_transcript_update_noops()
     asyncio.run(assert_writer())
 
 
+def test_postgres_call_result_writer_allows_local_outbound_test_without_call_record_update():
+    async def assert_writer():
+        flow_events: list[FlowCallbackEvent] = []
+
+        class Store:
+            async def mark_transcript_completed(self, context, transcript_json):
+                return False
+
+        class FakeFlowCallbackWriter:
+            def publish(self, event):
+                flow_events.append(event)
+                return True
+
+        writer = PostgresCallResultWriter(
+            Store(),
+            flow_callback_writer=FakeFlowCallbackWriter(),
+        )
+        writer.start()
+        try:
+            assert writer.enqueue_nowait(
+                {
+                    "call_id": "internal-media-call",
+                    "context": {
+                        "tenantId": "000000",
+                        "taskId": "handoff-local-20260602043624-sfgk",
+                        "callId": "handoff-local-20260602043624-sfgk",
+                        "debtId": "2049810626160668673",
+                        "scene": "local-outbound-test",
+                    },
+                    "turns": [{"role": "assistant", "text": "您好"}],
+                }
+            )
+            await asyncio.wait_for(writer.queue.join(), timeout=1.0)
+        finally:
+            await writer.stop()
+
+        assert len(flow_events) == 1
+        assert flow_events[0].status == "SUCCESS"
+        assert flow_events[0].tenant_id == "000000"
+        assert flow_events[0].task_id == "handoff-local-20260602043624-sfgk"
+        assert flow_events[0].business_id == "handoff-local-20260602043624-sfgk"
+        assert flow_events[0].message == "外呼完成，本地测试未写入 call_record"
+
+    asyncio.run(assert_writer())
+
+
 def test_postgres_call_result_writer_emits_failed_when_transcript_update_raises():
     async def assert_writer():
         flow_events: list[FlowCallbackEvent] = []
@@ -1611,6 +1674,34 @@ def test_threadsafe_business_prompt_preparer_runs_store_on_event_loop():
             {"identityName": "collector-a"},
         )
         assert result == "prepared"
+
+    asyncio.run(assert_preparer())
+
+
+def test_threadsafe_business_prompt_preparer_retries_transient_failure_once():
+    async def assert_preparer():
+        calls = 0
+
+        class Store:
+            async def prepare_business_prompt(self, context, *, fallback_instructions):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise ConnectionError("stale pooled connection")
+                return "prepared"
+
+        preparer = ThreadsafeBusinessPromptPreparer(
+            asyncio.get_running_loop(),
+            Store(),
+            fallback_instructions="fallback",
+            timeout_seconds=1.0,
+        )
+        result = await asyncio.to_thread(
+            preparer.prepare,
+            {"identityName": "collector-a"},
+        )
+        assert result == "prepared"
+        assert calls == 2
 
     asyncio.run(assert_preparer())
 

@@ -10,6 +10,21 @@ class HumanHandoffTranscriptError(RuntimeError):
     pass
 
 
+class MockHumanHandoffTranscriptProcessor:
+    def process(self, job: dict[str, Any]) -> list[dict[str, Any]]:
+        agent_id = _clean_text(job.get("agent_id")) or _clean_text(
+            job.get("agent_uuid")
+        )
+        turn: dict[str, Any] = {
+            "role": "assistant",
+            "speaker_type": "human_agent",
+            "text": "人工坐席已接入并完成通话。",
+        }
+        if agent_id is not None:
+            turn["agent_id"] = agent_id
+        return [turn]
+
+
 class HttpHumanHandoffTranscriptProcessor:
     def __init__(self, url: str, *, timeout_seconds: float) -> None:
         if not url.strip():

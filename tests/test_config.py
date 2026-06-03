@@ -89,6 +89,8 @@ def test_load_config_from_toml(tmp_path):
             host_directory = "./freeswitch-local/recordings"
             object_prefix = "recordings"
             upload_timeout_seconds = 12.5
+            opening_warmup_ms = 700
+            opening_source_debug_enabled = true
 
             [human_transcript]
             enabled = true
@@ -182,6 +184,8 @@ def test_load_config_from_toml(tmp_path):
     assert config.call_recording.host_directory == "./freeswitch-local/recordings"
     assert config.call_recording.object_prefix == "recordings"
     assert config.call_recording.upload_timeout_seconds == 12.5
+    assert config.call_recording.opening_warmup_ms == 700
+    assert config.call_recording.opening_source_debug_enabled is True
     assert config.human_transcript.enabled is True
     assert config.human_transcript.provider == "http_json"
     assert config.human_transcript.http_url == "http://asr.example/transcribe"
@@ -247,6 +251,8 @@ def test_environment_overrides(monkeypatch):
     monkeypatch.setenv("CALL_RECORDING_HOST_DIR", "/opt/recov_ten/recordings")
     monkeypatch.setenv("CALL_RECORDING_OBJECT_PREFIX", "recordings")
     monkeypatch.setenv("CALL_RECORDING_UPLOAD_TIMEOUT_SECONDS", "9.5")
+    monkeypatch.setenv("CALL_RECORDING_OPENING_WARMUP_MS", "800")
+    monkeypatch.setenv("CALL_RECORDING_OPENING_SOURCE_DEBUG_ENABLED", "true")
     monkeypatch.setenv("HUMAN_TRANSCRIPT_ENABLED", "true")
     monkeypatch.setenv("HUMAN_TRANSCRIPT_PROVIDER", "http_json")
     monkeypatch.setenv("HUMAN_TRANSCRIPT_HTTP_URL", "http://env-asr.example/transcribe")
@@ -317,6 +323,8 @@ def test_environment_overrides(monkeypatch):
     assert config.call_recording.host_directory == "/opt/recov_ten/recordings"
     assert config.call_recording.object_prefix == "recordings"
     assert config.call_recording.upload_timeout_seconds == 9.5
+    assert config.call_recording.opening_warmup_ms == 800
+    assert config.call_recording.opening_source_debug_enabled is True
     assert config.human_transcript.enabled is True
     assert config.human_transcript.provider == "http_json"
     assert config.human_transcript.http_url == "http://env-asr.example/transcribe"

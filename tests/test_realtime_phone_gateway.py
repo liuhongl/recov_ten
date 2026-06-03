@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import wave
 from collections.abc import Awaitable, Callable
 
 import pytest
@@ -9,6 +10,7 @@ from websockets.legacy.client import connect
 
 from app.audio_codec import samples_to_pcm_s16le
 from app.config import (
+    CallRecordingConfig,
     FeatureConfig,
     FreeSwitchConfig,
     GatewayConfig,
@@ -81,8 +83,21 @@ def test_realtime_phone_gateway_does_not_emit_silence_when_model_audio_lags():
     asyncio.run(_assert_realtime_phone_gateway_does_not_emit_silence_on_lag())
 
 
+def test_realtime_phone_gateway_prefills_completed_opening_from_queued_frames():
+    asyncio.run(_assert_realtime_phone_gateway_prefills_completed_opening())
+
+
 def test_realtime_phone_gateway_plays_opening_audio_before_live_turn():
     asyncio.run(_assert_realtime_phone_gateway_plays_opening_audio())
+
+
+
+def test_realtime_phone_gateway_writes_recorded_call_opening_source_wav(tmp_path):
+    asyncio.run(_assert_realtime_phone_gateway_writes_opening_source_wav(tmp_path))
+
+
+def test_realtime_phone_gateway_adds_recording_opening_warmup():
+    asyncio.run(_assert_realtime_phone_gateway_adds_recording_opening_warmup())
 
 
 def test_realtime_phone_gateway_waits_for_answer_before_opening_audio():
@@ -214,6 +229,7 @@ def test_realtime_gateway_triggers_handoff_and_suppresses_model_output():
 
 def test_realtime_gateway_triggers_handoff_from_asr_before_model_audio():
     asyncio.run(_assert_realtime_gateway_triggers_handoff_from_asr_before_model_audio())
+
 
 
 def test_realtime_gateway_defers_call_result_when_handoff_is_requested():
@@ -1453,6 +1469,39 @@ async def _assert_realtime_phone_gateway_does_not_emit_silence_on_lag() -> None:
     assert session.playback_queue.empty()
 
 
+async def _assert_realtime_phone_gateway_prefills_completed_opening() -> None:
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="test-opening-prefill-call",
+        session_id="test-opening-prefill-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+    )
+    session.current_output_turn_id = OPENING_TURN_ID
+    session.model_done_turns.add(OPENING_TURN_ID)
+    first = PlaybackFrame(OPENING_TURN_ID, _phone_frame(100))
+    queued_frames = server.playback_prefill_frames + 3
+
+    for index in range(queued_frames):
+        await session.playback_queue.put(
+            PlaybackFrame(OPENING_TURN_ID, _phone_frame(index + 101))
+        )
+
+    frames = await server._prefill_playback_frames(session, first)
+
+    assert len(frames) == server.playback_prefill_frames
+    assert frames[0].payload == _phone_frame(100)
+    assert frames[-1].payload == _phone_frame(100 + server.playback_prefill_frames - 1)
+    assert session.playback_queue.qsize() == queued_frames - (
+        server.playback_prefill_frames - 1
+    )
+    assert OPENING_TURN_ID in session.jitter_prefilled_turns
+
+
 async def _assert_realtime_phone_gateway_plays_opening_audio() -> None:
     opening_text = "您好，请问是测试业主吗？这边有一项物业费事项想和您本人核实一下。"
     store = OpeningAudioStore()
@@ -1496,6 +1545,100 @@ async def _assert_realtime_phone_gateway_plays_opening_audio() -> None:
     assert stats.opening_playback_interrupted is False
     assert opening_text in fake_session.instructions[0]
     assert store.pop("test-opening-call") is None
+
+
+async def _assert_realtime_phone_gateway_writes_opening_source_wav(tmp_path) -> None:
+    host_dir = tmp_path / "recordings"
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(
+            tail_silence_ms=0,
+            call_recording=CallRecordingConfig(
+                enabled=True,
+                directory="/var/lib/freeswitch/recordings",
+                host_directory=str(host_dir),
+                opening_source_debug_enabled=True,
+                opening_warmup_ms=0,
+            ),
+        ),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="media-call-1",
+        session_id="session-1",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+        recording_path="/var/lib/freeswitch/recordings/business-call-1.wav",
+    )
+    opening_audio = PreparedOpeningAudio(
+        call_id="media-call-1",
+        opening_text="您好，请问是测试业主吗？",
+        opening_text_hash="hash-source-wav",
+        voice="female",
+        speaker="zh_female_vv_jupiter_bigtts",
+        phone_frames=[_phone_frame(800), _phone_frame(1200)],
+        source_sample_rate=24000,
+        source_audio_bytes=960,
+        generation_ms=1200,
+    )
+
+    await server._start_opening_playback(session, opening_audio)
+
+    source_path = host_dir / "business-call-1.opening-source.wav"
+    assert source_path.is_file()
+    with wave.open(str(source_path), "rb") as wav_file:
+        assert wav_file.getnchannels() == 1
+        assert wav_file.getsampwidth() == 2
+        assert wav_file.getframerate() == 8000
+        assert wav_file.readframes(320) == b"".join(opening_audio.phone_frames)
+
+
+async def _assert_realtime_phone_gateway_adds_recording_opening_warmup() -> None:
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(
+            tail_silence_ms=0,
+            call_recording=CallRecordingConfig(
+                enabled=True,
+                directory="/var/lib/freeswitch/recordings",
+                opening_warmup_ms=40,
+            ),
+        ),
+        api_key="test-key",
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="media-call-1",
+        session_id="session-1",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+        recording_path="/var/lib/freeswitch/recordings/business-call-1.wav",
+    )
+    opening_frame = _phone_frame(800)
+    opening_audio = PreparedOpeningAudio(
+        call_id="media-call-1",
+        opening_text="您好，请问是测试业主吗？",
+        opening_text_hash="hash-warmup",
+        voice="female",
+        speaker="zh_female_vv_jupiter_bigtts",
+        phone_frames=[opening_frame],
+        source_sample_rate=24000,
+        source_audio_bytes=960,
+        generation_ms=1200,
+    )
+
+    await server._start_opening_playback(session, opening_audio)
+
+    frames = [
+        session.playback_queue.get_nowait(),
+        session.playback_queue.get_nowait(),
+        session.playback_queue.get_nowait(),
+    ]
+    assert [frame.payload for frame in frames] == [
+        b"\x00" * 320,
+        b"\x00" * 320,
+        opening_frame,
+    ]
+    assert session.opening_playback_frames == 1
 
 
 def test_realtime_phone_gateway_skips_opening_audio_with_amount():
@@ -2141,6 +2284,7 @@ def _test_config(
     send_interval_ms: int = 10,
     barge_in_enabled: bool = True,
     inbound_rms_diagnostics_enabled: bool = False,
+    call_recording: CallRecordingConfig = CallRecordingConfig(),
 ) -> GatewayConfig:
     return GatewayConfig(
         freeswitch=FreeSwitchConfig(media_host="127.0.0.1", media_port=0),
@@ -2161,6 +2305,7 @@ def _test_config(
         features=FeatureConfig(
             inbound_rms_diagnostics_enabled=inbound_rms_diagnostics_enabled,
         ),
+        call_recording=call_recording,
     )
 
 

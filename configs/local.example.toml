@@ -75,6 +75,8 @@ upload_enabled = false
 host_directory = "./freeswitch-local/recordings"
 object_prefix = "recordings"
 upload_timeout_seconds = 30.0
+opening_warmup_ms = 600
+opening_source_debug_enabled = false
 
 [flow_callback]
 enabled = false

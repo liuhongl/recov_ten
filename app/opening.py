@@ -12,6 +12,7 @@ from typing import Protocol
 
 from .audio_codec import (
     pcm_s16le_frame_bytes,
+    pcm_s16le_rms,
     resample_pcm_s16le_mono,
     split_audio_frames,
 )
@@ -38,8 +39,14 @@ LEGACY_BUSINESS_OPENING_TEMPLATE_ALIASES = {
     "{{identity_name}}": "{identity_name}",
     "{{identityName}}": "{identityName}",
 }
-OPENING_TTS_PREFIX = "请严格朗读以下开场白，不要添加、删减或改写："
+OPENING_TTS_PREFIX = (
+    "你正在进行一通电话外呼。请用自然、礼貌、像真人客服接通电话一样的口吻说出下面开场白。"
+    "语速适中，语气要和后续实时对话保持一致。不要播报标点，不要像朗读通知，不要添加新事实。"
+    "开场白："
+)
 DEFAULT_OPENING_TIMEOUT_SECONDS = 60
+OPENING_LEADING_SILENCE_RMS_THRESHOLD = 120
+OPENING_MAX_LEADING_SILENCE_TRIM_MS = 500
 VOICE_SPEAKERS = {
     "female": "zh_female_vv_jupiter_bigtts",
     "male": "zh_male_yunzhou_jupiter_bigtts",
@@ -319,6 +326,11 @@ def build_prepared_opening_audio(
         config.freeswitch.frame_duration_ms,
         channels=config.freeswitch.channels,
     )
+    phone_pcm = _trim_leading_opening_silence(
+        phone_pcm,
+        frame_bytes=frame_bytes,
+        frame_duration_ms=config.freeswitch.frame_duration_ms,
+    )
     frames = split_audio_frames(phone_pcm, frame_bytes, pad_last=True)
     frames.extend(_tail_silence_frames(config, frame_bytes))
     if not frames:
@@ -447,6 +459,29 @@ def _contains_pre_identity_sensitive_details(
 
 def _text_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _trim_leading_opening_silence(
+    pcm: bytes,
+    *,
+    frame_bytes: int,
+    frame_duration_ms: int,
+) -> bytes:
+    if not pcm:
+        return pcm
+    max_trim_frames = OPENING_MAX_LEADING_SILENCE_TRIM_MS // frame_duration_ms
+    if max_trim_frames <= 0:
+        return pcm
+    max_trim_bytes = min(len(pcm), max_trim_frames * frame_bytes)
+    offset = 0
+    while offset + frame_bytes <= max_trim_bytes:
+        frame = pcm[offset : offset + frame_bytes]
+        if pcm_s16le_rms(frame) >= OPENING_LEADING_SILENCE_RMS_THRESHOLD:
+            return pcm[offset:]
+        offset += frame_bytes
+    if len(pcm) > max_trim_bytes:
+        return pcm[max_trim_bytes:]
+    return pcm
 
 
 def _tail_silence_frames(config: GatewayConfig, frame_bytes: int) -> list[bytes]:

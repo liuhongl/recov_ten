@@ -105,6 +105,8 @@ class CallRecordingConfig:
     host_directory: str = ""
     object_prefix: str = "recordings"
     upload_timeout_seconds: float = 30.0
+    opening_warmup_ms: int = 600
+    opening_source_debug_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -521,6 +523,18 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
                 "call_recording",
                 "upload_timeout_seconds",
                 default=CallRecordingConfig.upload_timeout_seconds,
+            ),
+            opening_warmup_ms=_get_int(
+                raw,
+                "call_recording",
+                "opening_warmup_ms",
+                default=CallRecordingConfig.opening_warmup_ms,
+            ),
+            opening_source_debug_enabled=_get_bool(
+                raw,
+                "call_recording",
+                "opening_source_debug_enabled",
+                default=CallRecordingConfig.opening_source_debug_enabled,
             ),
         ),
         postgres=PostgresConfig(
@@ -1039,6 +1053,14 @@ def _apply_env_overrides(config: GatewayConfig) -> GatewayConfig:
                 "CALL_RECORDING_UPLOAD_TIMEOUT_SECONDS",
                 config.call_recording.upload_timeout_seconds,
             ),
+            opening_warmup_ms=_env_int(
+                "CALL_RECORDING_OPENING_WARMUP_MS",
+                config.call_recording.opening_warmup_ms,
+            ),
+            opening_source_debug_enabled=_env_bool(
+                "CALL_RECORDING_OPENING_SOURCE_DEBUG_ENABLED",
+                config.call_recording.opening_source_debug_enabled,
+            ),
         ),
         postgres=PostgresConfig(
             enabled=_env_bool("POSTGRES_ENABLED", config.postgres.enabled),
@@ -1226,6 +1248,8 @@ def _validate_call_recording_config(config: CallRecordingConfig) -> None:
         )
     if config.upload_timeout_seconds <= 0:
         raise ValueError("call_recording.upload_timeout_seconds must be positive")
+    if config.opening_warmup_ms < 0:
+        raise ValueError("call_recording.opening_warmup_ms must be non-negative")
 
 
 def _validate_human_transcript_config(

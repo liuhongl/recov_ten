@@ -204,6 +204,40 @@ def test_opening_audio_generator_passes_speaking_style_to_text_probe(monkeypatch
     assert captured["speaking_style"] == "协调型、耐心沟通的物业工作人员口吻。"
 
 
+def test_opening_audio_generator_uses_natural_phone_tts_prompt(monkeypatch):
+    captured = {}
+
+    async def fake_text_probe(credentials, session_config, **kwargs):
+        captured["input_text"] = kwargs["input_text"]
+        return (
+            type("Result", (), {"response_done_ms": 12, "output_sample_rate": 24000})(),
+            samples_to_pcm_s16le([1000] * 240),
+        )
+
+    monkeypatch.setattr("app.opening.run_doubao_s2s_text_probe", fake_text_probe)
+    generator = DoubaoOpeningAudioGenerator(
+        DoubaoS2SCredentials(app_id="app-a", access_token="token-a"),
+        GatewayConfig().doubao_s2s,
+    )
+
+    generator.generate(
+        OpeningRequest(
+            voice="female",
+            speaker="zh_female_vv_jupiter_bigtts",
+            business={},
+            opening_text="您好，请问是金女士吗？",
+            opening_text_hash="hash-opening",
+        )
+    )
+
+    assert "电话外呼" in captured["input_text"]
+    assert "自然" in captured["input_text"]
+    assert "后续实时对话" in captured["input_text"]
+    assert "不要像朗读通知" in captured["input_text"]
+    assert "严格朗读" not in captured["input_text"]
+    assert captured["input_text"].endswith("您好，请问是金女士吗？")
+
+
 def test_build_prepared_opening_audio_resamples_to_phone_frames_and_adds_tail():
     opening = parse_opening_request(
         {
@@ -241,6 +275,40 @@ def test_build_prepared_opening_audio_resamples_to_phone_frames_and_adds_tail():
     assert len(prepared.phone_frames) == 3
     assert all(len(frame) == 320 for frame in prepared.phone_frames)
     assert prepared.phone_frames[-2:] == [b"\x00" * 320, b"\x00" * 320]
+
+
+def test_build_prepared_opening_audio_trims_leading_silence():
+    opening = parse_opening_request(
+        {
+            "voice": "female",
+            "business": {
+                "owner_name": "测试业主",
+                "arrears_amount": "12.34",
+            },
+        }
+    )
+    assert opening is not None
+    frame_samples = 160
+    source_audio = samples_to_pcm_s16le(
+        [0] * frame_samples * 4 + [200] * frame_samples * 3
+    )
+
+    prepared = build_prepared_opening_audio(
+        call_id="call-1",
+        opening=opening,
+        audio=OpeningAudio(
+            pcm16=source_audio,
+            sample_rate=8000,
+            generation_ms=1234,
+        ),
+        config=GatewayConfig(
+            freeswitch=FreeSwitchConfig(sample_rate=8000, frame_duration_ms=20),
+            playback=PlaybackConfig(tail_silence_ms=0),
+        ),
+    )
+
+    assert len(prepared.phone_frames) == 3
+    assert prepared.phone_frames == [samples_to_pcm_s16le([200] * frame_samples)] * 3
 
 
 def test_opening_audio_store_pops_by_call_id():

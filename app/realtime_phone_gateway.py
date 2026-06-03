@@ -43,6 +43,7 @@ from .playout_controller import (
     PlayoutPacingMode,
     PlayoutPacingState,
 )
+from .recording_upload import RecordingUploadError, build_recording_host_path
 from .realtime_types import (
     DEFAULT_INPUT_SAMPLE_RATE,
     DEFAULT_OUTPUT_SAMPLE_RATE,
@@ -52,6 +53,7 @@ from .realtime_types import (
 )
 from .postgres import PromptSnapshot
 from .voice_activity import EnergyVadTurnDetector
+from .wav_io import write_pcm16_wav
 
 LOGGER = logging.getLogger(__name__)
 
@@ -937,6 +939,7 @@ class FreeSwitchRealtimeGatewayServer:
         if opening_audio is None or not opening_audio.phone_frames:
             return
 
+        self._write_opening_source_debug_wav(session, opening_audio)
         now = time.monotonic()
         session.current_output_turn_id = OPENING_TURN_ID
         session.opening_playback_started_at = time.time()
@@ -950,6 +953,12 @@ class FreeSwitchRealtimeGatewayServer:
         )
         session.model_done_turns.add(OPENING_TURN_ID)
         session.opening_barge_in_detector = self._create_opening_barge_in_detector()
+
+        for payload in self._opening_recording_warmup_frames(session):
+            await self._enqueue_playback_frame(
+                session,
+                PlaybackFrame(OPENING_TURN_ID, payload),
+            )
 
         for payload in opening_audio.phone_frames:
             await self._enqueue_playback_frame(
@@ -971,6 +980,52 @@ class FreeSwitchRealtimeGatewayServer:
             session.opening_answer_wait_ms,
         )
         self._schedule_opening_context_seed(session, opening_audio.opening_text)
+
+    def _opening_recording_warmup_frames(
+        self,
+        session: RealtimePhoneSessionStats,
+    ) -> list[bytes]:
+        config = self.config.call_recording
+        if not config.enabled or not session.recording_path:
+            return []
+        if config.opening_warmup_ms <= 0:
+            return []
+        frame_count = math.ceil(config.opening_warmup_ms / self.frame_duration_ms)
+        if frame_count <= 0:
+            return []
+        silence_frame = b"\x00" * self.expected_frame_bytes
+        return [silence_frame] * frame_count
+
+    def _write_opening_source_debug_wav(
+        self,
+        session: RealtimePhoneSessionStats,
+        opening_audio: PreparedOpeningAudio,
+    ) -> None:
+        config = self.config.call_recording
+        if (
+            not config.enabled
+            or not config.opening_source_debug_enabled
+            or not session.recording_path
+        ):
+            return
+        try:
+            recording_path = build_recording_host_path(config, session.recording_path)
+            source_path = recording_path.with_suffix(".opening-source.wav")
+            write_pcm16_wav(
+                source_path,
+                b"".join(opening_audio.phone_frames),
+                sample_rate=self.contract.sample_rate,
+                channels=self.contract.channels,
+            )
+        except (OSError, RecordingUploadError, ValueError):
+            LOGGER.warning(
+                "opening_source_debug_wav_write_failed call_id=%s "
+                "session_id=%s recording_path=%s",
+                session.call_id,
+                session.session_id,
+                session.recording_path,
+                exc_info=True,
+            )
 
     def _schedule_opening_context_seed(
         self,
@@ -1800,20 +1855,25 @@ class FreeSwitchRealtimeGatewayServer:
         started_at = time.monotonic()
         deadline = time.monotonic() + (self.config.playback.jitter_buffer_ms / 1000)
 
-        while (
-            len(frames) < self.playback_prefill_frames
-            and turn_id not in session.model_done_turns
-        ):
-            timeout = deadline - time.monotonic()
-            if timeout <= 0:
-                break
-            try:
-                next_item = await asyncio.wait_for(
-                    session.playback_queue.get(),
-                    timeout=timeout,
-                )
-            except asyncio.TimeoutError:
-                break
+        while len(frames) < self.playback_prefill_frames:
+            if turn_id in session.model_done_turns:
+                if turn_id != OPENING_TURN_ID:
+                    break
+                try:
+                    next_item = session.playback_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            else:
+                timeout = deadline - time.monotonic()
+                if timeout <= 0:
+                    break
+                try:
+                    next_item = await asyncio.wait_for(
+                        session.playback_queue.get(),
+                        timeout=timeout,
+                    )
+                except asyncio.TimeoutError:
+                    break
 
             if next_item is None:
                 await session.playback_queue.put(None)

@@ -477,7 +477,17 @@ def test_outbound_test_page_is_served():
         assert 'name="taskId"' in body
         assert "流程任务 taskId" in body
         assert "function syncBusinessFieldsForSubmit()" in body
+        assert "let recentCalls = [];" in body
+        assert "function isLocalOutboundTest()" in body
+        assert "function generateLocalBusinessId()" in body
+        assert "function hasTerminalRecentCallForBusinessId(businessId)" in body
+        assert "function ensureFreshLocalBusinessIdsForSubmit()" in body
+        assert "recentCalls = calls;" in body
+        assert "ensureFreshLocalBusinessIdsForSubmit();" in body
         assert "function applyQueryOverrides()" in body
+        assert "let appliedQuerySearch = null;" in body
+        assert "function applyPendingQueryOverrides()" in body
+        assert "if (window.location.search !== appliedQuerySearch)" in body
         assert "new URLSearchParams(window.location.search)" in body
         assert "syncBusinessFieldsForSubmit();" in body
         assert "applyQueryOverrides();" in body

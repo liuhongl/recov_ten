@@ -749,6 +749,8 @@
       const tenantIdInput = document.getElementById("tenantId");
 
       let currentCallId = null;
+      let recentCalls = [];
+      let appliedQuerySearch = null;
 
       const scenarioPresets = {
         "manual-sip-provider": {
@@ -923,6 +925,7 @@
         try {
           const payload = await fetchJson("/calls?limit=20");
           const calls = Array.isArray(payload.calls) ? payload.calls : [];
+          recentCalls = calls;
           if (preservePlayback && hasActiveRecordingPlayback()) {
             return;
           }
@@ -1072,6 +1075,7 @@
       }
 
       function syncBusinessFieldsForSubmit() {
+        ensureFreshLocalBusinessIdsForSubmit();
         const callId = callIdInput.value.trim();
         const taskId = taskIdInput.value.trim();
         if (callId && !taskId) {
@@ -1079,6 +1083,64 @@
         }
         if (taskId && !callId) {
           callIdInput.value = taskId;
+        }
+      }
+
+      function isLocalOutboundTest() {
+        return metadataSceneInput.value.trim() === "local-outbound-test";
+      }
+
+      function generateLocalBusinessId() {
+        const suffix = Math.floor(Math.random() * 1000).toString().padStart(3, "0");
+        return `${Date.now()}${suffix}`;
+      }
+
+      function isTerminalCallStatus(value) {
+        return [
+          "completed",
+          "failed",
+          "busy",
+          "no_answer",
+          "canceled",
+          "hangup_failed",
+        ].includes(String(value || ""));
+      }
+
+      function callBusinessIdCandidates(call) {
+        const context =
+          call && typeof call.context === "object" && call.context !== null ? call.context : {};
+        return [call?.external_call_id, context.callId, context.taskId]
+          .map((value) => String(value || "").trim())
+          .filter(Boolean);
+      }
+
+      function hasTerminalRecentCallForBusinessId(businessId) {
+        const id = String(businessId || "").trim();
+        if (!id) return false;
+        return recentCalls.some(
+          (call) =>
+            (isTerminalCallStatus(call.status) || isTerminalCallStatus(call.phase)) &&
+            callBusinessIdCandidates(call).includes(id)
+        );
+      }
+
+      function ensureFreshLocalBusinessIdsForSubmit() {
+        if (!isLocalOutboundTest()) return;
+        const callId = callIdInput.value.trim();
+        const taskId = taskIdInput.value.trim();
+        if (!callId && !taskId) {
+          const nextId = generateLocalBusinessId();
+          callIdInput.value = nextId;
+          taskIdInput.value = nextId;
+          return;
+        }
+        if (
+          hasTerminalRecentCallForBusinessId(callId) ||
+          hasTerminalRecentCallForBusinessId(taskId)
+        ) {
+          const nextId = generateLocalBusinessId();
+          callIdInput.value = nextId;
+          taskIdInput.value = nextId;
         }
       }
 
@@ -1107,6 +1169,13 @@
           }
         }
         syncBusinessFieldsForSubmit();
+        appliedQuerySearch = window.location.search;
+      }
+
+      function applyPendingQueryOverrides() {
+        if (window.location.search !== appliedQuerySearch) {
+          applyQueryOverrides();
+        }
       }
 
       function applyScenarioPreset() {
@@ -1130,6 +1199,7 @@
 
       callForm.addEventListener("submit", async (event) => {
         event.preventDefault();
+        applyPendingQueryOverrides();
         syncBusinessFieldsForSubmit();
         const payload = formPayload();
         submitButton.disabled = true;

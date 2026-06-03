@@ -259,6 +259,8 @@ class RealtimePhoneSessionStats:
     playback_last_send_at: float | None = None
     playback_last_send_turn_id: int | None = None
     disconnected_at: float | None = None
+    failure_reason: str | None = None
+    failure_error: str | None = None
     control_messages: list[str] = field(default_factory=list)
     output_transcripts_by_turn: dict[int, str] = field(default_factory=dict)
     opening_text: str | None = field(default=None, repr=False)
@@ -618,7 +620,25 @@ class FreeSwitchRealtimeGatewayServer:
 
         try:
             session.prompt_snapshot = await self._load_prompt_snapshot(session)
-            await self._connect_realtime_session(session)
+            try:
+                await self._connect_realtime_session(session)
+            except Exception as err:
+                session.failure_reason = "realtime_session_connect_failed"
+                session.failure_error = str(err)
+                LOGGER.warning(
+                    "realtime_session_connect_failed call_id=%s session_id=%s "
+                    "error=%s",
+                    session.call_id,
+                    session.session_id,
+                    err,
+                    exc_info=True,
+                )
+                with contextlib.suppress(Exception):
+                    await websocket.close(
+                        code=1011,
+                        reason="realtime session connect failed",
+                    )
+                return
             self._schedule_opening_playback(session, opening_audio)
             async for message in websocket:
                 session.last_seen_at = time.time()
@@ -2682,7 +2702,9 @@ class FreeSwitchRealtimeGatewayServer:
         return {
             "call_id": session.call_id,
             "session_id": session.session_id,
-            "status": "completed",
+            "status": "failed" if session.failure_reason else "completed",
+            "failure_reason": session.failure_reason,
+            "error": session.failure_error,
             "recording_path": session.recording_path,
             "context": session.context,
             "connected_at_ms": int(session.connected_at * 1000),

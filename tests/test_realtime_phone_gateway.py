@@ -91,6 +91,9 @@ def test_realtime_phone_gateway_plays_opening_audio_before_live_turn():
     asyncio.run(_assert_realtime_phone_gateway_plays_opening_audio())
 
 
+def test_realtime_phone_gateway_marks_result_failed_when_realtime_connect_fails():
+    asyncio.run(_assert_realtime_phone_gateway_marks_failed_on_connect_error())
+
 
 def test_realtime_phone_gateway_writes_recorded_call_opening_source_wav(tmp_path):
     asyncio.run(_assert_realtime_phone_gateway_writes_opening_source_wav(tmp_path))
@@ -1547,6 +1550,38 @@ async def _assert_realtime_phone_gateway_plays_opening_audio() -> None:
     assert store.pop("test-opening-call") is None
 
 
+async def _assert_realtime_phone_gateway_marks_failed_on_connect_error() -> None:
+    writer = FakeCallResultWriter()
+    fake_session = FakeRealtimeSession(
+        b"",
+        connect_error=RuntimeError("auth denied"),
+    )
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+        realtime_session_factory=fake_session.bind,
+        call_result_writer=writer,
+    )
+    await server.start()
+    try:
+        host, port = server.address
+        async with connect(
+            f"ws://{host}:{port}/media/fs/connect-fail-call",
+            ping_interval=None,
+        ) as ws:
+            with pytest.raises(Exception, match="auth denied|1011"):
+                await asyncio.wait_for(ws.recv(), timeout=1)
+        await _wait_until(lambda: len(writer.payloads) == 1)
+    finally:
+        await server.stop()
+
+    payload = writer.payloads[0]
+    assert payload["status"] == "failed"
+    assert payload["failure_reason"] == "realtime_session_connect_failed"
+    assert "auth denied" in payload["error"]
+    assert payload["metrics"]["outbound_frames"] == 0
+
+
 async def _assert_realtime_phone_gateway_writes_opening_source_wav(tmp_path) -> None:
     host_dir = tmp_path / "recordings"
     server = FreeSwitchRealtimeGatewayServer(
@@ -2152,6 +2187,7 @@ class FakeRealtimeSession:
         auto_provider_events: bool = True,
         interruption_error: Exception | None = None,
         interruption_delay_seconds: float = 0,
+        connect_error: Exception | None = None,
     ) -> None:
         self.model_audio_24k = model_audio_24k
         self.reconnect_delay_seconds = reconnect_delay_seconds
@@ -2159,6 +2195,7 @@ class FakeRealtimeSession:
         self.auto_provider_events = auto_provider_events
         self.interruption_error = interruption_error
         self.interruption_delay_seconds = interruption_delay_seconds
+        self.connect_error = connect_error
         self.connected = False
         self.closed = False
         self.connect_calls = 0
@@ -2204,6 +2241,8 @@ class FakeRealtimeSession:
 
     async def connect(self) -> None:
         self.connect_calls += 1
+        if self.connect_error is not None:
+            raise self.connect_error
         if self.connect_calls > 1 and self.reconnect_delay_seconds:
             await asyncio.sleep(self.reconnect_delay_seconds)
         self.connected = True

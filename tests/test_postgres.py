@@ -1811,6 +1811,68 @@ def test_postgres_call_result_writer_emits_failed_when_transcript_update_noops()
     asyncio.run(assert_writer())
 
 
+def test_postgres_call_result_writer_marks_call_failed_for_failed_payload():
+    async def assert_writer():
+        store_events = []
+        flow_events: list[FlowCallbackEvent] = []
+
+        class Store:
+            async def mark_failed(self, context):
+                store_events.append(("failed", context))
+                return True
+
+            async def mark_transcript_completed(self, context, transcript_json):
+                store_events.append(("transcript", context))
+                return True
+
+        class FakeFlowCallbackWriter:
+            def publish(self, event):
+                flow_events.append(event)
+                return True
+
+        writer = PostgresCallResultWriter(
+            Store(),
+            flow_callback_writer=FakeFlowCallbackWriter(),
+        )
+        writer.start()
+        try:
+            assert writer.enqueue_nowait(
+                {
+                    "call_id": "internal-media-call",
+                    "status": "failed",
+                    "failure_reason": "realtime_session_connect_failed",
+                    "error": "Doubao S2S websocket handshake failed: HTTP 403",
+                    "context": {
+                        "tenantId": "000000",
+                        "taskId": "task-1",
+                        "callId": "990000000000032001",
+                        "debtId": "2049810626160668673",
+                    },
+                    "turns": [],
+                }
+            )
+            await asyncio.wait_for(writer.queue.join(), timeout=1.0)
+        finally:
+            await writer.stop()
+
+        assert store_events == [
+            (
+                "failed",
+                {
+                    "tenantId": "000000",
+                    "taskId": "task-1",
+                    "callId": "990000000000032001",
+                    "debtId": "2049810626160668673",
+                },
+            )
+        ]
+        assert len(flow_events) == 1
+        assert flow_events[0].status == "FAILED"
+        assert flow_events[0].message == "外呼失败：realtime_session_connect_failed"
+
+    asyncio.run(assert_writer())
+
+
 def test_postgres_call_result_writer_allows_local_outbound_test_without_call_record_update():
     async def assert_writer():
         flow_events: list[FlowCallbackEvent] = []

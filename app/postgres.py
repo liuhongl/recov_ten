@@ -920,6 +920,19 @@ class PostgresCallResultWriter:
             if not isinstance(context, Mapping):
                 context = {}
             try:
+                if payload.get("status") == "failed":
+                    updated = await self.store.mark_failed(context)
+                    if not updated:
+                        LOGGER.warning(
+                            "call_record_failed_update_noop call_id=%s",
+                            payload.get("call_id"),
+                        )
+                    self._publish_failure_callback(
+                        payload,
+                        context,
+                        message=_call_result_failure_message(payload),
+                    )
+                    continue
                 transcript_json = build_call_record_transcript_json(payload)
                 updated = await self.store.mark_transcript_completed(
                     context,
@@ -992,6 +1005,8 @@ class PostgresCallResultWriter:
         self,
         payload: Mapping[str, Any],
         context: Mapping[str, Any],
+        *,
+        message: str = "转写写入失败",
     ) -> None:
         if self.flow_callback_writer is None:
             return
@@ -999,7 +1014,7 @@ class PostgresCallResultWriter:
             event = build_flow_callback_event(
                 context,
                 status="FAILED",
-                message="转写写入失败",
+                message=message,
                 business_id=_prompt_text(payload.get("business_id")),
             )
             if event is not None:
@@ -1010,6 +1025,13 @@ class PostgresCallResultWriter:
                 payload.get("call_id"),
                 exc_info=True,
             )
+
+
+def _call_result_failure_message(payload: Mapping[str, Any]) -> str:
+    reason = _prompt_text(payload.get("failure_reason"))
+    if reason:
+        return f"外呼失败：{reason}"
+    return "外呼失败"
 
 
 def build_call_record_transcript_json(payload: Mapping[str, Any]) -> str:

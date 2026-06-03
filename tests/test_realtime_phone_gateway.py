@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 import pytest
 from websockets.legacy.client import connect
 
+from app import realtime_phone_gateway as realtime_gateway
 from app.audio_codec import samples_to_pcm_s16le
 from app.config import (
     CallRecordingConfig,
@@ -226,6 +227,16 @@ def test_handoff_request_detection_is_conservative():
     assert _detect_handoff_request("人工智能能处理吗") is None
 
 
+def test_agent_takeover_suggestion_detection_is_exact_for_first_version():
+    detector = realtime_gateway._detect_agent_takeover_suggestion
+    assert detector("我想投诉") == "complaint"
+    assert detector("我想，投诉") == "complaint"
+    assert detector(" 我 想 投 诉 ") == "complaint"
+    assert detector("我想投诉你们物业") is None
+    assert detector("我不是想投诉") is None
+    assert detector("我要转人工") is None
+
+
 def test_realtime_gateway_triggers_handoff_and_suppresses_model_output():
     asyncio.run(_assert_realtime_gateway_triggers_handoff_and_suppresses_model_output())
 
@@ -233,6 +244,9 @@ def test_realtime_gateway_triggers_handoff_and_suppresses_model_output():
 def test_realtime_gateway_triggers_handoff_from_asr_before_model_audio():
     asyncio.run(_assert_realtime_gateway_triggers_handoff_from_asr_before_model_audio())
 
+
+def test_realtime_gateway_records_takeover_suggestion_without_handoff():
+    asyncio.run(_assert_realtime_gateway_records_takeover_suggestion_without_handoff())
 
 
 def test_realtime_gateway_defers_call_result_when_handoff_is_requested():
@@ -578,6 +592,44 @@ async def _assert_realtime_gateway_triggers_handoff_from_asr_before_model_audio(
         for item in session.committed_exchanges
     ]
     assert committed == [("handoff_requested", "接人工", "")]
+
+
+async def _assert_realtime_gateway_records_takeover_suggestion_without_handoff():
+    fake_handoff = FakeHandoffRequester()
+    fake_suggestion = FakeAgentTakeoverSuggestionRecorder()
+    fake_playback_control = FakePlaybackControl()
+    server = FreeSwitchRealtimeGatewayServer(
+        _test_config(tail_silence_ms=0),
+        api_key="test-key",
+        playback_control=fake_playback_control,
+        handoff_requester=fake_handoff,
+        agent_takeover_suggestion_recorder=fake_suggestion,
+    )
+    session = RealtimePhoneSessionStats(
+        call_id="customer-call",
+        session_id="test-session",
+        connected_at=0,
+        last_seen_at=0,
+        expected_frame_bytes=320,
+    )
+    session.current_output_turn_id = 3
+
+    await server._handle_input_transcript_available(session, 4, "我想投诉")
+
+    assert fake_suggestion.requests == [
+        (
+            "customer-call",
+            {
+                "reason": "complaint",
+                "last_utterance": "我想投诉",
+            },
+        )
+    ]
+    assert fake_handoff.requests == []
+    assert session.handoff_requested is False
+    assert session.agent_takeover_suggestion_requested is True
+    assert session.current_output_turn_id == 3
+    assert fake_playback_control.break_calls == []
 
 
 def test_realtime_gateway_drops_late_audio_for_closed_interrupted_turn():
@@ -2147,6 +2199,25 @@ class FakeHandoffRequester:
             "call": {
                 "status": "waiting_agent",
                 "handoff": {"state": "waiting_agent"},
+            },
+        }
+
+
+class FakeAgentTakeoverSuggestionRecorder:
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, dict]] = []
+
+    def __call__(self, call_id: str, payload: dict) -> dict:
+        self.requests.append((call_id, dict(payload)))
+        return {
+            "status": "accepted",
+            "call": {
+                "agent_takeover_suggestion": {
+                    "state": "suggested",
+                    "reason": payload.get("reason"),
+                    "last_utterance": payload.get("last_utterance"),
+                    "can_takeover": True,
+                }
             },
         }
 

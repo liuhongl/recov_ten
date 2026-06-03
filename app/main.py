@@ -202,6 +202,9 @@ async def _serve(config, *, media_mode: str) -> None:
             opening_store=opening_store,
             is_call_answered=outbound_manager.is_call_answered,
             handoff_requester=outbound_manager.request_handoff,
+            agent_takeover_suggestion_recorder=(
+                outbound_manager.record_agent_takeover_suggestion
+            ),
         )
     else:
         raise ValueError(f"unsupported media_mode: {media_mode}")

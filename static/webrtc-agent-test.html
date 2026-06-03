@@ -394,7 +394,7 @@
 
       .handoff-layout {
         display: grid;
-        grid-template-columns: minmax(220px, 0.9fr) minmax(260px, 1.1fr);
+        grid-template-columns: minmax(200px, 0.8fr) minmax(220px, 0.9fr) minmax(260px, 1.1fr);
         gap: 12px;
       }
 
@@ -612,6 +612,12 @@
                 </div>
               </div>
               <div>
+                <label>建议人工接管</label>
+                <div id="takeoverSuggestionList" class="handoff-list">
+                  <div class="empty">暂无接管建议</div>
+                </div>
+              </div>
+              <div>
                 <label>AI 对话记录</label>
                 <div id="handoffTimeline" class="timeline">
                   <div class="empty">选择一通待接电话查看上下文</div>
@@ -654,6 +660,7 @@
         meterBar: document.getElementById("meterBar"),
         remoteAudio: document.getElementById("remoteAudio"),
         handoffList: document.getElementById("handoffList"),
+        takeoverSuggestionList: document.getElementById("takeoverSuggestionList"),
         handoffTimeline: document.getElementById("handoffTimeline"),
         log: document.getElementById("log"),
       };
@@ -668,6 +675,8 @@
       let meterFrame = null;
       let waitingHandoffCalls = [];
       let selectedHandoffCall = null;
+      let takeoverSuggestionCalls = [];
+      let selectedTakeoverSuggestionCall = null;
       let claimInFlight = false;
 
       function log(message, details) {
@@ -939,12 +948,25 @@
           waitingHandoffCalls = (payload.calls || []).filter((call) => {
             return call.handoff && call.handoff.state === "waiting_agent";
           });
+          takeoverSuggestionCalls = (payload.calls || []).filter((call) => {
+            const suggestion = call.agent_takeover_suggestion;
+            return (
+              suggestion &&
+              suggestion.state === "suggested" &&
+              suggestion.can_takeover &&
+              !(call.handoff && call.handoff.state)
+            );
+          });
           const autoSelectCallId = nextAutoSelectHandoffCallId({ preserveSelected });
           renderHandoffList({ preserveSelected });
+          renderTakeoverSuggestionList();
           if (autoSelectCallId) {
             await selectHandoffCall(autoSelectCallId, { silent: true });
           }
-          log("待接通话已刷新", { count: waitingHandoffCalls.length });
+          log("待接通话已刷新", {
+            count: waitingHandoffCalls.length,
+            suggestions: takeoverSuggestionCalls.length,
+          });
         } catch (error) {
           log("刷新待接通话失败", { error: error.message });
         }
@@ -993,6 +1015,31 @@
         setControls();
       }
 
+      function renderTakeoverSuggestionList() {
+        if (!takeoverSuggestionCalls.length) {
+          els.takeoverSuggestionList.innerHTML = '<div class="empty">暂无接管建议</div>';
+          selectedTakeoverSuggestionCall = null;
+          setControls();
+          return;
+        }
+        els.takeoverSuggestionList.innerHTML = "";
+        takeoverSuggestionCalls.forEach((call) => {
+          const suggestion = call.agent_takeover_suggestion || {};
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "handoff-item";
+          button.innerHTML = `
+            <strong>${escapeHtml(call.call_id)}</strong>
+            <span class="muted">客户原话：${escapeHtml(suggestion.last_utterance || "-")}</span>
+            <span class="muted">原因：客户投诉</span>
+            <span class="muted">点击后将打断 AI 并接管</span>
+          `;
+          button.addEventListener("click", () => takeOverSuggestedCall(call));
+          els.takeoverSuggestionList.appendChild(button);
+        });
+        setControls();
+      }
+
       async function selectHandoffCall(callId, options = {}) {
         const silent = Boolean(options.silent);
         try {
@@ -1031,9 +1078,12 @@
 
       async function claimSelectedHandoff() {
         if (!selectedHandoffCall) return;
+        await claimHandoffCall(selectedHandoffCall.call_id);
+      }
+
+      async function claimHandoffCall(callId) {
         claimInFlight = true;
         setControls();
-        const callId = selectedHandoffCall.call_id;
         try {
           log("提交坐席 claim", { call_id: callId });
           const response = await fetch(`/calls/${encodeURIComponent(callId)}/handoff/claim`, {
@@ -1048,11 +1098,52 @@
           const payload = await response.json();
           if (!response.ok) throw new Error(payload.error || response.statusText);
           selectedHandoffCall = payload.call;
+          selectedTakeoverSuggestionCall = null;
           renderHandoffTimeline(selectedHandoffCall);
           log("坐席 claim 已完成，等待浏览器来电并点击接听", payload.call.handoff);
           await refreshHandoffCalls({ preserveSelected: true });
         } catch (error) {
           log("坐席 claim 失败", { call_id: callId, error: error.message });
+        } finally {
+          claimInFlight = false;
+          setControls();
+        }
+      }
+
+      async function takeOverSuggestedCall(call) {
+        const callId = call && call.call_id;
+        if (!callId) return;
+        if (!ua || !ua.isRegistered()) {
+          log("无法接管建议通话：坐席未上线", { call_id: callId });
+          return;
+        }
+        if (currentSession || pendingIncomingSession) {
+          log("无法接管建议通话：当前坐席已有通话", { call_id: callId });
+          return;
+        }
+        claimInFlight = true;
+        setControls();
+        const suggestion = call.agent_takeover_suggestion || {};
+        try {
+          log("将接管建议升级为正式转人工", { call_id: callId });
+          const response = await fetch(`/calls/${encodeURIComponent(callId)}/handoff`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              trigger: "agent_takeover_suggestion",
+              reason: suggestion.reason || "complaint",
+              last_utterance: suggestion.last_utterance || "我想投诉",
+              wait_timeout_seconds: 180,
+            }),
+          });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || response.statusText);
+          selectedHandoffCall = payload.call;
+          selectedTakeoverSuggestionCall = null;
+          renderHandoffTimeline(selectedHandoffCall);
+          await claimHandoffCall(callId);
+        } catch (error) {
+          log("人工接管建议失败", { call_id: callId, error: error.message });
         } finally {
           claimInFlight = false;
           setControls();

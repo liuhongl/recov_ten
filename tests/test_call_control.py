@@ -183,6 +183,97 @@ def test_originate_webrtc_agent_test_call_maps_event_socket_failure(monkeypatch)
     assert "FreeSWITCH Event Socket request failed" in str(exc_info.value)
 
 
+def test_outbound_manager_records_agent_takeover_suggestion_without_handoff():
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return endpoint
+
+        async def originate(self, command: str) -> str:
+            return "+OK call-1"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+    )
+
+    try:
+        call = manager.create_call({"destination": "1000"})
+        active_call = _wait_for_status(manager, call["call_id"], "originated")
+
+        suggested_call = manager.record_agent_takeover_suggestion(
+            active_call["call_id"],
+            {
+                "reason": "complaint",
+                "last_utterance": "我想投诉",
+            },
+        )
+
+        assert suggested_call["status"] == "originated"
+        assert suggested_call["handoff"] is None
+        assert suggested_call["agent_takeover_suggestion"] == {
+            "state": "suggested",
+            "reason": "complaint",
+            "last_utterance": "我想投诉",
+            "suggested_at_ms": suggested_call["agent_takeover_suggestion"][
+                "suggested_at_ms"
+            ],
+            "updated_at_ms": suggested_call["agent_takeover_suggestion"][
+                "updated_at_ms"
+            ],
+            "can_takeover": True,
+        }
+    finally:
+        manager.shutdown()
+
+
+def test_outbound_manager_disables_takeover_suggestion_after_terminal_status():
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return endpoint
+
+        async def originate(self, command: str) -> str:
+            return "+OK call-1"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}")
+        ),
+        dialer_factory=lambda: FakeDialer(),
+    )
+
+    try:
+        call = manager.create_call({"destination": "1000"})
+        active_call = _wait_for_status(manager, call["call_id"], "originated")
+        manager.record_agent_takeover_suggestion(
+            active_call["call_id"],
+            {"reason": "complaint", "last_utterance": "我想投诉"},
+        )
+
+        manager.handle_channel_event(
+            ChannelStateEvent(
+                name="CHANNEL_HANGUP_COMPLETE",
+                call_id=active_call["call_id"],
+                hangup_cause="NORMAL_CLEARING",
+            )
+        )
+
+        final_call = manager.get_call(active_call["call_id"])
+        assert final_call is not None
+        assert final_call["agent_takeover_suggestion"]["can_takeover"] is False
+    finally:
+        manager.shutdown()
+
+
 def test_outbound_manager_handoff_creates_waiting_agent_before_claim():
     operations: list[tuple[str, str, str | None]] = []
 

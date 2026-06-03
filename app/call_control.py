@@ -151,6 +151,25 @@ class HandoffState:
 
 
 @dataclass
+class AgentTakeoverSuggestion:
+    state: str
+    suggested_at_ms: int
+    updated_at_ms: int
+    reason: str | None = None
+    last_utterance: str | None = None
+
+    def to_dict(self, *, can_takeover: bool) -> dict[str, Any]:
+        return {
+            "state": self.state,
+            "reason": self.reason,
+            "last_utterance": self.last_utterance,
+            "suggested_at_ms": self.suggested_at_ms,
+            "updated_at_ms": self.updated_at_ms,
+            "can_takeover": can_takeover,
+        }
+
+
+@dataclass
 class OutboundCallRecord:
     call_id: str
     destination: str
@@ -183,11 +202,19 @@ class OutboundCallRecord:
     opening: OpeningCallMetadata | None = None
     prompt_snapshot: PromptSnapshot | None = None
     handoff: HandoffState | None = None
+    agent_takeover_suggestion: AgentTakeoverSuggestion | None = None
     recording_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         diagnostics = _build_call_diagnostics(self)
         handoff_payload = None if self.handoff is None else self.handoff.to_dict()
+        takeover_suggestion_payload = (
+            None
+            if self.agent_takeover_suggestion is None
+            else self.agent_takeover_suggestion.to_dict(
+                can_takeover=_can_takeover_from_suggestion(self)
+            )
+        )
         turns = [] if handoff_payload is None else handoff_payload["turns"]
         return {
             "call_id": self.call_id,
@@ -221,6 +248,7 @@ class OutboundCallRecord:
             "opening": None if self.opening is None else self.opening.to_dict(),
             "recording_path": self.recording_path,
             "handoff": handoff_payload,
+            "agent_takeover_suggestion": takeover_suggestion_payload,
             "turns": turns,
             "recent_turns": turns[-8:],
             "summary": _handoff_summary(self.handoff),
@@ -757,6 +785,37 @@ class OutboundCallManager:
         if expires_at_ms is not None:
             self._schedule_handoff_timeout(call_id, expires_at_ms)
         return call_payload
+
+    def record_agent_takeover_suggestion(
+        self,
+        call_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        _require_safe_token(call_id, "call_id")
+        reason = _optional_str(payload, "reason") or "complaint"
+        last_utterance = _optional_str(payload, "last_utterance")
+        with self._lock:
+            record = self._calls.get(call_id)
+            if record is None:
+                raise CallControlError("call not found", status_code=404)
+            if _is_handoff_inactive_status(record.status):
+                raise CallControlError("call is not active", status_code=409)
+            now_ms = _now_ms()
+            if record.agent_takeover_suggestion is None:
+                record.agent_takeover_suggestion = AgentTakeoverSuggestion(
+                    state="suggested",
+                    reason=reason,
+                    last_utterance=last_utterance,
+                    suggested_at_ms=now_ms,
+                    updated_at_ms=now_ms,
+                )
+            else:
+                record.agent_takeover_suggestion.state = "suggested"
+                record.agent_takeover_suggestion.reason = reason
+                record.agent_takeover_suggestion.last_utterance = last_utterance
+                record.agent_takeover_suggestion.updated_at_ms = now_ms
+            record.updated_at_ms = now_ms
+            return record.to_dict()
 
     def claim_handoff(self, call_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.config.event_socket.enabled:
@@ -2496,6 +2555,14 @@ def _is_handoff_inactive_status(status: str) -> bool:
         "hangup_requested",
         "hangup_sent",
     }
+
+
+def _can_takeover_from_suggestion(record: OutboundCallRecord) -> bool:
+    if record.agent_takeover_suggestion is None:
+        return False
+    if record.handoff is not None:
+        return False
+    return not _is_handoff_inactive_status(record.status)
 
 
 def _format_originate_variables(variables: dict[str, str]) -> str:

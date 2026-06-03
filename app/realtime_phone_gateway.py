@@ -205,6 +205,7 @@ PromptSnapshotProvider = Callable[[str], PromptSnapshot | None]
 CallContextProvider = Callable[[str], Mapping[str, Any] | None]
 CallRecordingPathProvider = Callable[[str], str | None]
 HandoffRequester = Callable[[str, dict[str, Any]], Mapping[str, Any]]
+AgentTakeoverSuggestionRecorder = Callable[[str, dict[str, Any]], Mapping[str, Any]]
 
 
 @dataclass
@@ -368,6 +369,12 @@ class RealtimePhoneSessionStats:
     handoff_trigger_turn_id: int | None = None
     handoff_error: str | None = None
     handoff_result: dict[str, Any] | None = field(default=None, repr=False)
+    agent_takeover_suggestion_requested: bool = False
+    agent_takeover_suggestion_result: dict[str, Any] | None = field(
+        default=None,
+        repr=False,
+    )
+    agent_takeover_suggestion_error: str | None = None
     prompt_scene: str = "default"
     prompt_snapshot: PromptSnapshot | None = None
     background_tasks: set[asyncio.Task] = field(default_factory=set, repr=False)
@@ -396,6 +403,9 @@ class FreeSwitchRealtimeGatewayServer:
         call_context_provider: CallContextProvider | None = None,
         call_recording_path_provider: CallRecordingPathProvider | None = None,
         handoff_requester: HandoffRequester | None = None,
+        agent_takeover_suggestion_recorder: (
+            AgentTakeoverSuggestionRecorder | None
+        ) = None,
     ) -> None:
         if not api_key:
             raise ValueError("api_key is required")
@@ -468,6 +478,9 @@ class FreeSwitchRealtimeGatewayServer:
         self.call_context_provider = call_context_provider
         self.call_recording_path_provider = call_recording_path_provider
         self._handoff_requester = handoff_requester
+        self._agent_takeover_suggestion_recorder = (
+            agent_takeover_suggestion_recorder
+        )
 
     @property
     def address(self) -> tuple[str, int]:
@@ -1418,9 +1431,12 @@ class FreeSwitchRealtimeGatewayServer:
         turn_id: int,
         transcript: str,
     ) -> None:
-        if self._handoff_requester is None or session.handoff_requested:
+        if session.handoff_requested:
             return
         normalized = transcript.strip()
+        await self._maybe_record_agent_takeover_suggestion(session, normalized)
+        if self._handoff_requester is None:
+            return
         handoff_reason = _detect_handoff_request(normalized)
         if handoff_reason is None:
             return
@@ -1479,6 +1495,11 @@ class FreeSwitchRealtimeGatewayServer:
                 reason=handoff_reason,
             )
             return
+
+        await self._maybe_record_agent_takeover_suggestion(
+            session,
+            result.input_transcript,
+        )
 
         output_buffer = session.playback_buffers.pop(turn_id, None)
         if (
@@ -1665,6 +1686,48 @@ class FreeSwitchRealtimeGatewayServer:
             session.session_id,
             result.turn_id,
             reason,
+        )
+
+    async def _maybe_record_agent_takeover_suggestion(
+        self,
+        session: RealtimePhoneSessionStats,
+        transcript: str,
+    ) -> None:
+        if session.agent_takeover_suggestion_requested:
+            return
+        recorder = self._agent_takeover_suggestion_recorder
+        if recorder is None:
+            return
+        reason = _detect_agent_takeover_suggestion(transcript)
+        if reason is None:
+            return
+        payload = {
+            "reason": reason,
+            "last_utterance": transcript.strip(),
+        }
+        try:
+            result = await asyncio.to_thread(recorder, session.call_id, payload)
+        except Exception as err:
+            session.agent_takeover_suggestion_error = str(err)
+            LOGGER.warning(
+                "realtime_phone_takeover_suggestion_failed call_id=%s "
+                "session_id=%s reason=%s error=%s",
+                session.call_id,
+                session.session_id,
+                reason,
+                err,
+                exc_info=True,
+            )
+            return
+        session.agent_takeover_suggestion_requested = True
+        session.agent_takeover_suggestion_result = dict(result)
+        LOGGER.info(
+            "realtime_phone_takeover_suggestion_recorded call_id=%s "
+            "session_id=%s reason=%s input_transcript=%s",
+            session.call_id,
+            session.session_id,
+            reason,
+            transcript,
         )
 
     async def _stop_ai_playback_for_handoff(
@@ -3041,6 +3104,13 @@ def _detect_handoff_request(text: str) -> str | None:
         return None
     if HANDOFF_REQUEST_RE.search(normalized):
         return "request_human"
+    return None
+
+
+def _detect_agent_takeover_suggestion(text: str) -> str | None:
+    normalized = re.sub(r"[\s，。！？、,.!?；;：:]+", "", text or "")
+    if normalized == "我想投诉":
+        return "complaint"
     return None
 
 

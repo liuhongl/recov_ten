@@ -219,6 +219,11 @@ class HealthServer:
                         )
                     return
 
+                call_id = _recording_call_id_from_path(parsed.path)
+                if call_id is not None:
+                    self._send_call_recording(call_id, include_body=True)
+                    return
+
                 if parsed.path == "/calls":
                     if call_manager is None:
                         self._send_json(
@@ -260,6 +265,17 @@ class HealthServer:
                     HTTPStatus.NOT_FOUND,
                     {"status": "not_found", "path": parsed.path},
                 )
+
+            def do_HEAD(self) -> None:
+                parsed = urlparse(self.path)
+                call_id = _recording_call_id_from_path(parsed.path)
+                if call_id is not None:
+                    self._send_call_recording(call_id, include_body=False)
+                    return
+
+                self.send_response(HTTPStatus.NOT_FOUND.value)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
 
             def do_POST(self) -> None:
                 parsed = urlparse(self.path)
@@ -541,6 +557,41 @@ class HealthServer:
                 payload = json.loads(raw.decode("utf-8"))
                 return payload if isinstance(payload, dict) else None
 
+            def _send_call_recording(
+                self,
+                call_id: str,
+                *,
+                include_body: bool,
+            ) -> None:
+                if call_manager is None:
+                    self._send_json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"status": "unavailable", "error": "call control disabled"},
+                    )
+                    return
+                call = call_manager.get_call(call_id)
+                if call is None:
+                    self._send_json(
+                        HTTPStatus.NOT_FOUND,
+                        {"status": "error", "error": "call not found"},
+                    )
+                    return
+                try:
+                    recording_path = _call_recording_file_path(config, call)
+                    self._send_audio_file(recording_path, include_body=include_body)
+                except CallControlError as err:
+                    self._send_json(
+                        HTTPStatus(err.status_code),
+                        {"status": "error", "error": str(err)},
+                    )
+                    return
+                except OSError:
+                    self._send_json(
+                        HTTPStatus.NOT_FOUND,
+                        {"status": "error", "error": "recording file not found"},
+                    )
+                    return
+
             def _send_json(
                 self,
                 status: HTTPStatus,
@@ -575,6 +626,39 @@ class HealthServer:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _send_audio_file(self, path: Path, *, include_body: bool = True) -> None:
+                file_size = path.stat().st_size
+                byte_range = _parse_byte_range(
+                    self.headers.get("Range"),
+                    file_size=file_size,
+                )
+                if byte_range == "invalid":
+                    self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE.value)
+                    self.send_header("Content-Range", f"bytes */{file_size}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+
+                if byte_range is None:
+                    start = 0
+                    end = file_size - 1
+                    status = HTTPStatus.OK
+                else:
+                    start, end = byte_range
+                    status = HTTPStatus.PARTIAL_CONTENT
+
+                length = end - start + 1
+                self.send_response(status.value)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Accept-Ranges", "bytes")
+                if status == HTTPStatus.PARTIAL_CONTENT:
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+                self.send_header("Content-Length", str(length))
+                self.end_headers()
+                if include_body:
+                    _copy_file_range(path, self.wfile.write, start=start, length=length)
+
             def _send_redirect(self, location: str) -> None:
                 self.send_response(HTTPStatus.FOUND.value)
                 self.send_header("Location", location)
@@ -592,6 +676,17 @@ def _call_id_from_path(path: str) -> str | None:
     if not suffix or "/" in suffix:
         return None
     return suffix
+
+
+def _recording_call_id_from_path(path: str) -> str | None:
+    prefix = "/calls/"
+    suffix = "/recording"
+    if not path.startswith(prefix) or not path.endswith(suffix):
+        return None
+    call_id = path[len(prefix) : -len(suffix)].strip("/")
+    if not call_id or "/" in call_id:
+        return None
+    return call_id
 
 
 def _query_str(query: str, name: str) -> str | None:
@@ -691,6 +786,94 @@ def _query_int(query: str, name: str, *, default: int) -> int:
         return max(1, min(int(values[0]), 500))
     except ValueError:
         return default
+
+
+def _call_recording_file_path(config: GatewayConfig, call: dict[str, Any]) -> Path:
+    recording_path = _payload_text(call.get("recording_path"))
+    if not recording_path:
+        raise CallControlError("recording path not found", status_code=404)
+
+    recording_dir = config.call_recording.directory.rstrip("/")
+    if recording_path == recording_dir:
+        relative_path = ""
+    elif recording_path.startswith(f"{recording_dir}/"):
+        relative_path = recording_path[len(recording_dir) + 1 :]
+    else:
+        raise CallControlError(
+            "recording path is outside call_recording.directory",
+            status_code=400,
+        )
+    if not relative_path or Path(relative_path).suffix.lower() != ".wav":
+        raise CallControlError("recording file must be a wav file", status_code=400)
+
+    if config.call_recording.host_directory.strip():
+        base_path = Path(config.call_recording.host_directory)
+        file_path = base_path / relative_path
+    else:
+        base_path = Path(recording_dir)
+        file_path = Path(recording_path)
+
+    resolved_base = base_path.expanduser().resolve(strict=False)
+    resolved_file = file_path.expanduser().resolve(strict=False)
+    if not resolved_file.is_relative_to(resolved_base):
+        raise CallControlError(
+            "recording path is outside call_recording.directory",
+            status_code=400,
+        )
+    if not resolved_file.is_file():
+        raise CallControlError("recording file not found", status_code=404)
+    return resolved_file
+
+
+def _parse_byte_range(
+    value: str | None,
+    *,
+    file_size: int,
+) -> tuple[int, int] | str | None:
+    if not value:
+        return None
+    if file_size <= 0:
+        return "invalid"
+    prefix = "bytes="
+    if not value.startswith(prefix):
+        return "invalid"
+    range_spec = value[len(prefix) :].strip()
+    if "," in range_spec or "-" not in range_spec:
+        return "invalid"
+    start_text, end_text = range_spec.split("-", 1)
+    try:
+        if not start_text:
+            suffix_length = int(end_text)
+            if suffix_length <= 0:
+                return "invalid"
+            return max(file_size - suffix_length, 0), file_size - 1
+
+        start = int(start_text)
+        end = int(end_text) if end_text else file_size - 1
+    except ValueError:
+        return "invalid"
+
+    if start < 0 or start >= file_size or end < start:
+        return "invalid"
+    return start, min(end, file_size - 1)
+
+
+def _copy_file_range(
+    path: Path,
+    write: Callable[[bytes], object],
+    *,
+    start: int,
+    length: int,
+) -> None:
+    remaining = length
+    with path.open("rb") as file:
+        file.seek(start)
+        while remaining > 0:
+            chunk = file.read(min(remaining, 256 * 1024))
+            if not chunk:
+                break
+            write(chunk)
+            remaining -= len(chunk)
 
 
 def _load_outbound_test_html() -> str:

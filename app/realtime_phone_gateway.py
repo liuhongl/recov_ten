@@ -201,6 +201,7 @@ RealtimeSessionFactory = Callable[
 CallAnsweredPredicate = Callable[[str], bool]
 PromptSnapshotProvider = Callable[[str], PromptSnapshot | None]
 CallContextProvider = Callable[[str], Mapping[str, Any] | None]
+CallRecordingPathProvider = Callable[[str], str | None]
 HandoffRequester = Callable[[str, dict[str, Any]], Mapping[str, Any]]
 
 
@@ -211,6 +212,7 @@ class RealtimePhoneSessionStats:
     connected_at: float
     last_seen_at: float
     expected_frame_bytes: int
+    recording_path: str | None = None
     context: dict[str, Any] = field(default_factory=dict)
     inbound_frames: int = 0
     inbound_bytes: int = 0
@@ -388,6 +390,7 @@ class FreeSwitchRealtimeGatewayServer:
         is_call_answered: CallAnsweredPredicate | None = None,
         prompt_snapshot_provider: PromptSnapshotProvider | None = None,
         call_context_provider: CallContextProvider | None = None,
+        call_recording_path_provider: CallRecordingPathProvider | None = None,
         handoff_requester: HandoffRequester | None = None,
     ) -> None:
         if not api_key:
@@ -459,6 +462,7 @@ class FreeSwitchRealtimeGatewayServer:
         self.opening_store = opening_store
         self._is_call_answered = is_call_answered
         self.call_context_provider = call_context_provider
+        self.call_recording_path_provider = call_recording_path_provider
         self._handoff_requester = handoff_requester
 
     @property
@@ -577,12 +581,14 @@ class FreeSwitchRealtimeGatewayServer:
             )
             opening_audio = None
         context = self._load_call_context(call_id)
+        recording_path = self._load_call_recording_path(call_id)
         session = RealtimePhoneSessionStats(
             call_id=call_id,
             session_id=uuid.uuid4().hex,
             connected_at=now,
             last_seen_at=now,
             expected_frame_bytes=self.expected_frame_bytes,
+            recording_path=recording_path,
             context=context,
             opening_text=(
                 None if opening_audio is None else opening_audio.opening_text
@@ -844,6 +850,23 @@ class FreeSwitchRealtimeGatewayServer:
         if not isinstance(context, Mapping):
             return {}
         return dict(context)
+
+    def _load_call_recording_path(self, call_id: str) -> str | None:
+        if self.call_recording_path_provider is None:
+            return None
+        try:
+            recording_path = self.call_recording_path_provider(call_id)
+        except Exception:
+            LOGGER.warning(
+                "call_recording_path_load_failed call_id=%s",
+                call_id,
+                exc_info=True,
+            )
+            return None
+        if not isinstance(recording_path, str):
+            return None
+        recording_path = recording_path.strip()
+        return recording_path or None
 
     def _schedule_opening_playback(
         self,
@@ -2600,6 +2623,7 @@ class FreeSwitchRealtimeGatewayServer:
             "call_id": session.call_id,
             "session_id": session.session_id,
             "status": "completed",
+            "recording_path": session.recording_path,
             "context": session.context,
             "connected_at_ms": int(session.connected_at * 1000),
             "disconnected_at_ms": int(disconnected_at * 1000),

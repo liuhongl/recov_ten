@@ -807,6 +807,10 @@ def test_outbound_manager_handoff_transcript_merges_ai_and_human_turns_after_han
         GatewayConfig(
             event_socket=EventSocketConfig(enabled=True),
             outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+            call_recording=CallRecordingConfig(
+                enabled=True,
+                directory="/var/lib/freeswitch/recordings",
+            ),
         ),
         dialer_factory=lambda: FakeDialer(),
         call_result_writer=FakeCallResultWriter(),
@@ -882,6 +886,9 @@ def test_outbound_manager_handoff_transcript_merges_ai_and_human_turns_after_han
             {
                 "call_id": call_id,
                 "business_id": "990000000000032001",
+                "recording_path": (
+                    "/var/lib/freeswitch/recordings/990000000000032001.wav"
+                ),
                 "context": {
                     "tenantId": "000000",
                     "taskId": "task-1",
@@ -1555,7 +1562,9 @@ def test_outbound_manager_marks_transcript_failed_when_recording_stop_fails():
         manager.shutdown()
 
 
-def test_outbound_manager_processes_handoff_recordings_after_recording_completed():
+def test_outbound_manager_processes_handoff_recordings_after_recording_completed(
+    tmp_path,
+):
     enqueued_payloads = []
     processor_jobs = []
 
@@ -1609,7 +1618,7 @@ def test_outbound_manager_processes_handoff_recordings_after_recording_completed
             outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
             features=FeatureConfig(
                 recording_enabled=True,
-                recording_dir="/tmp/recov_ten_handoff_test",
+                recording_dir=str(tmp_path),
             ),
         ),
         dialer_factory=lambda: FakeDialer(),
@@ -1652,6 +1661,10 @@ def test_outbound_manager_processes_handoff_recordings_after_recording_completed
                 "claimed_by": "agent-1001",
             },
         )
+        customer_recording_path = tmp_path / f"{call_id}-customer.wav"
+        agent_recording_path = tmp_path / f"{call_id}-agent-uuid-1-agent.wav"
+        customer_recording_path.write_bytes(b"customer wav")
+        agent_recording_path.write_bytes(b"agent wav")
         manager.handle_channel_event(
             ChannelStateEvent(
                 name="CHANNEL_HANGUP_COMPLETE",
@@ -1673,19 +1686,18 @@ def test_outbound_manager_processes_handoff_recordings_after_recording_completed
                 },
                 "agent_id": "agent-1001",
                 "agent_uuid": "agent-uuid-1",
-                "customer_recording_path": (
-                    f"/tmp/recov_ten_handoff_test/{call_id}-customer.wav"
-                ),
-                "agent_recording_path": (
-                    f"/tmp/recov_ten_handoff_test/{call_id}-agent-uuid-1-agent.wav"
-                ),
+                "customer_recording_path": str(customer_recording_path),
+                "agent_recording_path": str(agent_recording_path),
             }
         ]
+        assert not customer_recording_path.exists()
+        assert not agent_recording_path.exists()
         assert final_call["handoff"]["human_transcript_status"] == "completed"
         assert enqueued_payloads == [
             {
                 "call_id": call_id,
                 "business_id": "990000000000032001",
+                "recording_path": None,
                 "context": {
                     "tenantId": "000000",
                     "taskId": "task-1",

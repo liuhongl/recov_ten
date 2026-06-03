@@ -592,6 +592,11 @@ class OutboundCallManager:
             record = self._calls.get(call_id)
             return None if record is None else dict(record.context)
 
+    def get_call_recording_path(self, call_id: str) -> str | None:
+        with self._lock:
+            record = self._calls.get(call_id)
+            return None if record is None else record.recording_path
+
     def is_call_answered(self, call_id: str) -> bool:
         with self._lock:
             record = self._calls.get(call_id)
@@ -820,6 +825,7 @@ class OutboundCallManager:
 
         handoff_failed_callback: tuple[dict[str, Any], str | None] | None = None
         rollback_state: dict[str, Any] | None = None
+        cleanup_recording_paths: tuple[str | None, str | None] = (None, None)
         human_turns: list[dict[str, Any]] = []
         with self._lock:
             record = self._calls.get(call_id)
@@ -874,9 +880,14 @@ class OutboundCallManager:
                 result_payload = {
                     "call_id": record.call_id,
                     "business_id": _business_id(record),
+                    "recording_path": record.recording_path,
                     "context": dict(record.context),
                     "turns": [*record.handoff.ai_turns, *record.handoff.human_turns],
                 }
+                cleanup_recording_paths = (
+                    record.handoff.customer_recording_path,
+                    record.handoff.agent_recording_path,
+                )
                 call_payload = record.to_dict()
 
         if status == "failed":
@@ -889,6 +900,7 @@ class OutboundCallManager:
                 "handoff_transcript_completed_without_writer call_id=%s",
                 call_id,
             )
+            self._cleanup_handoff_recording_files(call_id, cleanup_recording_paths)
             return call_payload
         if not self._call_result_writer.enqueue_nowait(result_payload):
             assert rollback_state is not None
@@ -913,7 +925,28 @@ class OutboundCallManager:
                     ]
                     record.updated_at_ms = rollback_state["record_updated_at_ms"]
             raise CallControlError("call result writer queue is full", status_code=503)
+        self._cleanup_handoff_recording_files(call_id, cleanup_recording_paths)
         return call_payload
+
+    def _cleanup_handoff_recording_files(
+        self,
+        call_id: str,
+        paths: tuple[str | None, str | None],
+    ) -> None:
+        for path in paths:
+            if not path:
+                continue
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                LOGGER.warning(
+                    "handoff_recording_cleanup_failed call_id=%s path=%s",
+                    call_id,
+                    path,
+                    exc_info=True,
+                )
 
     def _build_record(self, request: CreateCallRequest) -> OutboundCallRecord:
         outbound = self.config.outbound

@@ -308,6 +308,7 @@ def test_call_result_payload_uses_committed_exchanges_as_authoritative_history()
         connected_at=10.0,
         last_seen_at=10.0,
         expected_frame_bytes=320,
+        recording_path="/var/lib/freeswitch/recordings/990000000000032001.wav",
         context={
             "callId": "990000000000032001",
             "debtId": "2049810626160668673",
@@ -345,6 +346,9 @@ def test_call_result_payload_uses_committed_exchanges_as_authoritative_history()
 
     payload = server._build_call_result_payload(session)
 
+    assert payload["recording_path"] == (
+        "/var/lib/freeswitch/recordings/990000000000032001.wav"
+    )
     assert payload["context"] == {
         "callId": "990000000000032001",
         "debtId": "2049810626160668673",

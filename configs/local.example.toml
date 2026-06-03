@@ -71,6 +71,10 @@ inbound_rms_diagnostics_enabled = false
 [call_recording]
 enabled = false
 directory = "/var/lib/freeswitch/recordings"
+upload_enabled = false
+host_directory = "./freeswitch-local/recordings"
+object_prefix = "recordings"
+upload_timeout_seconds = 30.0
 
 [flow_callback]
 enabled = false

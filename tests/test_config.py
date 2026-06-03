@@ -85,6 +85,10 @@ def test_load_config_from_toml(tmp_path):
             [call_recording]
             enabled = true
             directory = "/var/lib/freeswitch/recordings"
+            upload_enabled = true
+            host_directory = "./freeswitch-local/recordings"
+            object_prefix = "recordings"
+            upload_timeout_seconds = 12.5
 
             [human_transcript]
             enabled = true
@@ -174,6 +178,10 @@ def test_load_config_from_toml(tmp_path):
     assert config.features.inbound_rms_diagnostics_enabled is True
     assert config.call_recording.enabled is True
     assert config.call_recording.directory == "/var/lib/freeswitch/recordings"
+    assert config.call_recording.upload_enabled is True
+    assert config.call_recording.host_directory == "./freeswitch-local/recordings"
+    assert config.call_recording.object_prefix == "recordings"
+    assert config.call_recording.upload_timeout_seconds == 12.5
     assert config.human_transcript.enabled is True
     assert config.human_transcript.provider == "http_json"
     assert config.human_transcript.http_url == "http://asr.example/transcribe"
@@ -235,6 +243,10 @@ def test_environment_overrides(monkeypatch):
     monkeypatch.setenv("RECORDING_DIR", "/tmp/env-recordings")
     monkeypatch.setenv("CALL_RECORDING_ENABLED", "true")
     monkeypatch.setenv("CALL_RECORDING_DIR", "/var/lib/env-recordings")
+    monkeypatch.setenv("CALL_RECORDING_UPLOAD_ENABLED", "true")
+    monkeypatch.setenv("CALL_RECORDING_HOST_DIR", "/opt/recov_ten/recordings")
+    monkeypatch.setenv("CALL_RECORDING_OBJECT_PREFIX", "recordings")
+    monkeypatch.setenv("CALL_RECORDING_UPLOAD_TIMEOUT_SECONDS", "9.5")
     monkeypatch.setenv("HUMAN_TRANSCRIPT_ENABLED", "true")
     monkeypatch.setenv("HUMAN_TRANSCRIPT_PROVIDER", "http_json")
     monkeypatch.setenv("HUMAN_TRANSCRIPT_HTTP_URL", "http://env-asr.example/transcribe")
@@ -301,6 +313,10 @@ def test_environment_overrides(monkeypatch):
     assert config.features.inbound_rms_diagnostics_enabled is True
     assert config.call_recording.enabled is True
     assert config.call_recording.directory == "/var/lib/env-recordings"
+    assert config.call_recording.upload_enabled is True
+    assert config.call_recording.host_directory == "/opt/recov_ten/recordings"
+    assert config.call_recording.object_prefix == "recordings"
+    assert config.call_recording.upload_timeout_seconds == 9.5
     assert config.human_transcript.enabled is True
     assert config.human_transcript.provider == "http_json"
     assert config.human_transcript.http_url == "http://env-asr.example/transcribe"
@@ -341,6 +357,31 @@ def test_human_transcript_requires_recording_enabled(monkeypatch):
         load_config()
 
     assert "recording must be enabled when human_transcript is enabled" in str(
+        exc_info.value
+    )
+
+
+def test_call_recording_upload_requires_postgres_enabled(monkeypatch):
+    monkeypatch.setenv("CALL_RECORDING_ENABLED", "true")
+    monkeypatch.setenv("CALL_RECORDING_UPLOAD_ENABLED", "true")
+    monkeypatch.setenv("CALL_RECORDING_HOST_DIR", "/opt/recov_ten/recordings")
+    monkeypatch.setenv("POSTGRES_ENABLED", "false")
+
+    with pytest.raises(ValueError) as exc_info:
+        load_config()
+
+    assert "postgres.enabled must be true when call_recording upload is enabled" in str(
+        exc_info.value
+    )
+
+
+def test_call_recording_upload_timeout_must_be_positive(monkeypatch):
+    monkeypatch.setenv("CALL_RECORDING_UPLOAD_TIMEOUT_SECONDS", "0")
+
+    with pytest.raises(ValueError) as exc_info:
+        load_config()
+
+    assert "call_recording.upload_timeout_seconds must be positive" in str(
         exc_info.value
     )
 

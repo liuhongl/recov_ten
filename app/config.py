@@ -101,6 +101,10 @@ class FeatureConfig:
 class CallRecordingConfig:
     enabled: bool = False
     directory: str = "/var/lib/freeswitch/recordings"
+    upload_enabled: bool = False
+    host_directory: str = ""
+    object_prefix: str = "recordings"
+    upload_timeout_seconds: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -493,6 +497,30 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
                 "call_recording",
                 "directory",
                 default=CallRecordingConfig.directory,
+            ),
+            upload_enabled=_get_bool(
+                raw,
+                "call_recording",
+                "upload_enabled",
+                default=CallRecordingConfig.upload_enabled,
+            ),
+            host_directory=_get(
+                raw,
+                "call_recording",
+                "host_directory",
+                default=CallRecordingConfig.host_directory,
+            ),
+            object_prefix=_get(
+                raw,
+                "call_recording",
+                "object_prefix",
+                default=CallRecordingConfig.object_prefix,
+            ),
+            upload_timeout_seconds=_get_float(
+                raw,
+                "call_recording",
+                "upload_timeout_seconds",
+                default=CallRecordingConfig.upload_timeout_seconds,
             ),
         ),
         postgres=PostgresConfig(
@@ -995,6 +1023,22 @@ def _apply_env_overrides(config: GatewayConfig) -> GatewayConfig:
                 "CALL_RECORDING_DIR",
                 config.call_recording.directory,
             ),
+            upload_enabled=_env_bool(
+                "CALL_RECORDING_UPLOAD_ENABLED",
+                config.call_recording.upload_enabled,
+            ),
+            host_directory=os.getenv(
+                "CALL_RECORDING_HOST_DIR",
+                config.call_recording.host_directory,
+            ),
+            object_prefix=os.getenv(
+                "CALL_RECORDING_OBJECT_PREFIX",
+                config.call_recording.object_prefix,
+            ),
+            upload_timeout_seconds=_env_float(
+                "CALL_RECORDING_UPLOAD_TIMEOUT_SECONDS",
+                config.call_recording.upload_timeout_seconds,
+            ),
         ),
         postgres=PostgresConfig(
             enabled=_env_bool("POSTGRES_ENABLED", config.postgres.enabled),
@@ -1168,6 +1212,20 @@ def _validate_call_recording_config(config: CallRecordingConfig) -> None:
         raise ValueError(
             "call_recording.directory must not contain whitespace, comma, or braces"
         )
+    if config.upload_enabled and not config.enabled:
+        raise ValueError("call_recording.enabled must be true when upload is enabled")
+    if config.upload_enabled and not config.host_directory.strip():
+        raise ValueError(
+            "call_recording.host_directory is required when upload is enabled"
+        )
+    if not config.object_prefix.strip():
+        raise ValueError("call_recording.object_prefix is required")
+    if any(char in config.object_prefix for char in forbidden):
+        raise ValueError(
+            "call_recording.object_prefix must not contain whitespace, comma, or braces"
+        )
+    if config.upload_timeout_seconds <= 0:
+        raise ValueError("call_recording.upload_timeout_seconds must be positive")
 
 
 def _validate_human_transcript_config(
@@ -1209,6 +1267,10 @@ def _validate_flow_callback_config(config: FlowCallbackConfig) -> None:
 def _validate_cross_feature_config(config: GatewayConfig) -> None:
     if config.flow_callback.enabled and not config.postgres.enabled:
         raise ValueError("postgres must be enabled when flow_callback is enabled")
+    if config.call_recording.upload_enabled and not config.postgres.enabled:
+        raise ValueError(
+            "postgres.enabled must be true when call_recording upload is enabled"
+        )
 
 
 def _validate_rocketmq_config(config: RocketMQConfig) -> None:

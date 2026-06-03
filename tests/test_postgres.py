@@ -4,7 +4,9 @@ import asyncio
 import json
 import threading
 
-from app.config import GatewayConfig, PostgresConfig
+import pytest
+
+from app.config import CallRecordingConfig, GatewayConfig, PostgresConfig
 from app.flow_callback import FlowCallbackEvent
 from app import postgres
 from app.postgres import (
@@ -19,6 +21,7 @@ from app.postgres import (
     build_call_record_transcript_json,
     fallback_prompt_snapshot,
 )
+from app.recording_upload import MinioRecordingStorage, OssConfig, SysOssRecord
 
 
 class FakeAcquire:
@@ -1198,6 +1201,7 @@ def test_postgres_call_record_store_does_not_overwrite_terminal_status():
                 "debt_id": 2049810626160668673,
                 "status": "4",
                 "transcript": '{"turns":[]}',
+                "recording_oss_id": None,
             }
 
         async def execute(self, query, *args):
@@ -1216,6 +1220,213 @@ def test_postgres_call_record_store_does_not_overwrite_terminal_status():
     )
 
     assert updated is False
+
+
+def test_postgres_call_record_store_reads_active_oss_config():
+    class Conn:
+        async def fetchrow(self, query, *args):
+            assert "from public.sys_oss_config" in query.lower()
+            assert "status = '0'" in query
+            assert args == ()
+            return {
+                "endpoint": "minio.example:9000",
+                "bucket_name": "recov",
+                "access_key": "access",
+                "secret_key": "secret",
+                "prefix": "business",
+                "is_https": "Y",
+                "region": "",
+                "domain": "cdn.example",
+            }
+
+    store = PostgresCallRecordStore(FakePool(Conn()))
+
+    config = asyncio.run(store.get_active_oss_config())
+
+    assert config == OssConfig(
+        endpoint="minio.example:9000",
+        bucket_name="recov",
+        access_key="access",
+        secret_key="secret",
+        prefix="business",
+        is_https=True,
+        region="us-east-1",
+        domain="cdn.example",
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        ("Y", True),
+        ("true", True),
+        ("1", True),
+        ("yes", True),
+        ("N", False),
+        ("false", False),
+        ("0", False),
+        ("no", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_postgres_call_record_store_parses_oss_https_flag(raw_value, expected):
+    class Conn:
+        async def fetchrow(self, query, *args):
+            return {
+                "endpoint": "minio.example:9000",
+                "bucket_name": "recov",
+                "access_key": "access",
+                "secret_key": "secret",
+                "prefix": "",
+                "is_https": raw_value,
+                "region": "cn-hz",
+                "domain": "",
+            }
+
+    store = PostgresCallRecordStore(FakePool(Conn()))
+
+    config = asyncio.run(store.get_active_oss_config())
+
+    assert config is not None
+    assert config.is_https is expected
+
+
+def test_postgres_call_record_store_creates_sys_oss_and_marks_recording_uploaded():
+    class Conn:
+        def __init__(self):
+            self.executed = []
+
+        def transaction(self):
+            return FakeTransaction()
+
+        async def fetchrow(self, query, *args):
+            assert "from public.call_record" in query.lower()
+            assert args == (990000000000032001,)
+            return {
+                "id": 990000000000032001,
+                "debt_id": 2049810626160668673,
+                "status": "4",
+                "transcript": '{"turns":[]}',
+                "recording_oss_id": None,
+            }
+
+        async def execute(self, query, *args):
+            self.executed.append((query, args))
+            return "UPDATE 1" if "public.call_record" in query else "INSERT 0 1"
+
+    conn = Conn()
+    store = PostgresCallRecordStore(FakePool(conn))
+
+    created = asyncio.run(
+        store.create_sys_oss_record(
+            SysOssRecord(
+                oss_id=123456789,
+                tenant_id="000000",
+                file_name="recordings/000000/20260603/990000000000032001.wav",
+                original_name="990000000000032001.wav",
+                file_suffix=".wav",
+                url="http://minio.example/recov/recordings/000000/20260603/990000000000032001.wav",
+                ext1='{"fileSize":14,"contentType":"audio/wav"}',
+                service="minio",
+            )
+        )
+    )
+    marked = asyncio.run(
+        store.mark_recording_uploaded(
+            {
+                "callId": "990000000000032001",
+                "debtId": "2049810626160668673",
+            },
+            123456789,
+        )
+    )
+
+    assert created is True
+    assert marked is True
+    assert len(conn.executed) == 2
+    insert_query, insert_args = conn.executed[0]
+    assert "insert into public.sys_oss" in insert_query.lower()
+    assert insert_args[:8] == (
+        123456789,
+        "000000",
+        "recordings/000000/20260603/990000000000032001.wav",
+        "990000000000032001.wav",
+        ".wav",
+        "http://minio.example/recov/recordings/000000/20260603/990000000000032001.wav",
+        '{"fileSize":14,"contentType":"audio/wav"}',
+        "minio",
+    )
+    update_query, update_args = conn.executed[1]
+    assert "recording_oss_id" in update_query
+    assert update_args == (990000000000032001, 123456789)
+
+
+def test_postgres_call_record_store_does_not_overwrite_recording_oss_id():
+    class Conn:
+        def __init__(self):
+            self.executed = []
+
+        def transaction(self):
+            return FakeTransaction()
+
+        async def fetchrow(self, query, *args):
+            assert "from public.call_record" in query.lower()
+            assert args == (990000000000032001,)
+            return {
+                "id": 990000000000032001,
+                "debt_id": 2049810626160668673,
+                "status": "4",
+                "transcript": '{"turns":[]}',
+                "recording_oss_id": 987654321,
+            }
+
+        async def execute(self, query, *args):
+            self.executed.append((query, args))
+            return "UPDATE 1"
+
+    conn = Conn()
+    store = PostgresCallRecordStore(FakePool(conn))
+
+    marked = asyncio.run(
+        store.mark_recording_uploaded(
+            {
+                "callId": "990000000000032001",
+                "debtId": "2049810626160668673",
+            },
+            123456789,
+        )
+    )
+
+    assert marked is False
+    assert conn.executed == []
+
+
+def test_postgres_call_record_store_reads_existing_recording_oss_id():
+    class Conn:
+        async def fetchrow(self, query, *args):
+            assert "from public.call_record" in query.lower()
+            assert args == (990000000000032001,)
+            return {
+                "id": 990000000000032001,
+                "debt_id": 2049810626160668673,
+                "status": "4",
+                "transcript": '{"turns":[]}',
+                "recording_oss_id": 987654321,
+            }
+
+    store = PostgresCallRecordStore(FakePool(Conn()))
+
+    oss_id = asyncio.run(
+        store.get_existing_recording_oss_id(
+            {
+                "callId": "990000000000032001",
+                "debtId": "2049810626160668673",
+            }
+        )
+    )
+
+    assert oss_id == 987654321
 
 
 def test_postgres_call_result_writer_updates_call_record_with_simple_transcript():
@@ -1354,6 +1565,109 @@ def test_postgres_call_result_writer_emits_success_flow_callback_after_transcrip
         assert flow_events[0].task_id == "task-1"
         assert flow_events[0].business_id == "990000000000032001"
         assert flow_events[0].message == "外呼完成，转写已写入"
+
+    asyncio.run(assert_writer())
+
+
+def test_postgres_call_result_writer_keeps_success_when_recording_upload_fails():
+    async def assert_writer():
+        flow_events: list[FlowCallbackEvent] = []
+        uploaded_payloads = []
+
+        class Store:
+            async def mark_transcript_completed(self, context, transcript_json):
+                return True
+
+        class FailingRecordingUploader:
+            async def upload_from_call_result(self, payload):
+                uploaded_payloads.append(payload)
+                raise RuntimeError("minio unavailable")
+
+        class FakeFlowCallbackWriter:
+            def publish(self, event):
+                flow_events.append(event)
+                return True
+
+        writer = PostgresCallResultWriter(
+            Store(),
+            flow_callback_writer=FakeFlowCallbackWriter(),
+            recording_uploader=FailingRecordingUploader(),
+        )
+        writer.start()
+        try:
+            assert writer.enqueue_nowait(
+                {
+                    "call_id": "internal-media-call",
+                    "recording_path": (
+                        "/var/lib/freeswitch/recordings/990000000000032001.wav"
+                    ),
+                    "context": {
+                        "tenantId": "000000",
+                        "taskId": "task-1",
+                        "callId": "990000000000032001",
+                        "debtId": "2049810626160668673",
+                    },
+                    "turns": [{"role": "assistant", "text": "您好"}],
+                }
+            )
+            await asyncio.wait_for(writer.queue.join(), timeout=1.0)
+        finally:
+            await writer.stop()
+
+        assert len(uploaded_payloads) == 1
+        assert len(flow_events) == 1
+        assert flow_events[0].status == "SUCCESS"
+        assert flow_events[0].message == "外呼完成，转写已写入"
+
+    asyncio.run(assert_writer())
+
+
+def test_postgres_call_result_writer_uploads_recording_before_success_callback():
+    async def assert_writer():
+        events = []
+
+        class Store:
+            async def mark_transcript_completed(self, context, transcript_json):
+                events.append("transcript")
+                return True
+
+        class RecordingUploader:
+            async def upload_from_call_result(self, payload):
+                events.append("recording_upload")
+                return 123456789
+
+        class FakeFlowCallbackWriter:
+            def publish(self, event):
+                events.append("success_callback")
+                return True
+
+        writer = PostgresCallResultWriter(
+            Store(),
+            flow_callback_writer=FakeFlowCallbackWriter(),
+            recording_uploader=RecordingUploader(),
+        )
+        writer.start()
+        try:
+            assert writer.enqueue_nowait(
+                {
+                    "call_id": "internal-media-call",
+                    "recording_path": (
+                        "/var/lib/freeswitch/recordings/990000000000032001.wav"
+                    ),
+                    "context": {
+                        "tenantId": "000000",
+                        "taskId": "task-1",
+                        "callId": "990000000000032001",
+                        "debtId": "2049810626160668673",
+                    },
+                    "turns": [{"role": "assistant", "text": "您好"}],
+                }
+            )
+            await asyncio.wait_for(writer.queue.join(), timeout=1.0)
+        finally:
+            await writer.stop()
+
+        assert events == ["transcript", "recording_upload", "success_callback"]
 
     asyncio.run(assert_writer())
 
@@ -1725,7 +2039,8 @@ async def _assert_runtime_disabled_does_not_create_store_or_writer() -> None:
 async def _assert_runtime_success_creates_prompt_store() -> None:
     runtime = PostgresRuntime(
         GatewayConfig(
-            postgres=PostgresConfig(enabled=True, dsn_env="TEST_POSTGRES_DSN")
+            postgres=PostgresConfig(enabled=True, dsn_env="TEST_POSTGRES_DSN"),
+            call_recording=CallRecordingConfig(upload_timeout_seconds=7.5),
         ),
         fallback_instructions="fallback",
     )
@@ -1737,6 +2052,9 @@ async def _assert_runtime_success_creates_prompt_store() -> None:
     assert isinstance(runtime.call_record_store, PostgresCallRecordStore)
     assert isinstance(runtime.call_record_updater, ThreadsafeCallRecordUpdater)
     assert isinstance(runtime.call_result_writer, PostgresCallResultWriter)
+    assert runtime.recording_uploader is not None
+    assert isinstance(runtime.recording_uploader.storage, MinioRecordingStorage)
+    assert runtime.recording_uploader.storage.timeout_seconds == 7.5
 
     await runtime.stop()
     assert runtime.pool is None
@@ -1744,6 +2062,7 @@ async def _assert_runtime_success_creates_prompt_store() -> None:
     assert runtime.call_record_store is None
     assert runtime.call_record_updater is None
     assert runtime.call_result_writer is None
+    assert runtime.recording_uploader is None
 
 
 async def _assert_missing_dsn_does_not_block_startup() -> None:

@@ -7,6 +7,7 @@ from urllib.request import Request, urlopen
 
 from app.browser_prompt_test import BrowserPromptTestStore
 from app.config import (
+    CallRecordingConfig,
     GatewayConfig,
     HumanTranscriptConfig,
     RocketMQAclConfig,
@@ -187,6 +188,252 @@ def test_call_status_endpoint_returns_call():
         thread.join(timeout=3)
 
 
+def test_call_recording_endpoint_serves_wav_from_host_directory(tmp_path):
+    recording_file = tmp_path / "20260603" / "call-1.wav"
+    recording_file.parent.mkdir()
+    recording_file.write_bytes(b"RIFF-test-wav")
+    manager = FakeCallManager()
+    manager.calls = [
+        {
+            "call_id": "call-1",
+            "status": "completed",
+            "recording_path": "/var/lib/freeswitch/recordings/20260603/call-1.wav",
+        }
+    ]
+    config = GatewayConfig(
+        server=ServerConfig(host="127.0.0.1", port=0),
+        call_recording=CallRecordingConfig(
+            enabled=True,
+            directory="/var/lib/freeswitch/recordings",
+            host_directory=str(tmp_path),
+        ),
+    )
+    server = HealthServer(config, call_manager=manager)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.address
+        with urlopen(
+            f"http://{host}:{port}/calls/call-1/recording",
+            timeout=3,
+        ) as response:
+            body = response.read()
+
+        assert response.status == 200
+        assert response.headers["Content-Type"].startswith("audio/wav")
+        assert response.headers["Cache-Control"] == "no-store"
+        assert body == b"RIFF-test-wav"
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
+def test_call_recording_endpoint_supports_byte_range_requests(tmp_path):
+    recording_file = tmp_path / "20260603" / "call-1.wav"
+    recording_file.parent.mkdir()
+    recording_file.write_bytes(b"RIFF-test-wav")
+    manager = FakeCallManager()
+    manager.calls = [
+        {
+            "call_id": "call-1",
+            "status": "completed",
+            "recording_path": "/var/lib/freeswitch/recordings/20260603/call-1.wav",
+        }
+    ]
+    config = GatewayConfig(
+        server=ServerConfig(host="127.0.0.1", port=0),
+        call_recording=CallRecordingConfig(
+            enabled=True,
+            directory="/var/lib/freeswitch/recordings",
+            host_directory=str(tmp_path),
+        ),
+    )
+    server = HealthServer(config, call_manager=manager)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.address
+        request = Request(
+            f"http://{host}:{port}/calls/call-1/recording",
+            headers={"Range": "bytes=0-3"},
+        )
+        with urlopen(request, timeout=3) as response:
+            body = response.read()
+
+        assert response.status == 206
+        assert response.headers["Content-Type"].startswith("audio/wav")
+        assert response.headers["Accept-Ranges"] == "bytes"
+        assert response.headers["Content-Range"] == "bytes 0-3/13"
+        assert body == b"RIFF"
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
+def test_call_recording_endpoint_supports_head_requests(tmp_path):
+    recording_file = tmp_path / "20260603" / "call-1.wav"
+    recording_file.parent.mkdir()
+    recording_file.write_bytes(b"RIFF-test-wav")
+    manager = FakeCallManager()
+    manager.calls = [
+        {
+            "call_id": "call-1",
+            "status": "completed",
+            "recording_path": "/var/lib/freeswitch/recordings/20260603/call-1.wav",
+        }
+    ]
+    config = GatewayConfig(
+        server=ServerConfig(host="127.0.0.1", port=0),
+        call_recording=CallRecordingConfig(
+            enabled=True,
+            directory="/var/lib/freeswitch/recordings",
+            host_directory=str(tmp_path),
+        ),
+    )
+    server = HealthServer(config, call_manager=manager)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.address
+        request = Request(
+            f"http://{host}:{port}/calls/call-1/recording",
+            method="HEAD",
+        )
+        with urlopen(request, timeout=3) as response:
+            body = response.read()
+
+        assert response.status == 200
+        assert response.headers["Content-Type"].startswith("audio/wav")
+        assert response.headers["Accept-Ranges"] == "bytes"
+        assert response.headers["Content-Length"] == "13"
+        assert body == b""
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
+def test_call_recording_endpoint_rejects_invalid_byte_range(tmp_path):
+    recording_file = tmp_path / "20260603" / "call-1.wav"
+    recording_file.parent.mkdir()
+    recording_file.write_bytes(b"RIFF-test-wav")
+    manager = FakeCallManager()
+    manager.calls = [
+        {
+            "call_id": "call-1",
+            "status": "completed",
+            "recording_path": "/var/lib/freeswitch/recordings/20260603/call-1.wav",
+        }
+    ]
+    config = GatewayConfig(
+        server=ServerConfig(host="127.0.0.1", port=0),
+        call_recording=CallRecordingConfig(
+            enabled=True,
+            directory="/var/lib/freeswitch/recordings",
+            host_directory=str(tmp_path),
+        ),
+    )
+    server = HealthServer(config, call_manager=manager)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.address
+        request = Request(
+            f"http://{host}:{port}/calls/call-1/recording",
+            headers={"Range": "bytes=99-120"},
+        )
+        try:
+            urlopen(request, timeout=3)
+        except HTTPError as err:
+            assert err.code == 416
+            assert err.headers["Content-Range"] == "bytes */13"
+            assert err.read() == b""
+        else:
+            raise AssertionError("expected invalid byte range to return 416")
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
+def test_call_recording_endpoint_returns_404_when_recording_is_missing(tmp_path):
+    manager = FakeCallManager()
+    manager.calls = [
+        {
+            "call_id": "call-1",
+            "status": "completed",
+            "recording_path": "/var/lib/freeswitch/recordings/20260603/call-1.wav",
+        }
+    ]
+    config = GatewayConfig(
+        server=ServerConfig(host="127.0.0.1", port=0),
+        call_recording=CallRecordingConfig(
+            enabled=True,
+            directory="/var/lib/freeswitch/recordings",
+            host_directory=str(tmp_path),
+        ),
+    )
+    server = HealthServer(config, call_manager=manager)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.address
+        try:
+            urlopen(f"http://{host}:{port}/calls/call-1/recording", timeout=3)
+        except HTTPError as err:
+            payload = json.loads(err.read().decode("utf-8"))
+            assert err.code == 404
+            assert payload["status"] == "error"
+            assert "recording file not found" in payload["error"]
+        else:
+            raise AssertionError("expected missing recording file to return 404")
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
+def test_call_recording_endpoint_rejects_recording_path_outside_directory(tmp_path):
+    outside_file = tmp_path.parent / "outside.wav"
+    outside_file.write_bytes(b"RIFF-outside")
+    manager = FakeCallManager()
+    manager.calls = [
+        {
+            "call_id": "call-1",
+            "status": "completed",
+            "recording_path": "/var/lib/freeswitch/outside.wav",
+        }
+    ]
+    config = GatewayConfig(
+        server=ServerConfig(host="127.0.0.1", port=0),
+        call_recording=CallRecordingConfig(
+            enabled=True,
+            directory="/var/lib/freeswitch/recordings",
+            host_directory=str(tmp_path),
+        ),
+    )
+    server = HealthServer(config, call_manager=manager)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.address
+        try:
+            urlopen(f"http://{host}:{port}/calls/call-1/recording", timeout=3)
+        except HTTPError as err:
+            payload = json.loads(err.read().decode("utf-8"))
+            assert err.code == 400
+            assert payload["status"] == "error"
+            assert "outside call_recording.directory" in payload["error"]
+        else:
+            raise AssertionError("expected unsafe recording path to return 400")
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
 def test_outbound_test_page_is_served():
     config = GatewayConfig(server=ServerConfig(host="127.0.0.1", port=0))
     server = HealthServer(config, call_manager=FakeCallManager())
@@ -237,6 +484,17 @@ def test_outbound_test_page_is_served():
         assert "handoff-local-" not in body
         assert "localPocOpeningPayload" not in body
         assert "formPayload()" in body
+        assert "<th>时间</th>" in body
+        assert "function callTimeLabel(call)" in body
+        assert "<th>录音</th>" in body
+        assert "function recordingCell(call)" in body
+        assert "function hasActiveRecordingPlayback()" in body
+        assert "preservePlayback && hasActiveRecordingPlayback()" in body
+        assert '`/calls/${encodeURIComponent(call.call_id)}/recording`' in body
+        assert "<audio controls preload=\"metadata\"" in body
+        assert 'target="_blank"' in body
+        assert 'download="${escapeHtml(recordingFileName(call))}"' in body
+        assert "window.setInterval(() => refreshCalls({ preservePlayback: true }), 2500);" in body
         assert 'id="identityName"' in body
         assert 'name="identityName"' in body
         assert 'value="项目员工"' in body
@@ -1157,22 +1415,21 @@ class FakeCallManager:
         self.handoff_request = None
         self.handoff_claim = None
         self.handoff_transcript = None
+        self.calls = [
+            {"call_id": "call-1", "status": "queued"},
+            {"call_id": "call-2", "status": "waiting_agent"},
+            {"call_id": "call-3", "status": "completed"},
+        ]
 
     def create_call(self, payload):
         self.created_payload = payload
         return {"call_id": "call-1", "status": "queued"}
 
     def list_calls(self, *, limit=50):
-        return [
-            {"call_id": "call-1", "status": "queued"},
-            {"call_id": "call-2", "status": "waiting_agent"},
-            {"call_id": "call-3", "status": "completed"},
-        ]
+        return self.calls[:limit]
 
     def get_call(self, call_id):
-        if call_id != "call-1":
-            return None
-        return {"call_id": "call-1", "status": "queued"}
+        return next((call for call in self.calls if call.get("call_id") == call_id), None)
 
     def request_hangup(self, call_id, *, cause="NORMAL_CLEARING"):
         return {"call_id": call_id, "status": "hangup_requested", "cause": cause}

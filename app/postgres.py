@@ -32,6 +32,12 @@ from .opening import (
     OpeningRequest,
     build_business_opening_request,
 )
+from .recording_upload import (
+    MinioRecordingStorage,
+    OssConfig,
+    RecordingUploadService,
+    SysOssRecord,
+)
 
 LOGGER = logging.getLogger(__name__)
 POSTGRES_APPLICATION_NAME = "recov_ten_gateway"
@@ -109,7 +115,8 @@ select
   id,
   debt_id,
   status,
-  transcript
+  transcript,
+  recording_oss_id
 from public.call_record
 where id = $1
 limit 1
@@ -150,6 +157,37 @@ set status = '4',
     update_time = current_timestamp
 where id = $1
   and status = '1'
+"""
+
+CALL_RECORDING_OSS_UPDATE_SQL = """
+update public.call_record
+set recording_oss_id = $2,
+    update_time = current_timestamp
+where id = $1
+"""
+
+SYS_OSS_CONFIG_SELECT_SQL = """
+select endpoint, bucket_name, access_key, secret_key, prefix, is_https, region, domain
+from public.sys_oss_config
+where status = '0'
+limit 1
+"""
+
+SYS_OSS_INSERT_SQL = """
+insert into public.sys_oss (
+  oss_id,
+  tenant_id,
+  file_name,
+  original_name,
+  file_suffix,
+  url,
+  ext1,
+  service,
+  create_time,
+  update_time
+) values (
+  $1, $2, $3, $4, $5, $6, $7, $8, current_timestamp, current_timestamp
+)
 """
 
 CALL_RECORD_HISTORICAL_SUMMARIES_SQL = """
@@ -372,6 +410,10 @@ class AsyncBusinessPromptStoreProtocol(Protocol):
         *,
         fallback_instructions: str,
     ) -> BusinessPromptPreparation | None: ...
+
+
+class RecordingUploaderProtocol(Protocol):
+    async def upload_from_call_result(self, payload: Mapping[str, Any]) -> int | None: ...
 
 
 class PostgresPromptStore:
@@ -599,6 +641,100 @@ class PostgresCallRecordStore:
                 )
                 return _execute_updated_row(result)
 
+    async def get_active_oss_config(self) -> OssConfig | None:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(SYS_OSS_CONFIG_SELECT_SQL)
+        if row is None:
+            return None
+        return _oss_config_from_row(row)
+
+    async def create_sys_oss_record(self, record: SysOssRecord) -> bool:
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                SYS_OSS_INSERT_SQL,
+                record.oss_id,
+                record.tenant_id,
+                record.file_name,
+                record.original_name,
+                record.file_suffix,
+                record.url,
+                record.ext1,
+                record.service,
+            )
+        return _execute_inserted_row(result)
+
+    async def get_existing_recording_oss_id(
+        self,
+        context: Mapping[str, Any],
+    ) -> int | None:
+        params = _business_call_record_params(context)
+        if params is None:
+            LOGGER.warning("call_record_recording_lookup_skipped_missing_context")
+            return None
+
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(CALL_RECORD_SELECT_SQL, params.call_id)
+        if row is None:
+            LOGGER.warning(
+                "call_record_recording_lookup_skipped_missing callId=%s",
+                params.call_id,
+            )
+            return None
+        debt_id = _context_int(_row_value(row, "debt_id"))
+        if debt_id != params.debt_id:
+            LOGGER.warning(
+                "call_record_recording_lookup_skipped_debt_mismatch "
+                "callId=%s expectedDebtId=%s",
+                params.call_id,
+                params.debt_id,
+            )
+            return None
+        return _context_int(_row_value(row, "recording_oss_id"))
+
+    async def mark_recording_uploaded(
+        self,
+        context: Mapping[str, Any],
+        oss_id: int,
+    ) -> bool:
+        params = _business_call_record_params(context)
+        if params is None:
+            LOGGER.warning("call_record_recording_update_skipped_missing_context")
+            return False
+
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(CALL_RECORD_SELECT_SQL, params.call_id)
+                if row is None:
+                    LOGGER.warning(
+                        "call_record_recording_update_skipped_missing callId=%s",
+                        params.call_id,
+                    )
+                    return False
+                debt_id = _context_int(_row_value(row, "debt_id"))
+                if debt_id != params.debt_id:
+                    LOGGER.warning(
+                        "call_record_recording_update_skipped_debt_mismatch "
+                        "callId=%s expectedDebtId=%s",
+                        params.call_id,
+                        params.debt_id,
+                    )
+                    return False
+                existing_oss_id = _context_int(_row_value(row, "recording_oss_id"))
+                if existing_oss_id is not None:
+                    LOGGER.warning(
+                        "call_record_recording_update_skipped_already_uploaded "
+                        "callId=%s existingOssId=%s",
+                        params.call_id,
+                        existing_oss_id,
+                    )
+                    return False
+                result = await conn.execute(
+                    CALL_RECORDING_OSS_UPDATE_SQL,
+                    params.call_id,
+                    oss_id,
+                )
+                return _execute_updated_row(result)
+
     async def _update_status(
         self,
         context: Mapping[str, Any],
@@ -711,9 +847,11 @@ class PostgresCallResultWriter:
         *,
         max_queue_size: int = 100,
         flow_callback_writer: FlowCallbackWriterProtocol | None = None,
+        recording_uploader: RecordingUploaderProtocol | None = None,
     ) -> None:
         self.store = store
         self.flow_callback_writer = flow_callback_writer
+        self.recording_uploader = recording_uploader
         self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(
             maxsize=max_queue_size
         )
@@ -801,6 +939,7 @@ class PostgresCallResultWriter:
                     else:
                         self._publish_failure_callback(payload, context)
                 else:
+                    await self._upload_recording(payload)
                     self._publish_success_callback(payload, context)
             except Exception:
                 LOGGER.warning(
@@ -811,6 +950,18 @@ class PostgresCallResultWriter:
                 self._publish_failure_callback(payload, context)
             finally:
                 self.queue.task_done()
+
+    async def _upload_recording(self, payload: Mapping[str, Any]) -> None:
+        if self.recording_uploader is None:
+            return
+        try:
+            await self.recording_uploader.upload_from_call_result(payload)
+        except Exception:
+            LOGGER.warning(
+                "recording_upload_failed call_id=%s",
+                payload.get("call_id"),
+                exc_info=True,
+            )
 
     def _publish_success_callback(
         self,
@@ -933,6 +1084,7 @@ class PostgresRuntime:
         fallback_instructions: str,
         flow_callback_writer: FlowCallbackWriterProtocol | None = None,
     ) -> None:
+        self.gateway_config = config
         self.config = config.postgres
         self.fallback_instructions = fallback_instructions
         self.flow_callback_writer = flow_callback_writer
@@ -942,6 +1094,7 @@ class PostgresRuntime:
         self.call_destination_resolver: ThreadsafeCallDestinationResolver | None = None
         self.call_record_store: PostgresCallRecordStore | None = None
         self.call_record_updater: ThreadsafeCallRecordUpdater | None = None
+        self.recording_uploader: RecordingUploadService | None = None
         self.call_result_writer: PostgresCallResultWriter | None = None
 
     async def start(self) -> None:
@@ -990,9 +1143,19 @@ class PostgresRuntime:
             self.call_record_store,
             timeout_seconds=self.config.command_timeout_seconds,
         )
+        self.recording_uploader = RecordingUploadService(
+            self.call_record_store,
+            MinioRecordingStorage(
+                timeout_seconds=(
+                    self.gateway_config.call_recording.upload_timeout_seconds
+                )
+            ),
+            self.gateway_config.call_recording,
+        )
         self.call_result_writer = PostgresCallResultWriter(
             self.call_record_store,
             flow_callback_writer=self.flow_callback_writer,
+            recording_uploader=self.recording_uploader,
         )
         self.call_result_writer.start()
 
@@ -1008,6 +1171,7 @@ class PostgresRuntime:
         self.call_destination_resolver = None
         self.call_record_store = None
         self.call_record_updater = None
+        self.recording_uploader = None
         self.call_result_writer = None
 
 
@@ -1246,6 +1410,35 @@ def _execute_updated_row(result: object) -> bool:
         return False
     parts = result.split()
     return bool(parts and parts[-1] != "0")
+
+
+def _execute_inserted_row(result: object) -> bool:
+    if not isinstance(result, str):
+        return False
+    return result.startswith("INSERT")
+
+
+def _oss_config_from_row(row: Any) -> OssConfig:
+    region = _context_text(_row_value(row, "region")) or "us-east-1"
+    return OssConfig(
+        endpoint=_context_text(_row_value(row, "endpoint")) or "",
+        bucket_name=_context_text(_row_value(row, "bucket_name")) or "",
+        access_key=_context_text(_row_value(row, "access_key")) or "",
+        secret_key=_context_text(_row_value(row, "secret_key")) or "",
+        prefix=_context_text(_row_value(row, "prefix")) or "",
+        is_https=_oss_config_bool(_row_value(row, "is_https")),
+        region=region,
+        domain=_context_text(_row_value(row, "domain")) or "",
+    )
+
+
+def _oss_config_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = _context_text(value)
+    if text is None:
+        return False
+    return text.lower() in {"1", "true", "y", "yes"}
 
 
 def _voice_selection_from_row(row: Any | None) -> VoiceSelection | None:

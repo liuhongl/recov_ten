@@ -195,6 +195,7 @@ async def _serve(config, *, media_mode: str) -> None:
                 outbound_manager.get_prompt_snapshot,
             ),
             call_context_provider=outbound_manager.get_call_context,
+            call_recording_path_provider=outbound_manager.get_call_recording_path,
             call_result_writer=postgres_runtime.call_result_writer,
             on_media_connected=outbound_manager.mark_media_connected,
             on_media_disconnected=outbound_manager.mark_media_disconnected,

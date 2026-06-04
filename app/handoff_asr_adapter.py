@@ -84,7 +84,7 @@ class DoubaoS2SAudioTranscriber:
     config: DoubaoS2SSessionConfig
     timeout_seconds: int = 60
     chunk_ms: int = 20
-    send_delay_ms: int = 0
+    send_delay_ms: int = 5
     trailing_silence_ms: int = 1200
     audio_probe_runner: Callable[..., Any] = run_doubao_s2s_audio_probe
 
@@ -188,7 +188,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=9200)
     parser.add_argument("--timeout-seconds", type=int, default=60)
     parser.add_argument("--chunk-ms", type=int, default=20)
-    parser.add_argument("--send-delay-ms", type=int, default=0)
+    parser.add_argument("--send-delay-ms", type=int, default=5)
     parser.add_argument("--trailing-silence-ms", type=int, default=1200)
     args = parser.parse_args()
 

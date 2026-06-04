@@ -14,7 +14,11 @@ from app.handoff_asr_adapter import (
     HandoffAsrHttpHandler,
     HandoffAsrProcessor,
 )
-from app.doubao_s2s_client import DoubaoS2SCredentials, DoubaoS2SSessionConfig
+from app.doubao_s2s_client import (
+    DoubaoS2SCredentials,
+    DoubaoS2SProbeResult,
+    DoubaoS2SSessionConfig,
+)
 from app.wav_io import write_pcm16_wav
 
 
@@ -189,6 +193,24 @@ def test_doubao_audio_transcriber_wraps_probe_timeout(tmp_path):
     assert str(exc.value) == "Doubao S2S ASR failed: probe timed out"
 
 
+def test_doubao_audio_transcriber_defaults_to_small_pacing_delay(tmp_path):
+    wav_path = tmp_path / "agent.wav"
+    write_pcm16_wav(wav_path, b"\x01\x00\x02\x00", sample_rate=16000)
+    seen_kwargs = {}
+    transcriber = DoubaoS2SAudioTranscriber(
+        credentials=DoubaoS2SCredentials(
+            app_id="app-id",
+            access_token="access-token",
+        ),
+        config=DoubaoS2SSessionConfig(),
+        audio_probe_runner=capturing_probe(seen_kwargs),
+    )
+
+    assert transcriber.transcribe(str(wav_path)) == "您好。"
+
+    assert seen_kwargs["send_delay_ms"] == 5
+
+
 class FakeTranscriber:
     def __init__(self, transcripts: dict[str, str]) -> None:
         self.transcripts = transcripts
@@ -199,3 +221,26 @@ class FakeTranscriber:
 
 async def raising_timeout_probe(*args, **kwargs):
     raise TimeoutError("probe timed out")
+
+
+def capturing_probe(seen_kwargs):
+    async def probe(*args, **kwargs):
+        seen_kwargs.update(kwargs)
+        return (
+            DoubaoS2SProbeResult(
+                session_id="session-1",
+                speaker="speaker-1",
+                input_text="",
+                input_audio_bytes=len(kwargs["input_pcm16_16k"]),
+                output_audio_bytes=0,
+                input_transcript="您好。",
+                output_transcript="",
+                event_counts={},
+                sanitized_events=[],
+                first_audio_delta_ms=None,
+                response_done_ms=None,
+            ),
+            b"",
+        )
+
+    return probe

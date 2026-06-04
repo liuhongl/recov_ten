@@ -62,11 +62,12 @@ uv run python -m app.handoff_asr_adapter \
   --env-file .env \
   --host 127.0.0.1 \
   --port 9200 \
-  --send-delay-ms 0
+  --send-delay-ms 5
 ```
 
-这是录音文件转写服务，不是实时通话流，`--send-delay-ms 0` 会尽快发送 WAV
-帧，避免两路录音顺序转写时超过网关 HTTP timeout。
+这是录音文件转写服务，不是实时通话流，但豆包 S2S 仍需要轻量 pacing
+来稳定触发 ASR。实测 `--send-delay-ms 0` 可能触发
+`DialogAudioIdleTimeoutError`，当前先用 `5ms` 兼顾速度和稳定性。
 
 网关侧配置：
 

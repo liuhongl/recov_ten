@@ -80,6 +80,7 @@ def test_load_config_from_toml(tmp_path):
             metrics_enabled = true
             recording_enabled = true
             recording_dir = "/tmp/recov_ten_handoff_test"
+            recording_host_dir = "./freeswitch-local/recordings/handoff"
             inbound_rms_diagnostics_enabled = true
 
             [call_recording]
@@ -177,6 +178,7 @@ def test_load_config_from_toml(tmp_path):
     assert config.features.metrics_enabled is True
     assert config.features.recording_enabled is True
     assert config.features.recording_dir == "/tmp/recov_ten_handoff_test"
+    assert config.features.recording_host_dir == "./freeswitch-local/recordings/handoff"
     assert config.features.inbound_rms_diagnostics_enabled is True
     assert config.call_recording.enabled is True
     assert config.call_recording.directory == "/var/lib/freeswitch/recordings"
@@ -257,6 +259,7 @@ def test_environment_overrides(monkeypatch):
     monkeypatch.setenv("HUMAN_TRANSCRIPT_PROVIDER", "http_json")
     monkeypatch.setenv("HUMAN_TRANSCRIPT_HTTP_URL", "http://env-asr.example/transcribe")
     monkeypatch.setenv("HUMAN_TRANSCRIPT_TIMEOUT_SECONDS", "13.5")
+    monkeypatch.setenv("RECORDING_HOST_DIR", "/opt/recov_ten/handoff-recordings")
     monkeypatch.setenv("FLOW_CALLBACK_ENABLED", "true")
     monkeypatch.setenv("FLOW_CALLBACK_TOPIC", "env-flow-callback")
     monkeypatch.setenv("FLOW_CALLBACK_PRODUCER_GROUP", "env-producer")
@@ -316,6 +319,7 @@ def test_environment_overrides(monkeypatch):
     assert config.features.metrics_enabled is False
     assert config.features.recording_enabled is True
     assert config.features.recording_dir == "/tmp/env-recordings"
+    assert config.features.recording_host_dir == "/opt/recov_ten/handoff-recordings"
     assert config.features.inbound_rms_diagnostics_enabled is True
     assert config.call_recording.enabled is True
     assert config.call_recording.directory == "/var/lib/env-recordings"

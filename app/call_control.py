@@ -104,6 +104,8 @@ class HandoffState:
     recording_error: str | None = None
     customer_recording_path: str | None = None
     agent_recording_path: str | None = None
+    customer_recording_host_path: str | None = None
+    agent_recording_host_path: str | None = None
     recording_started_at_ms: int | None = None
     recording_stopped_at_ms: int | None = None
     ai_turns: list[dict[str, Any]] = field(default_factory=list)
@@ -138,6 +140,8 @@ class HandoffState:
             "recording_error": self.recording_error,
             "customer_recording_path": self.customer_recording_path,
             "agent_recording_path": self.agent_recording_path,
+            "customer_recording_host_path": self.customer_recording_host_path,
+            "agent_recording_host_path": self.agent_recording_host_path,
             "recording_started_at_ms": self.recording_started_at_ms,
             "recording_stopped_at_ms": self.recording_stopped_at_ms,
             "ai_turns": list(self.ai_turns),
@@ -392,17 +396,27 @@ def build_handoff_audio_stream_stop_command(*, call_id: str) -> str:
 
 def _handoff_recording_paths(
     recording_dir: str,
+    recording_host_dir: str,
     *,
     customer_call_id: str,
     agent_uuid: str,
-) -> tuple[str, str]:
+) -> tuple[str, str, str, str]:
     base_dir = recording_dir.rstrip("/")
     _require_safe_token(base_dir, "recording_dir")
+    host_base_dir = recording_host_dir.rstrip("/")
+    if host_base_dir:
+        _require_safe_token(host_base_dir, "recording_host_dir")
+    else:
+        host_base_dir = base_dir
     _require_safe_token(customer_call_id, "customer_call_id")
     _require_safe_token(agent_uuid, "agent_uuid")
+    customer_filename = f"{customer_call_id}-customer.wav"
+    agent_filename = f"{customer_call_id}-{agent_uuid}-agent.wav"
     return (
-        f"{base_dir}/{customer_call_id}-customer.wav",
-        f"{base_dir}/{customer_call_id}-{agent_uuid}-agent.wav",
+        f"{base_dir}/{customer_filename}",
+        f"{base_dir}/{agent_filename}",
+        f"{host_base_dir}/{customer_filename}",
+        f"{host_base_dir}/{agent_filename}",
     )
 
 
@@ -949,8 +963,10 @@ class OutboundCallManager:
                     "turns": [*record.handoff.ai_turns, *record.handoff.human_turns],
                 }
                 cleanup_recording_paths = (
-                    record.handoff.customer_recording_path,
-                    record.handoff.agent_recording_path,
+                    record.handoff.customer_recording_host_path
+                    or record.handoff.customer_recording_path,
+                    record.handoff.agent_recording_host_path
+                    or record.handoff.agent_recording_path,
                 )
                 call_payload = record.to_dict()
 
@@ -1530,13 +1546,21 @@ class OutboundCallManager:
         recording_error = None
         customer_recording_path = None
         agent_recording_path = None
+        customer_recording_host_path = None
+        agent_recording_host_path = None
         recording_started_at_ms = None
         if self.config.features.recording_enabled:
             recording_status = "recording"
             recording_started_at_ms = _now_ms()
             try:
-                customer_recording_path, agent_recording_path = _handoff_recording_paths(
+                (
+                    customer_recording_path,
+                    agent_recording_path,
+                    customer_recording_host_path,
+                    agent_recording_host_path,
+                ) = _handoff_recording_paths(
                     self.config.features.recording_dir,
+                    self.config.features.recording_host_dir,
                     customer_call_id=call_id,
                     agent_uuid=request.agent_uuid,
                 )
@@ -1583,6 +1607,8 @@ class OutboundCallManager:
             record.handoff.recording_error = recording_error
             record.handoff.customer_recording_path = customer_recording_path
             record.handoff.agent_recording_path = agent_recording_path
+            record.handoff.customer_recording_host_path = customer_recording_host_path
+            record.handoff.agent_recording_host_path = agent_recording_host_path
             record.handoff.recording_started_at_ms = recording_started_at_ms
             record.handoff.updated_at_ms = now_ms
             self._set_status_locked(record, "human_active")
@@ -1718,10 +1744,17 @@ class OutboundCallManager:
                 or handoff.recording_status != "completed"
             ):
                 return
+            customer_recording_path = (
+                handoff.customer_recording_host_path
+                or handoff.customer_recording_path
+            )
+            agent_recording_path = (
+                handoff.agent_recording_host_path or handoff.agent_recording_path
+            )
             if (
                 not handoff.agent_uuid
-                or not handoff.customer_recording_path
-                or not handoff.agent_recording_path
+                or not customer_recording_path
+                or not agent_recording_path
             ):
                 handoff.human_transcript_status = "failed"
                 handoff.human_transcript_error = "recording path is missing"
@@ -1737,8 +1770,8 @@ class OutboundCallManager:
                     "context": dict(record.context),
                     "agent_id": agent_id,
                     "agent_uuid": handoff.agent_uuid,
-                    "customer_recording_path": handoff.customer_recording_path,
-                    "agent_recording_path": handoff.agent_recording_path,
+                    "customer_recording_path": customer_recording_path,
+                    "agent_recording_path": agent_recording_path,
                 }
                 handoff.human_transcript_status = "processing"
                 handoff.human_transcript_error = None

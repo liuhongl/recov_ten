@@ -66,6 +66,7 @@ barge_in_enabled = false
 metrics_enabled = true
 recording_enabled = false
 recording_dir = "/tmp/recov_ten_handoff_recordings"
+recording_host_dir = ""
 inbound_rms_diagnostics_enabled = false
 
 [call_recording]

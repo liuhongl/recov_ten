@@ -360,6 +360,8 @@ def test_outbound_manager_handoff_creates_waiting_agent_before_claim():
             "recording_error": None,
             "customer_recording_path": None,
             "agent_recording_path": None,
+            "customer_recording_host_path": None,
+            "agent_recording_host_path": None,
             "recording_started_at_ms": None,
             "recording_stopped_at_ms": None,
             "ai_turns": [
@@ -1461,6 +1463,7 @@ def test_outbound_manager_handoff_records_temp_audio_until_hangup_when_enabled()
             features=FeatureConfig(
                 recording_enabled=True,
                 recording_dir="/tmp/recov_ten_handoff_test",
+                recording_host_dir="./freeswitch-local/recordings/handoff",
             ),
         ),
         dialer_factory=lambda: FakeDialer(),
@@ -1493,6 +1496,13 @@ def test_outbound_manager_handoff_records_temp_audio_until_hangup_when_enabled()
         )
         assert handoff["agent_recording_path"] == (
             f"/tmp/recov_ten_handoff_test/{call_id}-agent-uuid-1-agent.wav"
+        )
+        assert handoff["customer_recording_host_path"] == (
+            f"./freeswitch-local/recordings/handoff/{call_id}-customer.wav"
+        )
+        assert handoff["agent_recording_host_path"] == (
+            "./freeswitch-local/recordings/handoff/"
+            f"{call_id}-agent-uuid-1-agent.wav"
         )
         assert operations == [
             (
@@ -1716,7 +1726,8 @@ def test_outbound_manager_processes_handoff_recordings_after_recording_completed
             outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
             features=FeatureConfig(
                 recording_enabled=True,
-                recording_dir=str(tmp_path),
+                recording_dir="/container/tmp/recov_ten_handoff",
+                recording_host_dir=str(tmp_path),
             ),
         ),
         dialer_factory=lambda: FakeDialer(),

@@ -108,6 +108,7 @@
     <!-- <param name="extended-info-parsing" value="true"/> -->
 
     <param name="aggressive-nat-detection" value="true"/>
+    <param name="apply-candidate-acl" value="rfc1918.auto"/>
     <!--
         There are known issues (asserts and segfaults) when 100rel is enabled.
         It is not recommended to enable 100rel at this time.

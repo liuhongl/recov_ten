@@ -11,6 +11,7 @@ from app.call_control import (
     CallControlError,
     OutboundCallManager,
     OutboundCallRecord,
+    build_handoff_audio_stream_stop_command,
     build_uuid_bridge_command,
     build_webrtc_agent_originate_command,
     build_originate_command,
@@ -134,6 +135,12 @@ def test_build_webrtc_agent_originate_command_parks_known_agent_uuid():
     assert command.endswith(
         "}sofia/internal/sip:1001@127.0.0.1:5066;transport=ws &park()"
     )
+
+
+def test_build_handoff_audio_stream_stop_command_stops_media_bug():
+    command = build_handoff_audio_stream_stop_command(call_id="customer-call-1")
+
+    assert command == "uuid_audio_stream customer-call-1 stop"
 
 
 def test_build_uuid_bridge_command_uses_customer_and_agent_uuids():

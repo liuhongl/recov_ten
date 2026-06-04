@@ -308,11 +308,11 @@ class FreeSwitchOutboundDialer:
             await client.close()
 
     async def break_audio_stream(self, call_id: str) -> str:
-        _require_safe_token(call_id, "call_id")
+        command = build_handoff_audio_stream_stop_command(call_id=call_id)
         client = self._make_client()
         try:
             await client.connect()
-            return await client.api(f"uuid_audio_stream {call_id} break")
+            return await client.api(command)
         finally:
             await client.close()
 
@@ -383,6 +383,11 @@ def build_uuid_bridge_command(*, customer_call_id: str, agent_uuid: str) -> str:
     _require_safe_token(customer_call_id, "customer_call_id")
     _require_safe_token(agent_uuid, "agent_uuid")
     return f"uuid_bridge {customer_call_id} {agent_uuid}"
+
+
+def build_handoff_audio_stream_stop_command(*, call_id: str) -> str:
+    _require_safe_token(call_id, "call_id")
+    return f"uuid_audio_stream {call_id} stop"
 
 
 def _handoff_recording_paths(

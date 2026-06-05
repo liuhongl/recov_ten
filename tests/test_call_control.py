@@ -1004,6 +1004,9 @@ def test_outbound_manager_handoff_transcript_merges_ai_and_human_turns_after_han
                         "speaker_type": "human_agent",
                         "agent_id": "agent-1001",
                         "text": "您好，我是物业客服。",
+                        "start_ms": 1200,
+                        "end_ms": 2600,
+                        "confidence": 0.92,
                     },
                     {
                         "role": "user",
@@ -1037,6 +1040,9 @@ def test_outbound_manager_handoff_transcript_merges_ai_and_human_turns_after_han
                         "speaker_type": "human_agent",
                         "agent_id": "agent-1001",
                         "text": "您好，我是物业客服。",
+                        "start_ms": 1200,
+                        "end_ms": 2600,
+                        "confidence": 0.92,
                     },
                     {
                         "role": "user",

@@ -1054,8 +1054,33 @@ def build_call_record_transcript_json(payload: Mapping[str, Any]) -> str:
             agent_id = _prompt_text(item.get("agent_id"))
             if agent_id:
                 turn["agent_id"] = agent_id
+            start_ms = _transcript_int(item.get("start_ms"))
+            if start_ms is not None:
+                turn["start_ms"] = start_ms
+            end_ms = _transcript_int(item.get("end_ms"))
+            if end_ms is not None:
+                turn["end_ms"] = end_ms
+            confidence = _transcript_float(item.get("confidence"))
+            if confidence is not None:
+                turn["confidence"] = confidence
             turns.append(turn)
     return json.dumps({"turns": turns}, ensure_ascii=False)
+
+
+def _transcript_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _transcript_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
 
 
 class ThreadsafeBusinessPromptPreparer:

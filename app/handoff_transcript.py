@@ -94,8 +94,33 @@ def _normalize_turns(value: object) -> list[dict[str, Any]]:
         agent_id = _clean_text(item.get("agent_id"))
         if agent_id is not None:
             turn["agent_id"] = agent_id
+        start_ms = _optional_int(item.get("start_ms"))
+        if start_ms is not None:
+            turn["start_ms"] = start_ms
+        end_ms = _optional_int(item.get("end_ms"))
+        if end_ms is not None:
+            turn["end_ms"] = end_ms
+        confidence = _optional_float(item.get("confidence"))
+        if confidence is not None:
+            turn["confidence"] = confidence
         turns.append(turn)
     return turns
+
+
+def _optional_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _optional_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
 
 
 def _clean_text(value: object) -> str | None:

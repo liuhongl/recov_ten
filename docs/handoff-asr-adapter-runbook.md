@@ -27,12 +27,18 @@ ASR adapter 读取两路 WAV，返回网关已支持的 turns 合同：
       "role": "assistant",
       "speaker_type": "human_agent",
       "agent_id": "agent-1001",
-      "text": "您好，我是物业客服。"
+      "text": "您好，我是物业客服。",
+      "start_ms": 1200,
+      "end_ms": 2600,
+      "confidence": 0.92
     },
     {
       "role": "user",
       "speaker_type": "customer",
-      "text": "我想确认一下费用。"
+      "text": "我想确认一下费用。",
+      "start_ms": 3100,
+      "end_ms": 5100,
+      "confidence": 0.89
     }
   ]
 }
@@ -41,19 +47,27 @@ ASR adapter 读取两路 WAV，返回网关已支持的 turns 合同：
 不要返回 `role: "human"`。坐席侧仍使用 `role: "assistant"`，通过
 `speaker_type: "human_agent"` 区分真人坐席。
 
-第一版 adapter 按通道输出转写结果：坐席侧一段、客户侧一段。它不会在没有时间戳的情况下
-猜测多轮对话的精确交错顺序。后续如果需要句级 turns 或严格时间顺序，需要 ASR provider 返回
-分句时间戳，再按时间合并。
+adapter 默认分别识别坐席侧和客户侧 WAV。如果 ASR 返回分句时间戳，adapter 会按
+`start_ms` 合并双路 turns，尽量还原人工通话顺序；如果 provider 只返回整段文本，
+则退化为每路一条 turn，不猜测精确交错顺序。
+
+这两路 WAV 必须是单向录音：`customer.wav` 只录客户侧 channel 的
+read/input 音频，`agent.wav` 只录坐席侧 channel 的 read/input 音频。混音录音可以
+另作归档或质检，但不适合作为 `customer` / `human_agent` 角色级 transcript 主链路。
 
 ## 本地启动
 
-先确保 `.env` 中已有豆包 S2S 凭证：
+先确保 `.env` 中已有录音文件识别 2.0 凭证。新版推荐只配置 `X-Api-Key`：
 
 ```bash
-DOUBAO_S2S_APP_ID=...
-DOUBAO_S2S_ACCESS_TOKEN=...
-DOUBAO_S2S_APP_KEY=...
+DOUBAO_FILE_ASR_API_KEY=...
+DOUBAO_FILE_ASR_RESOURCE_ID=volc.seedasr.auc
 ```
+
+`DOUBAO_FILE_ASR_RESOURCE_ID` 不配置时默认使用标准版资源
+`volc.seedasr.auc`。旧版鉴权仍可用
+`DOUBAO_FILE_ASR_APP_KEY` + `DOUBAO_FILE_ASR_ACCESS_KEY` 兜底，但不要复用
+`DOUBAO_S2S_*`，那是实时对话链路的凭证。
 
 启动 adapter：
 
@@ -62,12 +76,15 @@ uv run python -m app.handoff_asr_adapter \
   --env-file .env \
   --host 127.0.0.1 \
   --port 9200 \
-  --send-delay-ms 5
+  --poll-interval-seconds 2 \
+  --max-poll-attempts 60
 ```
 
-这是录音文件转写服务，不是实时通话流，但豆包 S2S 仍需要轻量 pacing
-来稳定触发 ASR。实测 `--send-delay-ms 0` 可能触发
-`DialogAudioIdleTimeoutError`，当前先用 `5ms` 兼顾速度和稳定性。
+这是录音文件转写服务：adapter 读取挂断后的本地 WAV，通过火山录音文件识别
+2.0 标准版 submit/query 接口转写，不再把录音文件伪装成实时 S2S 音频流。
+
+当前主方案是双 mono：客户侧和坐席侧 WAV 分别提交给火山识别，再按
+`start_ms` 合并 turns。这个方案多一次 ASR 请求，但角色边界最清楚，优先保证准确率。
 
 网关侧配置：
 
@@ -81,7 +98,7 @@ recording_host_dir = "./freeswitch-local/recordings/handoff"
 enabled = true
 provider = "http_json"
 http_url = "http://127.0.0.1:9200/handoff-transcript"
-timeout_seconds = 60.0
+timeout_seconds = 180.0
 ```
 
 也可以用环境变量覆盖：
@@ -93,8 +110,12 @@ RECORDING_HOST_DIR=./freeswitch-local/recordings/handoff
 HUMAN_TRANSCRIPT_ENABLED=true
 HUMAN_TRANSCRIPT_PROVIDER=http_json
 HUMAN_TRANSCRIPT_HTTP_URL=http://127.0.0.1:9200/handoff-transcript
-HUMAN_TRANSCRIPT_TIMEOUT_SECONDS=60
+HUMAN_TRANSCRIPT_TIMEOUT_SECONDS=180
 ```
+
+标准版是提交后轮询结果。双 mono 模式下两路 WAV 会分别识别。真实超时时间应按
+录音长度、provider 返回速度和并发量压测后再收紧。小流量联调阶段先给网关
+HTTP adapter 更宽的 `timeout_seconds`，避免把正常排队或转写中的请求误判为失败。
 
 ## 线上部署边界
 

@@ -1488,6 +1488,9 @@ def test_call_record_transcript_json_preserves_handoff_speaker_metadata():
                     "speaker_type": "human_agent",
                     "agent_id": "agent-1001",
                     "text": "您好，我是物业客服。",
+                    "start_ms": 1200,
+                    "end_ms": 2600,
+                    "confidence": 0.92,
                 },
             ]
         }
@@ -1502,6 +1505,9 @@ def test_call_record_transcript_json_preserves_handoff_speaker_metadata():
                 "speaker_type": "human_agent",
                 "agent_id": "agent-1001",
                 "text": "您好，我是物业客服。",
+                "start_ms": 1200,
+                "end_ms": 2600,
+                "confidence": 0.92,
             },
         ]
     }

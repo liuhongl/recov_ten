@@ -2227,6 +2227,15 @@ def _normalize_transcript_turns(value: object) -> list[dict[str, Any]]:
         agent_id = _optional_safe_str(item, "agent_id")
         if agent_id is not None:
             turn["agent_id"] = agent_id
+        start_ms = _optional_int_value(item.get("start_ms"))
+        if start_ms is not None:
+            turn["start_ms"] = start_ms
+        end_ms = _optional_int_value(item.get("end_ms"))
+        if end_ms is not None:
+            turn["end_ms"] = end_ms
+        confidence = _optional_float_value(item.get("confidence"))
+        if confidence is not None:
+            turn["confidence"] = confidence
         turns.append(turn)
     return turns
 
@@ -2684,6 +2693,22 @@ def _optional_int(payload: dict[str, Any], name: str) -> int | None:
         return int(value)
     except (TypeError, ValueError) as err:
         raise CallControlError(f"{name} must be an integer") from err
+
+
+def _optional_int_value(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _optional_float_value(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
 
 
 def _require_safe_token(value: str, name: str) -> None:

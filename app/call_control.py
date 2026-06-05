@@ -332,19 +332,40 @@ class FreeSwitchOutboundDialer:
         finally:
             await client.close()
 
-    async def start_recording(self, channel_uuid: str, path: str) -> str:
-        return await self._record(channel_uuid, "start", path)
+    async def start_recording(
+        self,
+        channel_uuid: str,
+        path: str,
+        *,
+        read_only: bool = False,
+    ) -> str:
+        return await self._record(channel_uuid, "start", path, read_only=read_only)
 
     async def stop_recording(self, channel_uuid: str, path: str) -> str:
         return await self._record(channel_uuid, "stop", path)
 
-    async def _record(self, channel_uuid: str, action: str, path: str) -> str:
+    async def _record(
+        self,
+        channel_uuid: str,
+        action: str,
+        path: str,
+        *,
+        read_only: bool = False,
+    ) -> str:
         _require_safe_token(channel_uuid, "channel_uuid")
         _require_safe_token(action, "recording_action")
         _require_safe_token(path, "recording_path")
         client = self._make_client()
         try:
             await client.connect()
+            if action == "start" and read_only:
+                for command in (
+                    f"uuid_setvar {channel_uuid} RECORD_READ_ONLY true",
+                    f"uuid_setvar {channel_uuid} RECORD_WRITE_ONLY false",
+                ):
+                    reply = await client.api(command)
+                    if reply.strip().startswith("-ERR"):
+                        return reply
             return await client.api(f"uuid_record {channel_uuid} {action} {path}")
         finally:
             await client.close()
@@ -1568,7 +1589,13 @@ class OutboundCallManager:
                     (call_id, customer_recording_path),
                     (request.agent_uuid, agent_recording_path),
                 ):
-                    reply = (await dialer.start_recording(channel_uuid, path)).strip()
+                    reply = (
+                        await dialer.start_recording(
+                            channel_uuid,
+                            path,
+                            read_only=True,
+                        )
+                    ).strip()
                     if reply.startswith("-ERR"):
                         raise CallControlError(reply, status_code=503)
             except Exception as err:

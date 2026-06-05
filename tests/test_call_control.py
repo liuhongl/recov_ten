@@ -9,6 +9,7 @@ import pytest
 
 from app.call_control import (
     CallControlError,
+    FreeSwitchOutboundDialer,
     OutboundCallManager,
     OutboundCallRecord,
     build_handoff_audio_stream_stop_command,
@@ -67,6 +68,39 @@ def test_build_originate_command_uses_local_dialplan():
     assert "ignore_early_media=true" in command
     assert "sip_realtime_external_call_id=biz-1" in command
     assert command.endswith("}user/1000 9199 XML default")
+
+
+def test_freeswitch_outbound_dialer_starts_read_only_recording_with_channel_vars():
+    commands: list[str] = []
+
+    class FakeClient:
+        async def connect(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+        async def api(self, command: str) -> str:
+            commands.append(command)
+            return "+OK Success"
+
+    dialer = FreeSwitchOutboundDialer(GatewayConfig())
+    dialer._make_client = lambda: FakeClient()  # type: ignore[method-assign]
+
+    reply = asyncio.run(
+        dialer.start_recording(
+            "channel-uuid-1",
+            "/tmp/handoff-customer.wav",
+            read_only=True,
+        )
+    )
+
+    assert reply == "+OK Success"
+    assert commands == [
+        "uuid_setvar channel-uuid-1 RECORD_READ_ONLY true",
+        "uuid_setvar channel-uuid-1 RECORD_WRITE_ONLY false",
+        "uuid_record channel-uuid-1 start /tmp/handoff-customer.wav",
+    ]
 
 
 def test_outbound_manager_adds_full_call_recording_path_from_business_call_id():
@@ -1430,7 +1464,7 @@ def test_outbound_manager_hangs_up_agent_channel_after_human_handoff_ends():
 
 
 def test_outbound_manager_handoff_records_temp_audio_until_hangup_when_enabled():
-    operations: list[tuple[str, str, str]] = []
+    operations: list[tuple[str, str, str, bool] | tuple[str, str, str]] = []
 
     class FakeDialer:
         async def resolve_endpoint(self, endpoint: str) -> str:
@@ -1445,8 +1479,14 @@ def test_outbound_manager_handoff_records_temp_audio_until_hangup_when_enabled()
         async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
             return "+OK uuid_bridge accepted"
 
-        async def start_recording(self, channel_uuid: str, path: str) -> str:
-            operations.append(("record_start", channel_uuid, path))
+        async def start_recording(
+            self,
+            channel_uuid: str,
+            path: str,
+            *,
+            read_only: bool = False,
+        ) -> str:
+            operations.append(("record_start", channel_uuid, path, read_only))
             return "+OK Success"
 
         async def stop_recording(self, channel_uuid: str, path: str) -> str:
@@ -1509,11 +1549,13 @@ def test_outbound_manager_handoff_records_temp_audio_until_hangup_when_enabled()
                 "record_start",
                 call_id,
                 f"/tmp/recov_ten_handoff_test/{call_id}-customer.wav",
+                True,
             ),
             (
                 "record_start",
                 "agent-uuid-1",
                 f"/tmp/recov_ten_handoff_test/{call_id}-agent-uuid-1-agent.wav",
+                True,
             ),
         ]
 
@@ -1558,7 +1600,13 @@ def test_outbound_manager_treats_missing_session_on_recording_stop_as_completed(
         async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
             return "+OK uuid_bridge accepted"
 
-        async def start_recording(self, channel_uuid: str, path: str) -> str:
+        async def start_recording(
+            self,
+            channel_uuid: str,
+            path: str,
+            *,
+            read_only: bool = False,
+        ) -> str:
             return "+OK Success"
 
         async def stop_recording(self, channel_uuid: str, path: str) -> str:
@@ -1621,7 +1669,13 @@ def test_outbound_manager_marks_transcript_failed_when_recording_stop_fails():
         async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
             return "+OK uuid_bridge accepted"
 
-        async def start_recording(self, channel_uuid: str, path: str) -> str:
+        async def start_recording(
+            self,
+            channel_uuid: str,
+            path: str,
+            *,
+            read_only: bool = False,
+        ) -> str:
             return "+OK Success"
 
         async def stop_recording(self, channel_uuid: str, path: str) -> str:
@@ -1711,7 +1765,13 @@ def test_outbound_manager_processes_handoff_recordings_after_recording_completed
         async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
             return "+OK uuid_bridge accepted"
 
-        async def start_recording(self, channel_uuid: str, path: str) -> str:
+        async def start_recording(
+            self,
+            channel_uuid: str,
+            path: str,
+            *,
+            read_only: bool = False,
+        ) -> str:
             return "+OK Success"
 
         async def stop_recording(self, channel_uuid: str, path: str) -> str:
@@ -1852,7 +1912,13 @@ def test_outbound_manager_marks_handoff_transcript_failed_when_processor_fails()
         async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
             return "+OK uuid_bridge accepted"
 
-        async def start_recording(self, channel_uuid: str, path: str) -> str:
+        async def start_recording(
+            self,
+            channel_uuid: str,
+            path: str,
+            *,
+            read_only: bool = False,
+        ) -> str:
             return "+OK Success"
 
         async def stop_recording(self, channel_uuid: str, path: str) -> str:
@@ -1922,7 +1988,13 @@ def test_outbound_manager_emits_failed_flow_callback_when_handoff_asr_fails():
         async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
             return "+OK uuid_bridge accepted"
 
-        async def start_recording(self, channel_uuid: str, path: str) -> str:
+        async def start_recording(
+            self,
+            channel_uuid: str,
+            path: str,
+            *,
+            read_only: bool = False,
+        ) -> str:
             return "+OK Success"
 
         async def stop_recording(self, channel_uuid: str, path: str) -> str:
@@ -2007,7 +2079,13 @@ def test_outbound_manager_emits_failed_flow_callback_when_handoff_recording_fail
         async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
             return "+OK uuid_bridge accepted"
 
-        async def start_recording(self, channel_uuid: str, path: str) -> str:
+        async def start_recording(
+            self,
+            channel_uuid: str,
+            path: str,
+            *,
+            read_only: bool = False,
+        ) -> str:
             return "+OK Success"
 
         async def stop_recording(self, channel_uuid: str, path: str) -> str:
@@ -2227,7 +2305,13 @@ def test_outbound_manager_auto_transcript_writes_record_before_success_callback(
         async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
             return "+OK uuid_bridge accepted"
 
-        async def start_recording(self, channel_uuid: str, path: str) -> str:
+        async def start_recording(
+            self,
+            channel_uuid: str,
+            path: str,
+            *,
+            read_only: bool = False,
+        ) -> str:
             return "+OK Success"
 
         async def stop_recording(self, channel_uuid: str, path: str) -> str:

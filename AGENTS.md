@@ -24,6 +24,8 @@
 - `freeswitch-local/conf/vars.xml` 可能包含本机 LAN IP，只能视为本地软电话测试配置；部署或提交前必须确认不会用它覆盖公网服务器 SIP/RTP 配置。
 - 涉及数据库、外呼控制、`/outbound-test` 或实时媒体结果落库时，优先运行 `uv run --with pytest pytest -q`。
 - `.env` 可能带 UTF-8 BOM；读取本地环境文件时要兼容 `utf-8-sig`，但不要输出或提交真实密钥。
+- 线上 `/opt/recov_ten` 可能不是 git 工作树；部署线上版本时必须保留线上 `.env`、systemd 配置和公网 FreeSWITCH 参数，不要用本地目录原样覆盖线上环境。
+- 部署记录、线上验收清单等文档可以单独提交为 `docs:` commit；本机 LAN IP、临时测试草稿、未确认的架构方案不要混进业务提交。
 
 ## 本地软电话与音频排查
 
@@ -39,6 +41,9 @@
 - 当前 Python `call_id` 用作客户侧 FreeSWITCH 通道 UUID；桥接客户线路前必须确认它仍对应真实客户通道。
 - `agent_uuid` 表示人工坐席侧 FreeSWITCH 通道 UUID，应由后端生成并作为 `origination_uuid` 传给 FreeSWITCH；不要把它当业务单号、坐席账号或 `call_record` 主键。
 - 网页坐席接通但无声时，优先检查浏览器麦克风权限、FreeSWITCH RTP 端口范围、Docker UDP 映射、防火墙、STUN/TURN 和 `9196 echo`，不要只凭 SIP 注册或接通状态判断音频链路正常。
+- 转人工线上验收必须分层记录：页面可访问、WebRTC 注册、bridge 成功、双路 WAV、ASR turns、`call_record/sys_oss/recording_oss_id`、flow callback SUCCESS 是不同层级，不能把“坐席能通话”当成完整业务闭环成功。
+- 人工阶段 ASR 当前商用主线优先使用双 mono：`customer.wav` 只录客户侧，`agent.wav` 只录坐席侧；stereo 合并只作为后续成本优化实验，不作为当前准确率优先的主验收路径。
+- 当前转人工失败策略采用方案 A：客户触发转人工后先播“正在为您转接人工座席，请稍等”；无人接听或超时后播“人工座席繁忙”提示并结束通话。`HANDOFF_WAIT_TIMEOUT_SECONDS` 可用于测试和生产等待时间调整。
 
 ## 物业费催收提示词边界
 

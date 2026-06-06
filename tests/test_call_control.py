@@ -10,6 +10,7 @@ import pytest
 from app.call_control import (
     CallControlError,
     FreeSwitchOutboundDialer,
+    HANDOFF_AGENT_BUSY_PROMPT_TEXT,
     OutboundCallManager,
     OutboundCallRecord,
     build_handoff_audio_stream_stop_command,
@@ -461,8 +462,20 @@ def test_outbound_manager_handoff_creates_waiting_agent_before_claim():
         manager.shutdown()
 
 
-def test_outbound_manager_expires_waiting_handoff_and_hangs_up_customer():
+def test_outbound_manager_expires_waiting_handoff_plays_busy_notice_before_hangup(
+    tmp_path,
+):
     operations: list[tuple[str, str, str | None]] = []
+    generated_texts: list[str] = []
+
+    class FakeOpeningGenerator:
+        def generate(self, opening):
+            generated_texts.append(opening.opening_text)
+            return OpeningAudio(
+                pcm16=samples_to_pcm_s16le([1200] * 480),
+                sample_rate=24000,
+                generation_ms=100,
+            )
 
     class FakeDialer:
         async def resolve_endpoint(self, endpoint: str) -> str:
@@ -477,6 +490,10 @@ def test_outbound_manager_expires_waiting_handoff_and_hangs_up_customer():
         async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
             return "+OK uuid_bridge accepted"
 
+        async def play_file(self, call_id: str, path: str) -> str:
+            operations.append(("play_file", call_id, path))
+            return "+OK playback accepted"
+
         async def hangup(self, call_id: str, *, cause: str) -> str:
             operations.append(("hangup", call_id, cause))
             return "+OK hangup accepted"
@@ -485,8 +502,14 @@ def test_outbound_manager_expires_waiting_handoff_and_hangs_up_customer():
         GatewayConfig(
             event_socket=EventSocketConfig(enabled=True),
             outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+            call_recording=CallRecordingConfig(
+                enabled=True,
+                directory="/var/lib/freeswitch/recordings",
+                host_directory=str(tmp_path),
+            ),
         ),
         dialer_factory=lambda: FakeDialer(),
+        opening_generator=FakeOpeningGenerator(),
     )
 
     try:
@@ -506,7 +529,12 @@ def test_outbound_manager_expires_waiting_handoff_and_hangs_up_customer():
         assert expired_call["handoff"]["state"] == "handoff_failed"
         assert expired_call["handoff"]["error"] == "handoff request expired"
         assert expired_call["handoff"]["can_claim"] is False
-        assert operations == [("hangup", call_id, "NORMAL_CLEARING")]
+        assert generated_texts == [HANDOFF_AGENT_BUSY_PROMPT_TEXT]
+        assert operations[0][0:2] == ("play_file", call_id)
+        assert operations[0][2].startswith(
+            "/var/lib/freeswitch/recordings/handoff-prompts/"
+        )
+        assert operations[1:] == [("hangup", call_id, "NORMAL_CLEARING")]
     finally:
         manager.shutdown()
 

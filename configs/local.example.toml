@@ -120,3 +120,6 @@ enabled = false
 provider = "http_json"
 http_url = "http://127.0.0.1:9200/handoff-transcript"
 timeout_seconds = 180.0
+
+[handoff]
+wait_timeout_seconds = 180

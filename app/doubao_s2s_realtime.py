@@ -101,6 +101,7 @@ class DoubaoS2SServerVadSession:
         self._pending_session_started: asyncio.Future[None] | None = None
         self._pending_session_finished: asyncio.Future[None] | None = None
         self._pending_context_seed_finished: asyncio.Future[None] | None = None
+        self._pending_direct_tts_finished: asyncio.Future[None] | None = None
         self._hot_restart_in_progress = False
         self._context_seed_in_progress = False
         self._context_seed_seq = 0
@@ -184,6 +185,21 @@ class DoubaoS2SServerVadSession:
             return
         async with self._session_restart_lock:
             await self._seed_assistant_context_locked(text, source=source)
+
+    async def send_tts_text(self, text: str) -> None:
+        text = text.strip()
+        if not text:
+            return
+        async with self._session_restart_lock:
+            session = self._require_session()
+            finished = self._new_future()
+            self._pending_direct_tts_finished = finished
+            try:
+                await session.send_tts_text(text)
+                await asyncio.wait_for(finished, timeout=8)
+            finally:
+                if self._pending_direct_tts_finished is finished:
+                    self._pending_direct_tts_finished = None
 
     async def _seed_assistant_context_locked(
         self,
@@ -439,6 +455,7 @@ class DoubaoS2SServerVadSession:
             response_id=self._require_session().session_id,
         )
         await self.on_turn_completed(result)
+        self._complete_future(self._pending_direct_tts_finished)
         if self._active_response_turn_id == state.turn_id:
             self._active_response_turn_id = None
         self._turns.pop(state.turn_id, None)

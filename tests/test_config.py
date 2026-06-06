@@ -99,6 +99,9 @@ def test_load_config_from_toml(tmp_path):
             http_url = "http://asr.example/transcribe"
             timeout_seconds = 12.5
 
+            [handoff]
+            wait_timeout_seconds = 15
+
             [flow_callback]
             enabled = true
             topic = "recov-flow-callback"
@@ -192,6 +195,7 @@ def test_load_config_from_toml(tmp_path):
     assert config.human_transcript.provider == "http_json"
     assert config.human_transcript.http_url == "http://asr.example/transcribe"
     assert config.human_transcript.timeout_seconds == 12.5
+    assert config.handoff.wait_timeout_seconds == 15
     assert config.flow_callback.enabled is True
     assert config.flow_callback.topic == "recov-flow-callback"
     assert config.flow_callback.producer_group == "recov-ten-gateway"
@@ -259,6 +263,7 @@ def test_environment_overrides(monkeypatch):
     monkeypatch.setenv("HUMAN_TRANSCRIPT_PROVIDER", "http_json")
     monkeypatch.setenv("HUMAN_TRANSCRIPT_HTTP_URL", "http://env-asr.example/transcribe")
     monkeypatch.setenv("HUMAN_TRANSCRIPT_TIMEOUT_SECONDS", "13.5")
+    monkeypatch.setenv("HANDOFF_WAIT_TIMEOUT_SECONDS", "12")
     monkeypatch.setenv("RECORDING_HOST_DIR", "/opt/recov_ten/handoff-recordings")
     monkeypatch.setenv("FLOW_CALLBACK_ENABLED", "true")
     monkeypatch.setenv("FLOW_CALLBACK_TOPIC", "env-flow-callback")
@@ -333,6 +338,7 @@ def test_environment_overrides(monkeypatch):
     assert config.human_transcript.provider == "http_json"
     assert config.human_transcript.http_url == "http://env-asr.example/transcribe"
     assert config.human_transcript.timeout_seconds == 13.5
+    assert config.handoff.wait_timeout_seconds == 12
     assert config.flow_callback.enabled is True
     assert config.flow_callback.topic == "env-flow-callback"
     assert config.flow_callback.producer_group == "env-producer"

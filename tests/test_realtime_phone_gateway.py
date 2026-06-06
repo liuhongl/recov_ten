@@ -15,6 +15,7 @@ from app.config import (
     FeatureConfig,
     FreeSwitchConfig,
     GatewayConfig,
+    HandoffConfig,
     PlaybackConfig,
     VadConfig,
 )
@@ -25,6 +26,7 @@ from app.realtime_phone_gateway import (
     ConversationExchange,
     DIALOG_PROMPT_SOFT_LIMIT_CHARS,
     FreeSwitchRealtimeGatewayServer,
+    HANDOFF_CONNECTING_PROMPT_TEXT,
     OPENING_TURN_ID,
     PlaybackFrame,
     RealtimePhoneSessionStats,
@@ -470,7 +472,7 @@ async def _assert_realtime_gateway_triggers_handoff_and_suppresses_model_output(
         restart_on_interruption=False,
     )
     server = FreeSwitchRealtimeGatewayServer(
-        _test_config(tail_silence_ms=0),
+        _test_config(tail_silence_ms=0, handoff_wait_timeout_seconds=12),
         api_key="test-key",
         playback_control=fake_playback_control,
         handoff_requester=fake_handoff,
@@ -509,9 +511,10 @@ async def _assert_realtime_gateway_triggers_handoff_and_suppresses_model_output(
                 "trigger": "customer_requested",
                 "reason": "request_human",
                 "last_utterance": "我要转人工",
-                "wait_timeout_seconds": 180,
+                "wait_timeout_seconds": 12,
                 "ai_turns": [
                     {"role": "user", "text": "我要转人工"},
+                    {"role": "assistant", "text": HANDOFF_CONNECTING_PROMPT_TEXT},
                 ],
             },
         )
@@ -519,6 +522,7 @@ async def _assert_realtime_gateway_triggers_handoff_and_suppresses_model_output(
     assert session.handoff_requested is True
     assert session.handoff_completed is True
     assert session.handoff_error is None
+    assert fake_realtime_session.tts_texts == [HANDOFF_CONNECTING_PROMPT_TEXT]
     assert session.current_output_turn_id is None
     assert session.playback_queue.empty()
     assert fake_playback_control.break_calls == ["customer-call"]
@@ -529,7 +533,8 @@ async def _assert_realtime_gateway_triggers_handoff_and_suppresses_model_output(
         for item in session.committed_exchanges
     ]
     assert committed == [
-        ("handoff_requested", "我要转人工", "")
+        ("handoff_requested", "我要转人工", ""),
+        ("completed", "", HANDOFF_CONNECTING_PROMPT_TEXT),
     ]
     assert session.context_repair_requests == 0
 
@@ -576,12 +581,14 @@ async def _assert_realtime_gateway_triggers_handoff_from_asr_before_model_audio(
                 "wait_timeout_seconds": 180,
                 "ai_turns": [
                     {"role": "user", "text": "接人工"},
+                    {"role": "assistant", "text": HANDOFF_CONNECTING_PROMPT_TEXT},
                 ],
             },
         )
     ]
     assert session.handoff_requested is True
     assert session.handoff_completed is True
+    assert fake_realtime_session.tts_texts == [HANDOFF_CONNECTING_PROMPT_TEXT]
     assert session.playback_queue.empty()
     assert session.dropped_stale_frames == 1
     assert fake_playback_control.break_calls == ["customer-call"]
@@ -591,7 +598,10 @@ async def _assert_realtime_gateway_triggers_handoff_from_asr_before_model_audio(
         (item.status, item.input_transcript, item.output_transcript)
         for item in session.committed_exchanges
     ]
-    assert committed == [("handoff_requested", "接人工", "")]
+    assert committed == [
+        ("handoff_requested", "接人工", ""),
+        ("completed", "", HANDOFF_CONNECTING_PROMPT_TEXT),
+    ]
 
 
 async def _assert_realtime_gateway_records_takeover_suggestion_without_handoff():
@@ -2282,6 +2292,7 @@ class FakeRealtimeSession:
         self.instructions: list[str] = []
         self.speakers: list[str | None] = []
         self.dialog_configs: list[RealtimeDialogConfig | None] = []
+        self.tts_texts: list[str] = []
         self.second_turn_announced = False
         self.completed_first_turn = False
         self.on_speech_started: Callable[[int], Awaitable[None]] | None = None
@@ -2339,6 +2350,9 @@ class FakeRealtimeSession:
     async def cancel_response(self) -> None:
         self.cancel_calls += 1
 
+    async def send_tts_text(self, text: str) -> None:
+        self.tts_texts.append(text)
+
     async def handle_playback_interruption(
         self,
         *,
@@ -2395,6 +2409,7 @@ def _test_config(
     barge_in_enabled: bool = True,
     inbound_rms_diagnostics_enabled: bool = False,
     call_recording: CallRecordingConfig = CallRecordingConfig(),
+    handoff_wait_timeout_seconds: int = 180,
 ) -> GatewayConfig:
     return GatewayConfig(
         freeswitch=FreeSwitchConfig(media_host="127.0.0.1", media_port=0),
@@ -2416,6 +2431,7 @@ def _test_config(
             inbound_rms_diagnostics_enabled=inbound_rms_diagnostics_enabled,
         ),
         call_recording=call_recording,
+        handoff=HandoffConfig(wait_timeout_seconds=handoff_wait_timeout_seconds),
     )
 
 

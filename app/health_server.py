@@ -150,6 +150,7 @@ class HealthServer:
                                 "human_transcript": asdict(
                                     config.human_transcript
                                 ),
+                                "handoff": asdict(config.handoff),
                                 "flow_callback": asdict(config.flow_callback),
                                 "rocketmq": asdict(config.rocketmq),
                                 "outbound": {

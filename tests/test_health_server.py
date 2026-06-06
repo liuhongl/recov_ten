@@ -9,6 +9,7 @@ from app.browser_prompt_test import BrowserPromptTestStore
 from app.config import (
     CallRecordingConfig,
     GatewayConfig,
+    HandoffConfig,
     HumanTranscriptConfig,
     RocketMQAclConfig,
     RocketMQConfig,
@@ -134,6 +135,27 @@ def test_ready_endpoint_exposes_human_transcript_config():
             "timeout_seconds": 12.5,
         }
         assert "test-secret-value" not in body
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
+def test_ready_endpoint_exposes_handoff_config():
+    config = GatewayConfig(
+        server=ServerConfig(host="127.0.0.1", port=0),
+        handoff=HandoffConfig(wait_timeout_seconds=12),
+    )
+    server = HealthServer(config)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.address
+        with urlopen(f"http://{host}:{port}/ready", timeout=3) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+        assert response.status == 200
+        assert payload["config"]["handoff"] == {"wait_timeout_seconds": 12}
     finally:
         server.shutdown()
         thread.join(timeout=3)

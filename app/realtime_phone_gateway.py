@@ -57,6 +57,7 @@ from .wav_io import write_pcm16_wav
 
 LOGGER = logging.getLogger(__name__)
 
+HANDOFF_CONNECTING_PROMPT_TEXT = "好的，正在为您转接人工座席，请稍等。"
 DEFAULT_PHONE_INSTRUCTIONS = (
     "You are a Chinese phone customer service assistant. "
     "Reply in short, natural spoken Chinese. "
@@ -151,6 +152,8 @@ class RealtimeSessionProtocol:
     async def append_audio(self, input_pcm_16k: bytes) -> None: ...
 
     async def cancel_response(self) -> None: ...
+
+    async def send_tts_text(self, text: str) -> None: ...
 
     async def handle_playback_interruption(
         self,
@@ -365,6 +368,7 @@ class RealtimePhoneSessionStats:
     interruption_repair_active: bool = False
     playback_active: bool = False
     handoff_requested: bool = False
+    handoff_transitioning: bool = False
     handoff_completed: bool = False
     handoff_trigger_turn_id: int | None = None
     handoff_error: str | None = None
@@ -1204,7 +1208,7 @@ class FreeSwitchRealtimeGatewayServer:
             return
 
         async with session.realtime_lock:
-            if session.handoff_requested:
+            if session.handoff_requested or session.handoff_transitioning:
                 return
             if session.interruption_repair_active:
                 session.repair_replay_frames_16k.append(frame_16k)
@@ -1431,7 +1435,7 @@ class FreeSwitchRealtimeGatewayServer:
         turn_id: int,
         transcript: str,
     ) -> None:
-        if session.handoff_requested:
+        if session.handoff_requested or session.handoff_transitioning:
             return
         normalized = transcript.strip()
         await self._maybe_record_agent_takeover_suggestion(session, normalized)
@@ -1628,7 +1632,7 @@ class FreeSwitchRealtimeGatewayServer:
         *,
         reason: str,
     ) -> None:
-        if session.handoff_requested:
+        if session.handoff_requested or session.handoff_transitioning:
             LOGGER.info(
                 "realtime_phone_handoff_duplicate_ignored call_id=%s "
                 "session_id=%s turn=%s reason=%s",
@@ -1639,11 +1643,17 @@ class FreeSwitchRealtimeGatewayServer:
             )
             return
 
-        session.handoff_requested = True
+        session.handoff_transitioning = True
+        session.handoff_requested = False
         session.handoff_completed = False
         session.handoff_trigger_turn_id = result.turn_id
         session.handoff_error = None
-        await self._stop_ai_playback_for_handoff(session)
+        try:
+            await self._stop_ai_playback_for_handoff(session)
+            await self._play_handoff_connecting_prompt(session)
+        finally:
+            session.handoff_transitioning = False
+        session.handoff_requested = True
 
         requester = self._handoff_requester
         if requester is None:
@@ -1652,7 +1662,7 @@ class FreeSwitchRealtimeGatewayServer:
             "trigger": "customer_requested",
             "reason": reason,
             "last_utterance": result.input_transcript.strip(),
-            "wait_timeout_seconds": 180,
+            "wait_timeout_seconds": self.config.handoff.wait_timeout_seconds,
             "ai_turns": self._build_call_result_turns(session),
         }
         try:
@@ -1729,6 +1739,58 @@ class FreeSwitchRealtimeGatewayServer:
             reason,
             transcript,
         )
+
+    async def _play_handoff_connecting_prompt(
+        self,
+        session: RealtimePhoneSessionStats,
+    ) -> None:
+        realtime_session = self._realtime_sessions.get(session.session_id)
+        if realtime_session is None:
+            return
+        send_tts_text = getattr(realtime_session, "send_tts_text", None)
+        if send_tts_text is None:
+            LOGGER.warning(
+                "realtime_phone_handoff_prompt_unavailable call_id=%s "
+                "session_id=%s",
+                session.call_id,
+                session.session_id,
+            )
+            return
+        try:
+            await asyncio.wait_for(
+                send_tts_text(HANDOFF_CONNECTING_PROMPT_TEXT),
+                timeout=10,
+            )
+        except Exception:
+            LOGGER.warning(
+                "realtime_phone_handoff_prompt_failed call_id=%s session_id=%s",
+                session.call_id,
+                session.session_id,
+                exc_info=True,
+            )
+            return
+        self._commit_handoff_prompt_turn(session, HANDOFF_CONNECTING_PROMPT_TEXT)
+
+    def _commit_handoff_prompt_turn(
+        self,
+        session: RealtimePhoneSessionStats,
+        text: str,
+    ) -> None:
+        normalized = text.strip()
+        if not normalized:
+            return
+        exchange = ConversationExchange(
+            turn_id=-(session.gateway_history_committed_turns + 1),
+            status="completed",
+            output_transcript=normalized,
+            heard_output_transcript=normalized,
+            playback_completed=True,
+            source="handoff_prompt",
+            created_at_ms=int(time.time() * 1000),
+        )
+        session.committed_exchanges.append(exchange)
+        session.gateway_history_committed_turns += 1
+        session.gateway_history_completed_turns += 1
 
     async def _stop_ai_playback_for_handoff(
         self,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import os
 import re
@@ -11,6 +12,7 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, Protocol
 
 from .config import CallRecordingConfig, GatewayConfig, OutboundCallConfig
@@ -31,11 +33,15 @@ from .opening import (
     parse_opening_request,
 )
 from .postgres import BusinessPromptPreparation, PromptSnapshot
+from .wav_io import write_pcm16_wav
 
 LOGGER = logging.getLogger(__name__)
 
 SAFE_TOKEN_RE = re.compile(r"^[^\s{},]+$")
 LOCAL_PLACEHOLDER_BUSINESS_ID_PREFIX = "handoff-local"
+HANDOFF_AGENT_BUSY_PROMPT_TEXT = (
+    "抱歉，当前人工座席繁忙，稍后我们会继续跟进，感谢您的理解。"
+)
 
 
 class CallControlError(ValueError):
@@ -343,6 +349,16 @@ class FreeSwitchOutboundDialer:
 
     async def stop_recording(self, channel_uuid: str, path: str) -> str:
         return await self._record(channel_uuid, "stop", path)
+
+    async def play_file(self, call_id: str, path: str) -> str:
+        _require_safe_token(call_id, "call_id")
+        _require_safe_token(path, "playback_path")
+        client = self._make_client()
+        try:
+            await client.connect()
+            return await client.api(f"uuid_broadcast {call_id} {path} aleg")
+        finally:
+            await client.close()
 
     async def _record(
         self,
@@ -1311,7 +1327,7 @@ class OutboundCallManager:
             timer.cancel()
 
     def _expire_handoff_request(self, call_id: str, expires_at_ms: int) -> None:
-        should_hangup = False
+        should_play_notice_and_hangup = False
         with self._lock:
             self._handoff_timeout_timers.pop(call_id, None)
             record = self._calls.get(call_id)
@@ -1332,13 +1348,141 @@ class OutboundCallManager:
             handoff.error = "handoff request expired"
             handoff.updated_at_ms = now_ms
             self._set_status_locked(record, "handoff_failed")
-            should_hangup = True
+            should_play_notice_and_hangup = True
 
-        if should_hangup:
-            self._submit_handoff_failure_hangup(
+        if should_play_notice_and_hangup:
+            self._submit_handoff_failure_notice_then_hangup(
                 call_id,
                 "handoff_timeout_hangup_submit_failed",
             )
+
+    def _submit_handoff_failure_notice_then_hangup(
+        self,
+        call_id: str,
+        log_event: str,
+    ) -> None:
+        try:
+            self._executor.submit(
+                self._run_handoff_failure_notice_then_hangup_worker,
+                call_id,
+            )
+        except RuntimeError:
+            LOGGER.warning("%s call_id=%s", log_event, call_id, exc_info=True)
+
+    def _run_handoff_failure_notice_then_hangup_worker(self, call_id: str) -> None:
+        try:
+            asyncio.run(self._play_handoff_failure_notice_then_hangup(call_id))
+        except Exception:
+            LOGGER.warning(
+                "handoff_failure_notice_worker_failed call_id=%s",
+                call_id,
+                exc_info=True,
+            )
+            self._submit_handoff_failure_hangup(
+                call_id,
+                "handoff_failure_notice_fallback_hangup_submit_failed",
+            )
+
+    async def _play_handoff_failure_notice_then_hangup(self, call_id: str) -> None:
+        notice = self._prepare_handoff_notice_audio(
+            call_id,
+            HANDOFF_AGENT_BUSY_PROMPT_TEXT,
+        )
+        if notice is not None:
+            path, duration_seconds = notice
+            try:
+                reply = (await self._dialer_factory().play_file(call_id, path)).strip()
+            except Exception:
+                LOGGER.warning(
+                    "handoff_failure_notice_play_failed call_id=%s path=%s",
+                    call_id,
+                    path,
+                    exc_info=True,
+                )
+            else:
+                if reply.startswith("-ERR"):
+                    LOGGER.warning(
+                        "handoff_failure_notice_play_rejected call_id=%s path=%s "
+                        "reply=%s",
+                        call_id,
+                        path,
+                        reply,
+                    )
+                else:
+                    await asyncio.sleep(duration_seconds)
+        await self._hangup(call_id, cause="NORMAL_CLEARING")
+
+    def _prepare_handoff_notice_audio(
+        self,
+        call_id: str,
+        text: str,
+    ) -> tuple[str, float] | None:
+        generator = self._opening_generator
+        if generator is None:
+            return None
+
+        with self._lock:
+            record = self._calls.get(call_id)
+            if record is None:
+                return None
+            voice = record.opening.voice if record.opening is not None else "female"
+            speaker = (
+                record.opening.speaker
+                if record.opening is not None
+                else self.config.doubao_s2s.speaker
+            )
+
+        text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        opening = OpeningRequest(
+            voice=voice,
+            speaker=speaker,
+            business={},
+            opening_text=text,
+            opening_text_hash=text_hash,
+        )
+        try:
+            audio = generator.generate(opening)
+            prepared = build_prepared_opening_audio(
+                call_id=f"{call_id}-handoff-notice",
+                opening=opening,
+                audio=audio,
+                config=self.config,
+            )
+        except (OpeningGenerationFailed, OSError, ValueError):
+            LOGGER.warning(
+                "handoff_failure_notice_generation_failed call_id=%s",
+                call_id,
+                exc_info=True,
+            )
+            return None
+
+        filename = f"{text_hash}.wav"
+        fs_base = self.config.call_recording.directory.rstrip("/")
+        host_base = (
+            self.config.call_recording.host_directory.rstrip("/")
+            or self.config.call_recording.directory.rstrip("/")
+        )
+        fs_path = f"{fs_base}/handoff-prompts/{filename}"
+        host_path = Path(host_base) / "handoff-prompts" / filename
+        try:
+            write_pcm16_wav(
+                host_path,
+                b"".join(prepared.phone_frames),
+                sample_rate=self.config.freeswitch.sample_rate,
+                channels=self.config.freeswitch.channels,
+            )
+        except OSError:
+            LOGGER.warning(
+                "handoff_failure_notice_wav_write_failed call_id=%s path=%s",
+                call_id,
+                host_path,
+                exc_info=True,
+            )
+            return None
+        duration_seconds = (
+            len(prepared.phone_frames) * self.config.freeswitch.frame_duration_ms
+        ) / 1000
+        return fs_path, max(duration_seconds, 0.1)
 
     def _submit_handoff_failure_hangup(self, call_id: str, log_event: str) -> None:
         try:
@@ -1689,7 +1833,7 @@ class OutboundCallManager:
 
     def _release_or_fail_handoff_claim(self, call_id: str, error: str) -> None:
         reschedule_expires_at_ms: int | None = None
-        should_hangup = False
+        should_play_notice_and_hangup = False
         with self._lock:
             record = self._calls.get(call_id)
             if record is None or record.handoff is None:
@@ -1727,12 +1871,12 @@ class OutboundCallManager:
                 handoff.error = error
                 handoff.updated_at_ms = now_ms
                 self._set_status_locked(record, "handoff_failed")
-                should_hangup = not _is_terminal_status(record.status)
+                should_play_notice_and_hangup = not _is_terminal_status(record.status)
 
         if reschedule_expires_at_ms is not None:
             self._schedule_handoff_timeout(call_id, reschedule_expires_at_ms)
-        if should_hangup:
-            self._submit_handoff_failure_hangup(
+        if should_play_notice_and_hangup:
+            self._submit_handoff_failure_notice_then_hangup(
                 call_id,
                 "handoff_failed_hangup_submit_failed",
             )

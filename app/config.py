@@ -128,6 +128,11 @@ class HumanTranscriptConfig:
 
 
 @dataclass(frozen=True)
+class HandoffConfig:
+    wait_timeout_seconds: int = 180
+
+
+@dataclass(frozen=True)
 class FlowCallbackHttpConfig:
     enabled: bool = False
     base_url: str = ""
@@ -181,6 +186,7 @@ class GatewayConfig:
     call_recording: CallRecordingConfig = CallRecordingConfig()
     postgres: PostgresConfig = PostgresConfig()
     human_transcript: HumanTranscriptConfig = HumanTranscriptConfig()
+    handoff: HandoffConfig = HandoffConfig()
     flow_callback: FlowCallbackConfig = FlowCallbackConfig()
     rocketmq: RocketMQConfig = RocketMQConfig()
 
@@ -602,6 +608,14 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
                 default=HumanTranscriptConfig.timeout_seconds,
             ),
         ),
+        handoff=HandoffConfig(
+            wait_timeout_seconds=_get_int(
+                raw,
+                "handoff",
+                "wait_timeout_seconds",
+                default=HandoffConfig.wait_timeout_seconds,
+            ),
+        ),
         flow_callback=FlowCallbackConfig(
             enabled=_get_bool(
                 raw,
@@ -742,6 +756,7 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
     _validate_postgres_config(config.postgres)
     _validate_call_recording_config(config.call_recording)
     _validate_human_transcript_config(config.human_transcript, config.features)
+    _validate_handoff_config(config.handoff)
     _validate_flow_callback_config(config.flow_callback)
     _validate_cross_feature_config(config)
     _validate_rocketmq_config(config.rocketmq)
@@ -1107,6 +1122,12 @@ def _apply_env_overrides(config: GatewayConfig) -> GatewayConfig:
                 config.human_transcript.timeout_seconds,
             ),
         ),
+        handoff=HandoffConfig(
+            wait_timeout_seconds=_env_int(
+                "HANDOFF_WAIT_TIMEOUT_SECONDS",
+                config.handoff.wait_timeout_seconds,
+            ),
+        ),
         flow_callback=FlowCallbackConfig(
             enabled=_env_bool(
                 "FLOW_CALLBACK_ENABLED",
@@ -1279,6 +1300,11 @@ def _validate_human_transcript_config(
         raise ValueError("human_transcript.http_url is required when enabled")
     if config.enabled and not features.recording_enabled:
         raise ValueError("recording must be enabled when human_transcript is enabled")
+
+
+def _validate_handoff_config(config: HandoffConfig) -> None:
+    if not 1 <= config.wait_timeout_seconds <= 300:
+        raise ValueError("handoff.wait_timeout_seconds must be between 1 and 300")
 
 
 def _validate_flow_callback_config(config: FlowCallbackConfig) -> None:

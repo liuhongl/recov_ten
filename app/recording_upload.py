@@ -341,14 +341,18 @@ def build_recording_object_key(
 def build_recording_url(oss_config: OssConfig, object_key: str) -> str:
     protocol = "https" if oss_config.is_https else "http"
     domain = oss_config.domain.strip()
+    bucket = oss_config.bucket_name.strip("/")
+    object_path = object_key.lstrip("/")
     if domain:
         base_url = domain.rstrip("/")
         if "://" not in base_url:
             base_url = f"{protocol}://{base_url}"
-        return f"{base_url}/{object_key.lstrip('/')}"
+        if bucket and not base_url.endswith(f"/{bucket}"):
+            base_url = f"{base_url}/{bucket}"
+        return f"{base_url}/{object_path}"
     return (
         f"{protocol}://{_endpoint_host(oss_config.endpoint)}/"
-        f"{oss_config.bucket_name}/{object_key}"
+        f"{bucket}/{object_path}"
     )
 
 

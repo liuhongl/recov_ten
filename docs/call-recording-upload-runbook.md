@@ -56,7 +56,7 @@ CALL_RECORDING_UPLOAD_TIMEOUT_SECONDS=30
 
 `access_key` 和 `secret_key` 不应出现在日志中。
 
-其中 `endpoint`、`bucket_name`、`access_key`、`secret_key` 不能为空。`is_https` 支持 `Y`、`true`、`1`、`yes` 这类真值。`domain` 可为空；非空时可填裸域名，也可填带 `http://` / `https://` 的完整访问前缀。任一必填字段为空时，录音上传会跳过回填并输出 `recording_upload_failed` 日志。
+其中 `endpoint`、`bucket_name`、`access_key`、`secret_key` 不能为空。`is_https` 支持 `Y`、`true`、`1`、`yes` 这类真值。`domain` 可为空；非空时可填裸域名，也可填带 `http://` / `https://` 的访问前缀。生成 `sys_oss.url` 时会按 LingChenAdmin 的 OSS 合同自动补上 `bucket_name`；如果 `domain` 已经以 `/{bucket_name}` 结尾，则不会重复追加。任一必填字段为空时，录音上传会跳过回填并输出 `recording_upload_failed` 日志。
 
 ## 上线顺序
 
@@ -90,6 +90,7 @@ where oss_id = :recording_oss_id;
 - `call_record.recording_oss_id` 有值。
 - `sys_oss.service = 'minio'`。
 - `sys_oss.file_name` 形如 `recordings/{tenantId}/{yyyyMMdd}/{callId}.wav`，如果 `sys_oss_config.prefix` 非空，会带该前缀。
+- `sys_oss.url` 在配置自定义 `domain` 时包含 `bucket_name`，例如 `https://oss.example.com/recov/recordings/...`。
 - MinIO 中存在对应 object。
 - 业务侧可以通过 `ossId` 获取或播放录音。
 

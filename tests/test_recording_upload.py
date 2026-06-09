@@ -62,7 +62,7 @@ def test_build_recording_object_key_uses_oss_prefix_tenant_date_and_call_id():
     assert key == "business/recordings/000000/20260603/990000000000032001.wav"
 
 
-def test_build_recording_url_uses_domain_with_explicit_scheme_and_base_path():
+def test_build_recording_url_adds_bucket_to_domain_with_explicit_scheme_and_base_path():
     oss_config = OssConfig(
         endpoint="minio.example:9000",
         bucket_name="recov",
@@ -81,12 +81,12 @@ def test_build_recording_url_uses_domain_with_explicit_scheme_and_base_path():
 
     assert (
         url
-        == "https://cdn.example.com/assets/business/recordings/000000/"
+        == "https://cdn.example.com/assets/recov/business/recordings/000000/"
         "20260603/990000000000032001.wav"
     )
 
 
-def test_build_recording_url_adds_scheme_for_domain_without_protocol():
+def test_build_recording_url_adds_scheme_and_bucket_for_domain_without_protocol():
     oss_config = OssConfig(
         endpoint="minio.example:9000",
         bucket_name="recov",
@@ -103,7 +103,29 @@ def test_build_recording_url_adds_scheme_for_domain_without_protocol():
 
     assert (
         url
-        == "https://cdn.example.com/recordings/000000/20260603/"
+        == "https://cdn.example.com/recov/recordings/000000/20260603/"
+        "990000000000032001.wav"
+    )
+
+
+def test_build_recording_url_does_not_duplicate_bucket_when_domain_already_contains_bucket():
+    oss_config = OssConfig(
+        endpoint="minio.example:9000",
+        bucket_name="recov",
+        access_key="access",
+        secret_key="secret",
+        is_https=True,
+        domain="https://cdn.example.com/recov",
+    )
+
+    url = build_recording_url(
+        oss_config,
+        "recordings/000000/20260603/990000000000032001.wav",
+    )
+
+    assert (
+        url
+        == "https://cdn.example.com/recov/recordings/000000/20260603/"
         "990000000000032001.wav"
     )
 

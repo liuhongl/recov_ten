@@ -59,7 +59,17 @@ limit 1
 """
 
 DEBT_RECORD_SQL = """
-select debtor_name, address, debt_amount, debtor_gender, debtor_age, tenant_id, persona_id
+select
+  debtor_name,
+  address,
+  debt_amount,
+  deadline_time,
+  overdue_amount,
+  debtor_gender,
+  debtor_age,
+  tenant_id,
+  persona_id,
+  organization
 from debt_record
 where id = $1
 limit 1
@@ -505,8 +515,11 @@ class PostgresPromptStore:
         debtor_name = _row_value(debt_row, "debtor_name")
         address = _row_value(debt_row, "address")
         debt_amount = _row_value(debt_row, "debt_amount")
+        deadline_time = _optional_row_value(debt_row, "deadline_time")
+        overdue_amount = _optional_row_value(debt_row, "overdue_amount")
         debtor_gender = _row_value(debt_row, "debtor_gender")
         debtor_age = _row_value(debt_row, "debtor_age")
+        organization = _optional_row_value(debt_row, "organization")
         try:
             opening = build_business_opening_request(
                 employee_name=employee_name,
@@ -514,6 +527,7 @@ class PostgresPromptStore:
                 debtor_gender=debtor_gender,
                 debt_amount=debt_amount,
                 address=address,
+                organization=organization,
                 speaking_style=speaking_style,
                 opening_template=opening_template,
                 voice=(
@@ -540,7 +554,10 @@ class PostgresPromptStore:
             debtor_gender=debtor_gender,
             debtor_age=debtor_age,
             debt_amount=debt_amount,
+            deadline_time=deadline_time,
+            overdue_amount=overdue_amount,
             address=address,
+            organization=organization,
             history_summary_block=_render_history_summary_block(
                 historical_summaries,
                 debt_amount=debt_amount,
@@ -933,6 +950,7 @@ class PostgresCallResultWriter:
                         message=_call_result_failure_message(payload),
                     )
                     continue
+                is_handoff_failed = payload.get("status") == "handoff_failed"
                 transcript_json = build_call_record_transcript_json(payload)
                 updated = await self.store.mark_transcript_completed(
                     context,
@@ -943,7 +961,10 @@ class PostgresCallResultWriter:
                         "call_record_transcript_update_noop call_id=%s",
                         payload.get("call_id"),
                     )
-                    if _is_local_outbound_test_context(context):
+                    if (
+                        _is_local_outbound_test_context(context)
+                        and not is_handoff_failed
+                    ):
                         self._publish_success_callback(
                             payload,
                             context,
@@ -953,7 +974,14 @@ class PostgresCallResultWriter:
                         self._publish_failure_callback(payload, context)
                 else:
                     await self._upload_recording(payload)
-                    self._publish_success_callback(payload, context)
+                    if is_handoff_failed:
+                        self._publish_failure_callback(
+                            payload,
+                            context,
+                            message="转人工失败",
+                        )
+                    else:
+                        self._publish_success_callback(payload, context)
             except Exception:
                 LOGGER.warning(
                     "call_record_transcript_update_failed call_id=%s",
@@ -1415,6 +1443,13 @@ def _row_value(row: Any, key: str) -> Any:
         return getattr(row, key)
 
 
+def _optional_row_value(row: Any, key: str) -> Any:
+    try:
+        return _row_value(row, key)
+    except (AttributeError, KeyError, TypeError, IndexError):
+        return None
+
+
 def _call_record_precheck_passed(
     row: Any | None,
     params: BusinessCallRecordRef,
@@ -1516,10 +1551,18 @@ def _render_business_prompt(
     debtor_age: object,
     debt_amount: object,
     address: object,
+    deadline_time: object = None,
+    overdue_amount: object = None,
+    organization: object = None,
     history_summary_block: str | None = None,
 ) -> str:
     salutation = _prompt_debtor_salutation(debtor_name, debtor_gender)
     speaking_style_text = _prompt_block(speaking_style) or BUSINESS_DIALOG_SPEAKING_STYLE
+    organization_text = _prompt_fact(organization)
+    address_text = _prompt_fact(address)
+    deadline_time_text = _prompt_fact(deadline_time)
+    debt_amount_text = _prompt_money_fact(debt_amount)
+    overdue_amount_text = _prompt_money_fact(overdue_amount)
     lines = [
         "# 角色",
         f"你是{_prompt_text(employee_name)}，负责通过电话进行合规的逾期费用提醒和费用处理沟通。",
@@ -1548,10 +1591,19 @@ def _render_business_prompt(
         "8. 这类身份核实句不得夹带地址、房号、待处理金额、欠费明细或费用原因。",
         "9. 用户抱怨啰嗦、要求直接说、追问什么事但仍未确认身份时，只能说明“为保护信息安全，确认本人或授权处理人后才能说明具体内容”，不得披露具体信息。",
         "",
+        "# 本轮可核实业务信息",
+        f"所属项目：{organization_text}",
+        f"地址：{address_text}",
+        f"缴费截止日期：{deadline_time_text}",
+        f"逾期金额：{debt_amount_text}",
+        f"逾期滞纳金：{overdue_amount_text}",
+        "以上信息只允许在确认本人或授权处理人后按需回答；身份未确认前不得主动披露。",
+        "",
         "# 身份确认后的信息边界",
-        "具体金额不写入本轮对话提示词；无论身份是否确认，均不得在通话中说出具体金额。",
-        "用户询问欠款金额、差多少钱或待处理金额时，不得说出系统记录金额，不得复述用户提到的金额；只能说明具体金额以物业系统或官方已公示渠道核实为准。",
-        "地址、房号和费用明细不写入本轮对话提示词；用户追问地址、房号或费用构成明细时，只能说明以物业系统或官方已公示渠道核实为准。",
+        "身份未确认前不得披露所属项目、地址、房号、逾期金额、逾期滞纳金或费用明细。",
+        "身份确认后可以按本轮业务提示词中的系统记录回答所属项目、地址、逾期金额和逾期滞纳金。",
+        "回答逾期金额和逾期滞纳金时必须同时说明缴费截止日期；如果缴费截止日期未提供，不得直接报金额，引导用户联系物业公司核实。",
+        "系统未提供或无法确定的信息，不要猜测；统一引导用户联系物业公司获取准确信息。",
         "回答金额相关问题后直接收口；不得追问近期是否安排处理、是否有缴费计划或处理计划。",
         f"业主称呼：{salutation}",
         "",
@@ -1575,6 +1627,19 @@ def _render_business_prompt(
 
 def _prompt_block(value: object) -> str:
     return str(value or "").strip()
+
+
+def _prompt_fact(value: object) -> str:
+    return _prompt_block(value) or "本轮提示词未提供"
+
+
+def _prompt_money_fact(value: object) -> str:
+    text = _prompt_block(value)
+    if not text:
+        return "本轮提示词未提供"
+    if text.endswith("元"):
+        return text
+    return f"{text}元"
 
 
 def _sanitize_business_strategy_text(value: object, *, append_note: bool = True) -> str:

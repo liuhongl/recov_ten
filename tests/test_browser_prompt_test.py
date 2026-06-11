@@ -79,9 +79,10 @@ def test_manual_browser_prompt_uses_current_business_rules_without_copied_defaul
     )[0]
     assert "数据库催收策略决定业务目标、推进方向和可表达的信息范围" not in dialog_style_block
     assert "客服语气配置决定表达风格、正式程度和语气强弱" not in dialog_style_block
-    assert "12.34元" not in snapshot.instructions
+    assert "逾期金额：12.34元" in snapshot.instructions
+    assert "缴费截止日期：本轮提示词未提供" in snapshot.instructions
     assert "系统记录待处理金额：12.34" not in snapshot.instructions
-    assert "无论身份是否确认，均不得在通话中说出具体金额" in snapshot.instructions
+    assert "身份确认后可以按本轮业务提示词中的系统记录回答所属项目、地址、逾期金额和逾期滞纳金" in snapshot.instructions
 
 
 def test_manual_browser_prompt_redacts_amounts_from_browser_overrides():
@@ -163,10 +164,13 @@ def test_database_browser_prompt_reuses_postgres_composition_and_sensitive_summa
                     "debtor_name": "金阳",
                     "address": "测试小区一号楼",
                     "debt_amount": "12.34",
+                    "deadline_time": "2026-06-30",
+                    "overdue_amount": "1.23",
                     "debtor_gender": "女",
                     "debtor_age": 38,
                     "tenant_id": "000000",
                     "persona_id": 3,
+                    "organization": "阳光花园一期项目",
                 }
             raise AssertionError(query)
 
@@ -191,7 +195,7 @@ def test_database_browser_prompt_reuses_postgres_composition_and_sensitive_summa
                 "personaId": "3",
             },
             "sections": {
-                "privacy_disclosure": ["浏览器测试：身份未确认时仍然不能说金额。"],
+                "privacy_disclosure": ["浏览器测试：身份未确认前仍然不能说金额。"],
             },
         }
     )
@@ -208,16 +212,19 @@ def test_database_browser_prompt_reuses_postgres_composition_and_sensitive_summa
     assert "# 客服语气配置" in snapshot.instructions
     assert "正式但亲切的客服口吻。" in snapshot.instructions
     assert "正式但亲切的客服口吻。" in snapshot.metadata["speaking_style"]
-    assert "12.34元" not in snapshot.instructions
+    assert "所属项目：阳光花园一期项目" in snapshot.instructions
+    assert "地址：测试小区一号楼" in snapshot.instructions
+    assert "缴费截止日期：2026-06-30" in snapshot.instructions
+    assert "逾期金额：12.34元" in snapshot.instructions
+    assert "逾期滞纳金：1.23元" in snapshot.instructions
     assert "系统记录待处理金额：12.34" not in snapshot.instructions
-    assert "测试小区一号楼" not in snapshot.instructions
-    assert "无论身份是否确认，均不得在通话中说出具体金额" in snapshot.instructions
-    assert "用户询问欠款金额、差多少钱或待处理金额时" in snapshot.instructions
-    assert "浏览器测试：身份未确认时仍然不能说金额。" in snapshot.instructions
+    assert "无论身份是否确认，均不得在通话中说出具体金额" not in snapshot.instructions
+    assert "回答逾期金额和逾期滞纳金时必须同时说明缴费截止日期" in snapshot.instructions
+    assert "浏览器测试：身份未确认前仍然不能说金额。" in snapshot.instructions
     assert registration.sensitive_summary == {
-        "amount_in_prompt": False,
-        "amount_disclosure_forbidden": True,
-        "address_room_detail_excluded": True,
+        "amount_in_prompt": True,
+        "amount_disclosure_forbidden": False,
+        "address_room_detail_excluded": False,
     }
 
 
@@ -225,7 +232,7 @@ def test_database_browser_prompt_reports_persona_id_mismatch_without_using_it_fo
     base_snapshot = PromptSnapshot(
         scene="collector-a:3",
         version="postgres",
-        instructions="无论身份是否确认，均不得在通话中说出具体金额。",
+        instructions="身份确认后可以按本轮业务提示词中的系统记录回答所属项目、地址、逾期金额和逾期滞纳金。",
         content_hash="base-hash",
         loaded_at_ms=1,
         metadata={
@@ -322,7 +329,7 @@ def test_database_browser_prompt_can_prepare_opening_audio_for_browser_call_id()
     base_snapshot = PromptSnapshot(
         scene="collector-a:3",
         version="postgres",
-        instructions="无论身份是否确认，均不得在通话中说出具体金额。",
+        instructions="身份确认后可以按本轮业务提示词中的系统记录回答所属项目、地址、逾期金额和逾期滞纳金。",
         content_hash="base-hash",
         loaded_at_ms=1,
         metadata={

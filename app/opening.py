@@ -38,6 +38,7 @@ LEGACY_BUSINESS_OPENING_TEMPLATE_ALIASES = {
     "{{name}}": "{name}",
     "{{identity_name}}": "{identity_name}",
     "{{identityName}}": "{identityName}",
+    "{{organization}}": "{organization}",
 }
 OPENING_TTS_PREFIX = (
     "你正在进行一通电话外呼。请用自然、礼貌、像真人客服接通电话一样的口吻说出下面开场白。"
@@ -250,6 +251,7 @@ def build_business_opening_request(
     debtor_gender: object,
     debt_amount: object,
     address: object,
+    organization: object | None = None,
     speaking_style: object | None = None,
     opening_template: object | None = None,
     voice: str = "female",
@@ -267,6 +269,9 @@ def build_business_opening_request(
     gender_text = "" if debtor_gender is None else str(debtor_gender).strip()
     amount_text = _arrears_amount(debt_amount)
     address_text = _business_text(address, "address", max_length=120)
+    organization_text = (
+        _optional_business_text(organization, "organization", max_length=120) or ""
+    )
     title = _debtor_title(gender_text)
     salutation = _debtor_salutation(debtor_name_text, title)
     speaking_style_text = _optional_business_text(
@@ -283,8 +288,11 @@ def build_business_opening_request(
         "title": title,
         "salutation": salutation,
     }
+    if organization_text:
+        business_values["organization"] = organization_text
     template_values = {
         **business_values,
+        "organization": organization_text,
         "name": salutation,
         "identity_name": employee_name_text,
         "identityName": employee_name_text,

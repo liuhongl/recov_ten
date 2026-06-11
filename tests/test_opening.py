@@ -152,6 +152,27 @@ def test_build_business_opening_request_supports_camel_case_identity_alias():
     )
 
 
+def test_build_business_opening_request_supports_organization_alias():
+    opening = build_business_opening_request(
+        employee_name="物业中心小明",
+        debtor_name="金阳",
+        debtor_gender="男",
+        debt_amount="1250.50",
+        address="阳光花园一期1栋101室",
+        organization="阳光花园一期项目",
+        opening_template=(
+            "您好，请问是{{name}}吗？我是{{organization}}的{{identityName}}。"
+            "这边有一项物业费相关事项需要跟您核实。"
+        ),
+    )
+
+    assert opening.opening_text == (
+        "您好，请问是金先生吗？我是阳光花园一期项目的物业中心小明。"
+        "这边有一项物业费相关事项需要跟您核实。"
+    )
+    assert opening.business["organization"] == "阳光花园一期项目"
+
+
 def test_build_business_opening_request_ignores_sensitive_strategy_template():
     opening = build_business_opening_request(
         employee_name="物业中心小明",

@@ -1057,8 +1057,8 @@ def test_browser_test_prompts_endpoint_registers_prompt_snapshot_with_preview():
         assert payload["call_id"] == "browser-http-test"
         assert payload["prompt"]["version"] == "browser-test"
         assert "HTTP 测试规则。" in payload["prompt"]["preview"]
-        assert payload["sensitive_summary"]["amount_in_prompt"] is False
-        assert payload["sensitive_summary"]["amount_disclosure_forbidden"] is True
+        assert payload["sensitive_summary"]["amount_in_prompt"] is True
+        assert payload["sensitive_summary"]["amount_disclosure_forbidden"] is False
         snapshot = prompt_store.get("browser-http-test")
         assert snapshot is not None
         assert "HTTP 测试规则。" in snapshot.instructions
@@ -1080,8 +1080,7 @@ def test_browser_test_prompt_database_preview_returns_database_speaking_style():
                     version="postgres",
                     instructions=(
                         "# 客服语气配置\n数据库法务语气。\n"
-                        "具体金额不写入本轮对话提示词；"
-                        "无论身份是否确认，均不得在通话中说出具体金额。"
+                        "身份确认后可以按本轮业务提示词中的系统记录回答所属项目、地址、逾期金额和逾期滞纳金。"
                     ),
                     content_hash="database-hash",
                     loaded_at_ms=123,
@@ -1136,7 +1135,7 @@ def test_browser_test_prompt_database_preview_returns_database_speaking_style():
         assert payload["persona_profile"] == "画像策略：强沟通意愿，先确认身份再推进。"
         assert payload["prompt"]["content_hash"] == "database-hash"
         assert payload["sensitive_summary"]["amount_in_prompt"] is False
-        assert payload["sensitive_summary"]["amount_disclosure_forbidden"] is True
+        assert payload["sensitive_summary"]["amount_disclosure_forbidden"] is False
         assert preparer.contexts == [
             {"identityName": "企业法务", "debtId": "2058923748267257858"}
         ]

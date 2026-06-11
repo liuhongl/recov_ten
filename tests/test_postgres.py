@@ -129,10 +129,13 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
                     "debtor_name": "金阳",
                     "address": "测试小区一号楼",
                     "debt_amount": "12.34",
+                    "deadline_time": "2026-06-30",
+                    "overdue_amount": "1.23",
                     "debtor_gender": "女",
                     "debtor_age": 38,
                     "tenant_id": "000000",
                     "persona_id": 3,
+                    "organization": "阳光花园一期项目",
                 }
             raise AssertionError(query)
 
@@ -156,16 +159,23 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert "先确认本人，再说明费用。" in prep.prompt_snapshot.instructions
     assert "业主称呼：金女士" in prep.prompt_snapshot.instructions
     assert "业主姓名：金阳" not in prep.prompt_snapshot.instructions
-    assert "12.34元" not in prep.prompt_snapshot.instructions
+    assert "所属项目：阳光花园一期项目" in prep.prompt_snapshot.instructions
+    assert "地址：测试小区一号楼" in prep.prompt_snapshot.instructions
+    assert "缴费截止日期：2026-06-30" in prep.prompt_snapshot.instructions
+    assert "逾期金额：12.34元" in prep.prompt_snapshot.instructions
+    assert "逾期滞纳金：1.23元" in prep.prompt_snapshot.instructions
     assert "系统记录待处理金额：12.34" not in prep.prompt_snapshot.instructions
-    assert "地址：测试小区一号楼" not in prep.prompt_snapshot.instructions
-    assert "无论身份是否确认，均不得在通话中说出具体金额" in prep.prompt_snapshot.instructions
-    assert "地址、房号和费用明细不写入本轮对话提示词" in prep.prompt_snapshot.instructions
+    assert "无论身份是否确认，均不得在通话中说出具体金额" not in prep.prompt_snapshot.instructions
+    assert "地址、房号和费用明细不写入本轮对话提示词" not in prep.prompt_snapshot.instructions
     assert "# 金额与争议处理" in prep.prompt_snapshot.instructions
     assert "# 身份核实与隐私边界" in prep.prompt_snapshot.instructions
     assert "业主本人或该费用事项的授权处理人" in prep.prompt_snapshot.instructions
-    assert "用户只说“方便”“可以”“好的”“嗯”“对”“是的”“在的”“你说吧”“什么事”等短句，不能视为已确认本人或授权处理人" in prep.prompt_snapshot.instructions
+    assert "用户只说“方便”“可以”“好的”“嗯”“你说吧”“什么事”等短句，不能视为已确认本人或授权处理人" in prep.prompt_snapshot.instructions
+    assert "用户只说“方便”“可以”“好的”“嗯”“对”“是的”“在的”“你说吧”“什么事”等短句" not in prep.prompt_snapshot.instructions
     assert "必须等用户明确说自己是业主本人、业主本人在接听、授权处理人，或明确表示自己可以处理该费用事项" in prep.prompt_snapshot.instructions
+    assert "上一句已经明确询问是否为业主本人或授权处理人" in prep.prompt_snapshot.instructions
+    assert "用户回答“是的”“对”“我是”“是我”“本人”“我就是”等明确肯定表达，可视为身份已确认" in prep.prompt_snapshot.instructions
+    assert "不要再次要求同一身份确认" in prep.prompt_snapshot.instructions
     assert "不得主动披露具体姓名、地址、房号、待处理金额" in prep.prompt_snapshot.instructions
     assert "身份确认阶段只能使用业主称呼，不得说出完整姓名" in prep.prompt_snapshot.instructions
     assert "身份未确认时，下一句只能问：请问您是金女士本人，或者是这项物业费事项的授权处理人吗？" in prep.prompt_snapshot.instructions
@@ -174,12 +184,11 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert "用户抱怨啰嗦、要求直接说、追问什么事但仍未确认身份时" in prep.prompt_snapshot.instructions
     assert "只能说明“物业费事项”或“费用事项需要核实”" in prep.prompt_snapshot.instructions
     assert "# 身份确认后的信息边界" in prep.prompt_snapshot.instructions
-    assert "用户询问欠款金额、差多少钱或待处理金额时" in prep.prompt_snapshot.instructions
-    assert "不得说出系统记录金额" in prep.prompt_snapshot.instructions
+    assert "身份确认后可以按本轮业务提示词中的系统记录回答所属项目、地址、逾期金额和逾期滞纳金" in prep.prompt_snapshot.instructions
+    assert "回答逾期金额和逾期滞纳金时必须同时说明缴费截止日期" in prep.prompt_snapshot.instructions
     assert "用户主动询问欠款金额" in prep.prompt_snapshot.instructions
     assert "必须先确认对方是业主本人或授权处理人" in prep.prompt_snapshot.instructions
-    assert "确认后也不得在通话中说出具体金额" in prep.prompt_snapshot.instructions
-    assert "不得复述用户提到的金额" in prep.prompt_snapshot.instructions
+    assert "确认后也不得在通话中说出具体金额" not in prep.prompt_snapshot.instructions
     assert "不得脱离本轮业务策略自行承诺减免、豁免利息" in prep.prompt_snapshot.instructions
     assert "以物业公司核实和办理为准" in prep.prompt_snapshot.instructions
     assert "不要确认用户已经还清" in prep.prompt_snapshot.instructions
@@ -203,15 +212,15 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert "全程使用“您”" in prep.prompt_snapshot.instructions
     assert "不要说“你家”" in prep.prompt_snapshot.instructions
     assert "避免使用“尽快缴纳”“不影响物业服务”" in prep.prompt_snapshot.instructions
-    assert "不得编造或猜测天气、新闻、时间" in prep.prompt_snapshot.instructions
-    assert "不掌握该信息" in prep.prompt_snapshot.instructions
+    assert "用户询问不清楚、无法确定、系统未提供或与当前物业费事项无关的问题时" in prep.prompt_snapshot.instructions
+    assert "统一引导用户联系物业公司获取准确信息或更多信息" in prep.prompt_snapshot.instructions
     assert "无论用户是否主动提到租客" in prep.prompt_snapshot.instructions
     assert "不得索要租客联系方式" in prep.prompt_snapshot.instructions
     assert "不得建议联系租客" in prep.prompt_snapshot.instructions
     assert "# 高优先级运行红线" in prep.prompt_snapshot.instructions
     assert "不得再询问付款时间、缴费计划或租客联系方式" in prep.prompt_snapshot.instructions
     assert "不得主动询问发薪日" in prep.prompt_snapshot.instructions
-    assert "不得列举前台、公告栏、单元门口" in prep.prompt_snapshot.instructions
+    assert "不得列举未提供的前台、公告栏、单元门口" in prep.prompt_snapshot.instructions
     assert "不得说暂未涉及征信" in prep.prompt_snapshot.instructions
     assert "不得说为避免不必要的麻烦" in prep.prompt_snapshot.instructions
     assert "不得使用尽快处理" in prep.prompt_snapshot.instructions
@@ -224,7 +233,7 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert "用户已确认身份后又问你是谁、你找我干什么" in prep.prompt_snapshot.instructions
     assert "只能回答身份与受托核实事项" in prep.prompt_snapshot.instructions
     assert "用户明确拒缴、说不想交、不交了或近期没有处理计划后" in prep.prompt_snapshot.instructions
-    assert "不得附带后续处理入口、官方渠道办理、联系本人或处理计划" in prep.prompt_snapshot.instructions
+    assert "不得附带后续处理入口、联系物业公司、联系本人或处理计划" in prep.prompt_snapshot.instructions
     assert "固定回复“好的，我先记录您的反馈，就不再打扰您了。”" in prep.prompt_snapshot.instructions
     assert "用户表示已处理、已缴、已转账或已付款时，只能说明以物业系统或财务核对结果为准" in prep.prompt_snapshot.instructions
     assert "不得说我会反馈给物业核实、我反馈给物业、会反馈给物业" in prep.prompt_snapshot.instructions
@@ -263,7 +272,7 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert "延期、分期、部分付款" in prep.prompt_snapshot.instructions
     assert "延期、分期、部分付款、费用减免" in prep.prompt_snapshot.instructions
     assert "不得脱离本轮业务策略自行新增批准、减免、结清或销账承诺" in prep.prompt_snapshot.instructions
-    assert "引导客户通过物业官方已公示渠道联系物业公司核实" in prep.prompt_snapshot.instructions
+    assert "引导客户联系物业公司核实" in prep.prompt_snapshot.instructions
     assert "不得自行承诺批准、减免、结清或销账" in prep.prompt_snapshot.instructions
     assert "部分缴纳未获本轮业务策略明确方案时" in prep.prompt_snapshot.instructions
     assert "数据库策略明确提供授权、条件和范围时，以数据库策略为准" not in prep.prompt_snapshot.instructions
@@ -280,7 +289,7 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert "后续只允许回答用户直接提出的必要问题" in prep.prompt_snapshot.instructions
     assert "账务、金额、收费标准争议" in prep.prompt_snapshot.instructions
     assert "支付安全、凭证、发票、已转账" in prep.prompt_snapshot.instructions
-    assert "通过物业官方已公示渠道核实和办理" in prep.prompt_snapshot.instructions
+    assert "联系物业公司核实和办理" in prep.prompt_snapshot.instructions
     assert "不编造具体官方渠道名称、账号或缴费方式" in prep.prompt_snapshot.instructions
     assert "不得编造公众号、缴费入口、物业前台位置、发票开具规则或维修进度" in prep.prompt_snapshot.instructions
     assert "不列举未提供的前台、公众号、缴费机或账户" in prep.prompt_snapshot.instructions
@@ -437,7 +446,7 @@ def test_postgres_prompt_store_preserves_database_fee_reduction_authorization():
     assert "可以免除其滞纳金、违约金等附加费用" in prep.prompt_snapshot.instructions
     assert "可以免除其滞纳金、违约金等附加费用" in prep.prompt_snapshot.metadata["strategy_core"]
     assert "不得脱离本轮业务策略自行新增批准、减免、结清或销账承诺" in prep.prompt_snapshot.instructions
-    assert "引导客户通过物业官方已公示渠道联系物业公司核实" in prep.prompt_snapshot.instructions
+    assert "引导客户联系物业公司核实" in prep.prompt_snapshot.instructions
     assert "不得自行承诺批准、减免、结清或销账" in prep.prompt_snapshot.instructions
     assert "数据库策略明确提供授权、条件和范围时，以数据库策略为准" not in prep.prompt_snapshot.instructions
     assert "可按授权说明是否可减免" not in prep.prompt_snapshot.instructions
@@ -519,8 +528,8 @@ def test_postgres_prompt_store_includes_historical_analysis_summaries():
     assert "历史第1通：用户表示[地址已隐藏][金额已隐藏]物业费资金紧张，承诺月底前处理。" in instructions
     assert "用户表示测试小区一号楼12.34元物业费资金紧张" not in instructions
     assert "系统记录待处理金额：12.34元" not in instructions
-    assert "无论身份是否确认，均不得在通话中说出具体金额" in instructions
-    assert "测试小区一号楼" not in instructions
+    assert "无论身份是否确认，均不得在通话中说出具体金额" not in instructions
+    assert "地址：测试小区一号楼" in instructions
     assert "历史第2通：用户希望先核对费用明细。" in instructions
     assert "历史第3通" not in instructions
     assert "not-json" not in instructions
@@ -804,8 +813,9 @@ def test_postgres_prompt_store_prevents_repeat_identity_and_payment_push_after_r
     assert "不得再次要求身份确认" in instructions
     assert "系统记录待处理金额：12.34元" not in instructions
     assert "可按系统记录待处理金额回答" not in instructions
-    assert "不得说出系统记录金额" in instructions
-    assert "不得复述用户提到的金额" in instructions
+    assert "逾期金额：12.34元" in instructions
+    assert "缴费截止日期：本轮提示词未提供" in instructions
+    assert "如果本轮提示词缺少缴费截止日期、逾期金额或逾期滞纳金" in instructions
     assert "不得追问近期是否安排处理" in instructions
     assert "不得询问是否有缴费计划或处理计划" in instructions
     assert "用户已确认身份后又问你是谁、你找我干什么" in instructions
@@ -1678,6 +1688,150 @@ def test_postgres_call_result_writer_uploads_recording_before_success_callback()
     asyncio.run(assert_writer())
 
 
+def test_postgres_call_result_writer_uploads_recording_before_handoff_failed_callback():
+    async def assert_writer():
+        events = []
+
+        class Store:
+            async def mark_transcript_completed(self, context, transcript_json):
+                events.append(("transcript", json.loads(transcript_json)))
+                return True
+
+        class RecordingUploader:
+            async def upload_from_call_result(self, payload):
+                events.append(("recording_upload", payload["recording_path"]))
+                return 123456789
+
+        class FakeFlowCallbackWriter:
+            def publish(self, event):
+                events.append(("failed_callback", event.status, event.message))
+                return True
+
+        writer = PostgresCallResultWriter(
+            Store(),
+            flow_callback_writer=FakeFlowCallbackWriter(),
+            recording_uploader=RecordingUploader(),
+        )
+        writer.start()
+        try:
+            assert writer.enqueue_nowait(
+                {
+                    "call_id": "internal-media-call",
+                    "status": "handoff_failed",
+                    "failure_reason": "-ERR NO_ANSWER",
+                    "recording_path": (
+                        "/var/lib/freeswitch/recordings/990000000000032001.wav"
+                    ),
+                    "context": {
+                        "tenantId": "000000",
+                        "taskId": "task-1",
+                        "callId": "990000000000032001",
+                        "debtId": "2049810626160668673",
+                    },
+                    "turns": [
+                        {"role": "assistant", "text": "您好"},
+                        {"role": "user", "text": "我要转人工"},
+                    ],
+                }
+            )
+            await asyncio.wait_for(writer.queue.join(), timeout=1.0)
+        finally:
+            await writer.stop()
+
+        assert events == [
+            (
+                "transcript",
+                {
+                    "turns": [
+                        {"role": "assistant", "text": "您好"},
+                        {"role": "user", "text": "我要转人工"},
+                    ]
+                },
+            ),
+            (
+                "recording_upload",
+                "/var/lib/freeswitch/recordings/990000000000032001.wav",
+            ),
+            ("failed_callback", "FAILED", "转人工失败"),
+        ]
+
+    asyncio.run(assert_writer())
+
+
+def test_postgres_call_result_writer_keeps_handoff_failed_when_recording_upload_fails():
+    async def assert_writer():
+        events = []
+
+        class Store:
+            async def mark_transcript_completed(self, context, transcript_json):
+                events.append(("transcript", json.loads(transcript_json)))
+                return True
+
+        class FailingRecordingUploader:
+            async def upload_from_call_result(self, payload):
+                events.append(("recording_upload", payload["recording_path"]))
+                raise RuntimeError("minio unavailable")
+
+        class FakeFlowCallbackWriter:
+            def publish(self, event):
+                events.append(("failed_callback", event.status, event.message))
+                return True
+
+        writer = PostgresCallResultWriter(
+            Store(),
+            flow_callback_writer=FakeFlowCallbackWriter(),
+            recording_uploader=FailingRecordingUploader(),
+        )
+        writer.start()
+        try:
+            assert writer.enqueue_nowait(
+                {
+                    "call_id": "internal-media-call",
+                    "status": "handoff_failed",
+                    "failure_reason": "-ERR NO_ANSWER",
+                    "recording_path": (
+                        "/var/lib/freeswitch/recordings/990000000000032001.wav"
+                    ),
+                    "context": {
+                        "tenantId": "000000",
+                        "taskId": "task-1",
+                        "callId": "990000000000032001",
+                        "debtId": "2049810626160668673",
+                    },
+                    "turns": [
+                        {
+                            "role": "assistant",
+                            "text": "正在为您转接人工座席，请稍等",
+                        }
+                    ],
+                }
+            )
+            await asyncio.wait_for(writer.queue.join(), timeout=1.0)
+        finally:
+            await writer.stop()
+
+        assert events == [
+            (
+                "transcript",
+                {
+                    "turns": [
+                        {
+                            "role": "assistant",
+                            "text": "正在为您转接人工座席，请稍等",
+                        }
+                    ]
+                },
+            ),
+            (
+                "recording_upload",
+                "/var/lib/freeswitch/recordings/990000000000032001.wav",
+            ),
+            ("failed_callback", "FAILED", "转人工失败"),
+        ]
+
+    asyncio.run(assert_writer())
+
+
 def test_postgres_call_result_writer_uses_explicit_business_id_for_success_callback():
     async def assert_writer():
         flow_events: list[FlowCallbackEvent] = []
@@ -2035,6 +2189,68 @@ def test_postgres_prompt_store_derives_persona_and_employee_from_debt_and_voice(
         "您好，请问是金女士吗？我是物业中心李晓莉。"
         "这边有一项物业费事项需要和您本人核实一下，请问现在方便确认吗？"
     )
+
+
+def test_postgres_prompt_store_renders_opening_organization_from_debt_record():
+    class Conn:
+        async def fetchrow(self, query, *args):
+            if "from call_voice_config" in query:
+                return None
+            if "from call_identity_name" in query:
+                return {"name": "李经理"}
+            if "from persona_call_strategy" in query:
+                return {
+                    "strategy_core": "先确认本人，再说明费用。",
+                    "speaking_style": "正式但亲切的客服口吻。",
+                    "opening_template": (
+                        "您好，请问是{{name}}吗？我是{{organization}}的"
+                        "{{identityName}}，这边有一项物业费事项需要和您本人核实。"
+                    ),
+                }
+            if "from debt_record" in query:
+                assert "organization" in query
+                assert "deadline_time" in query
+                assert "overdue_amount" in query
+                assert args == (2056563388954320898,)
+                return {
+                    "debtor_name": "金阳",
+                    "address": "测试小区一号楼",
+                    "debt_amount": "12.34",
+                    "deadline_time": "2026-06-30",
+                    "overdue_amount": "1.23",
+                    "debtor_gender": "女",
+                    "debtor_age": 38,
+                    "tenant_id": "000000",
+                    "persona_id": 7,
+                    "organization": "阳光花园一期项目",
+                }
+            raise AssertionError(query)
+
+    store = PostgresPromptStore(FakePool(Conn()))
+
+    prep = asyncio.run(
+        store.prepare_business_prompt(
+            {
+                "identityName": "项目员工",
+                "debtId": "2056563388954320898",
+            },
+            fallback_instructions="fallback",
+        )
+    )
+
+    assert prep is not None
+    assert prep.opening.opening_text == (
+        "您好，请问是金女士吗？我是阳光花园一期项目的李经理，"
+        "这边有一项物业费事项需要和您本人核实。"
+    )
+    assert prep.opening.business["organization"] == "阳光花园一期项目"
+    assert "所属项目：阳光花园一期项目" in prep.prompt_snapshot.instructions
+    assert "地址：测试小区一号楼" in prep.prompt_snapshot.instructions
+    assert "缴费截止日期：2026-06-30" in prep.prompt_snapshot.instructions
+    assert "逾期金额：12.34元" in prep.prompt_snapshot.instructions
+    assert "逾期滞纳金：1.23元" in prep.prompt_snapshot.instructions
+    assert "deadline_time" not in prep.prompt_snapshot.metadata
+    assert "overdue_amount" not in prep.prompt_snapshot.metadata
 
 
 def test_threadsafe_business_prompt_preparer_runs_store_on_event_loop():

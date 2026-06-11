@@ -300,6 +300,9 @@ def build_browser_prompt_snapshot(payload: Mapping[str, Any]) -> PromptSnapshot:
         debtor_age=payload.get("debtor_age"),
         debt_amount=payload.get("debt_amount"),
         address=payload.get("address"),
+        deadline_time=payload.get("deadline_time"),
+        overdue_amount=payload.get("overdue_amount"),
+        organization=payload.get("organization"),
     )
     instructions = _with_browser_overrides(
         instructions,
@@ -529,10 +532,13 @@ def _sensitive_summary(instructions: str) -> dict[str, bool]:
         "系统记录待处理金额：" in instructions
         and "系统记录待处理金额：本轮提示词未提供" not in instructions
     ) or PROMPT_AMOUNT_RE.search(instructions) is not None
-    address_or_detail_present = re.search(
-        r"(地址|房号|费用明细|欠费明细)\s*[:：]\s*\S+",
-        instructions,
-    ) is not None
+    address_or_detail_present = any(
+        "本轮提示词未提供" not in match.group(0)
+        for match in re.finditer(
+            r"(地址|房号|费用明细|欠费明细)\s*[:：]\s*\S+",
+            instructions,
+        )
+    )
     return {
         "amount_in_prompt": amount_line_present,
         "amount_disclosure_forbidden": (

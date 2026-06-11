@@ -1585,6 +1585,48 @@ def test_postgres_call_result_writer_emits_success_flow_callback_after_transcrip
     asyncio.run(assert_writer())
 
 
+def test_postgres_call_result_writer_uses_payload_success_message():
+    async def assert_writer():
+        flow_events: list[FlowCallbackEvent] = []
+
+        class Store:
+            async def mark_transcript_completed(self, context, transcript_json):
+                return True
+
+        class FakeFlowCallbackWriter:
+            def publish(self, event):
+                flow_events.append(event)
+                return True
+
+        writer = PostgresCallResultWriter(
+            Store(),
+            flow_callback_writer=FakeFlowCallbackWriter(),
+        )
+        writer.start()
+        try:
+            assert writer.enqueue_nowait(
+                {
+                    "call_id": "handoff-call",
+                    "context": {
+                        "tenantId": "000000",
+                        "taskId": "task-1",
+                        "callId": "990000000000032001",
+                    },
+                    "turns": [{"role": "assistant", "text": "您好"}],
+                    "success_message": "外呼完成，人工转写失败",
+                }
+            )
+            await asyncio.wait_for(writer.queue.join(), timeout=1.0)
+        finally:
+            await writer.stop()
+
+        assert len(flow_events) == 1
+        assert flow_events[0].status == "SUCCESS"
+        assert flow_events[0].message == "外呼完成，人工转写失败"
+
+    asyncio.run(assert_writer())
+
+
 def test_postgres_call_result_writer_keeps_success_when_recording_upload_fails():
     async def assert_writer():
         flow_events: list[FlowCallbackEvent] = []

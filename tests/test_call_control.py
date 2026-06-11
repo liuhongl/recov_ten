@@ -2478,6 +2478,119 @@ def test_outbound_manager_does_not_emit_failed_flow_callback_when_handoff_asr_fa
         manager.shutdown()
 
 
+def test_outbound_manager_enqueues_completed_result_when_handoff_asr_fails():
+    flow_events: list[FlowCallbackEvent] = []
+    writer_payloads = []
+    expected_context = {
+        "tenantId": "000000",
+        "taskId": "task-1",
+        "callId": "990000000000032001",
+        "debtId": "2049810626160668673",
+    }
+    ai_turns = [
+        {"role": "assistant", "speaker_type": "ai", "text": "您好"},
+        {"role": "user", "speaker_type": "customer", "text": "我要转人工"},
+    ]
+
+    class FakeFlowCallbackWriter:
+        def publish(self, event):
+            flow_events.append(event)
+            return True
+
+    class FakeCallResultWriter:
+        def enqueue_nowait(self, payload):
+            writer_payloads.append(payload)
+            return True
+
+    class BrokenProcessor:
+        def process(self, job):
+            raise RuntimeError("asr unavailable")
+
+    class FakeDialer:
+        async def resolve_endpoint(self, endpoint: str) -> str:
+            return "sofia/internal/sip:agent@browser.invalid;transport=ws"
+
+        async def originate(self, command: str) -> str:
+            return "+OK agent-uuid-1"
+
+        async def break_audio_stream(self, call_id: str) -> str:
+            return "+OK"
+
+        async def bridge(self, customer_call_id: str, agent_uuid: str) -> str:
+            return "+OK uuid_bridge accepted"
+
+        async def start_recording(
+            self,
+            channel_uuid: str,
+            path: str,
+            *,
+            read_only: bool = False,
+        ) -> str:
+            return "+OK Success"
+
+        async def stop_recording(self, channel_uuid: str, path: str) -> str:
+            return "+OK Success"
+
+        async def hangup(self, call_id: str, *, cause: str) -> str:
+            return "+OK hangup accepted"
+
+    manager = OutboundCallManager(
+        GatewayConfig(
+            event_socket=EventSocketConfig(enabled=True),
+            outbound=OutboundCallConfig(endpoint_template="user/{destination}"),
+            features=FeatureConfig(recording_enabled=True),
+        ),
+        dialer_factory=lambda: FakeDialer(),
+        call_result_writer=FakeCallResultWriter(),
+        flow_callback_writer=FakeFlowCallbackWriter(),
+        handoff_transcript_processor=BrokenProcessor(),
+    )
+
+    try:
+        call = manager.create_call({"destination": "1000", "context": expected_context})
+        call_id = call["call_id"]
+        _wait_for_status(manager, call_id, "originated")
+        manager.handle_channel_event(
+            ChannelStateEvent(name="CHANNEL_ANSWER", call_id=call_id)
+        )
+        manager.request_handoff(
+            call_id,
+            {
+                "last_utterance": "我要转人工",
+                "ai_turns": ai_turns,
+            },
+        )
+        manager.claim_handoff(
+            call_id,
+            {"agent_extension": "1001", "agent_uuid": "agent-uuid-1"},
+        )
+        manager.handle_channel_event(
+            ChannelStateEvent(
+                name="CHANNEL_HANGUP_COMPLETE",
+                call_id=call_id,
+                hangup_cause="NORMAL_CLEARING",
+            )
+        )
+
+        final_call = _wait_for_handoff_transcript_status(manager, call_id, "failed")
+        _wait_for_writer_event_count(writer_payloads, 1)
+
+        assert final_call["handoff"]["human_transcript_error"] == "asr unavailable"
+        assert writer_payloads == [
+            {
+                "call_id": call_id,
+                "business_id": "990000000000032001",
+                "recording_path": final_call["recording_path"],
+                "context": expected_context,
+                "turns": ai_turns,
+                "success_message": "外呼完成，人工转写失败",
+            }
+        ]
+        assert [event.status for event in flow_events] == ["ACCEPTED"]
+    finally:
+        manager.shutdown()
+
+
 def test_outbound_manager_does_not_emit_failed_flow_callback_when_handoff_recording_fails():
     flow_events: list[FlowCallbackEvent] = []
 

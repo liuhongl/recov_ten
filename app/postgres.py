@@ -981,7 +981,11 @@ class PostgresCallResultWriter:
                             message="转人工失败",
                         )
                     else:
-                        self._publish_success_callback(payload, context)
+                        self._publish_success_callback(
+                            payload,
+                            context,
+                            message=_call_result_success_message(payload),
+                        )
             except Exception:
                 LOGGER.warning(
                     "call_record_transcript_update_failed call_id=%s",
@@ -1060,6 +1064,10 @@ def _call_result_failure_message(payload: Mapping[str, Any]) -> str:
     if reason:
         return f"外呼失败：{reason}"
     return "外呼失败"
+
+
+def _call_result_success_message(payload: Mapping[str, Any]) -> str:
+    return _prompt_text(payload.get("success_message")) or "外呼完成，转写已写入"
 
 
 def build_call_record_transcript_json(payload: Mapping[str, Any]) -> str:

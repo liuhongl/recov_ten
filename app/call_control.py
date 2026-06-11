@@ -2089,6 +2089,7 @@ class OutboundCallManager:
 
     def _mark_handoff_transcript_failed(self, call_id: str, error: str) -> None:
         handoff_failed_callback: tuple[dict[str, Any], str | None] | None = None
+        handoff_completed_result_payload: dict[str, Any] | None = None
         with self._lock:
             record = self._calls.get(call_id)
             if record is None or record.handoff is None:
@@ -2098,6 +2099,12 @@ class OutboundCallManager:
             record.handoff.updated_at_ms = _now_ms()
             record.updated_at_ms = record.handoff.updated_at_ms
             handoff_failed_callback = self._handoff_failed_callback_locked(record)
+            handoff_completed_result_payload = (
+                self._handoff_completed_result_payload_locked(
+                    record,
+                    message="外呼完成，人工转写失败",
+                )
+            )
         if handoff_failed_callback is not None:
             context, business_id = handoff_failed_callback
             if (
@@ -2108,6 +2115,8 @@ class OutboundCallManager:
                     "call_record_failed_sync_noop_before_handoff_failed_callback"
                 )
             self._publish_handoff_failed_callback(context, business_id)
+        if handoff_completed_result_payload is not None:
+            self._enqueue_handoff_completed_result(handoff_completed_result_payload)
 
     def _handoff_failed_callback_locked(
         self,
@@ -2116,6 +2125,33 @@ class OutboundCallManager:
         # Human transcript and recording failures are post-processing diagnostics.
         # They must not turn an otherwise completed handoff call into FAILED.
         return None
+
+    def _handoff_completed_result_payload_locked(
+        self,
+        record: OutboundCallRecord,
+        *,
+        message: str,
+    ) -> dict[str, Any] | None:
+        handoff = record.handoff
+        if handoff is None:
+            return None
+        if handoff.state != "completed":
+            return None
+        if not _is_terminal_status(record.status):
+            return None
+        if handoff.terminal_callback_status is not None:
+            return None
+        handoff.terminal_callback_status = "SUCCESS"
+        handoff.updated_at_ms = _now_ms()
+        record.updated_at_ms = handoff.updated_at_ms
+        return {
+            "call_id": record.call_id,
+            "business_id": _business_id(record),
+            "recording_path": record.recording_path,
+            "context": dict(record.context),
+            "turns": [*handoff.ai_turns, *handoff.human_turns],
+            "success_message": message,
+        }
 
     def _handoff_connection_failed_callback_locked(
         self,
@@ -2172,6 +2208,25 @@ class OutboundCallManager:
                 exc_info=True,
             )
             return False
+
+    def _enqueue_handoff_completed_result(self, payload: dict[str, Any]) -> bool:
+        if self._call_result_writer is None:
+            return False
+        try:
+            enqueued = bool(self._call_result_writer.enqueue_nowait(payload))
+        except Exception:
+            LOGGER.warning(
+                "handoff_completed_result_enqueue_failed call_id=%s",
+                payload.get("call_id"),
+                exc_info=True,
+            )
+            return False
+        if not enqueued:
+            LOGGER.warning(
+                "handoff_completed_result_enqueue_noop call_id=%s",
+                payload.get("call_id"),
+            )
+        return enqueued
 
     def _publish_handoff_failed_callback(
         self,

@@ -23,6 +23,7 @@ from .audio_codec import (
     pcm_s16le_rms,
     pcm_s16le_to_samples,
     resample_pcm_s16le_mono,
+    samples_to_pcm_s16le,
 )
 from .business_dialog_style import (
     BUSINESS_CRITICAL_RUNTIME_RULES,
@@ -34,6 +35,7 @@ from .freeswitch_event_socket import (
     FreeSwitchPlaybackController,
     PlaybackProgressEvent,
 )
+from .handoff_prompts import HANDOFF_CONNECTING_PROMPT_TEXT
 from .media_contract import PhoneMediaContract
 from .opening import OpeningAudioStore, PreparedOpeningAudio
 from .playout_controller import (
@@ -57,7 +59,6 @@ from .wav_io import write_pcm16_wav
 
 LOGGER = logging.getLogger(__name__)
 
-HANDOFF_CONNECTING_PROMPT_TEXT = "好的，正在为您转接人工座席，请稍等。"
 DEFAULT_PHONE_INSTRUCTIONS = (
     "You are a Chinese phone customer service assistant. "
     "Reply in short, natural spoken Chinese. "
@@ -99,9 +100,11 @@ OPENING_BUSINESS_GUARD = "\n".join(
     [
         "这是待缴费用确认电话，不是闲聊。",
         "开场白后，只有用户明确说自己是业主本人、授权处理人，或明确表示自己可以处理该费用事项，才视为身份已确认。",
-        "用户只说“方便”“可以”“好的”“嗯”“对”“是的”“在的”“你说吧”等短句时，不能视为已确认身份。",
-        "无论是否确认身份，都不得在通话中说出具体金额，也不得复述用户提到的金额。",
-        "未确认身份前不得披露地址、房号或费用明细；只能继续确认本人或授权处理人身份。",
+        "用户只说“方便”“可以”“好的”“嗯”“你说吧”等短句时，不能视为已确认身份。",
+        "如果开场白或上一句已经明确询问是否为业主本人或授权处理人，用户回答“是的”“对”“我是”“是我”“本人”“我就是”等明确肯定表达，可视为身份已确认；不要再次重复确认身份。",
+        "未确认身份前不得披露所属项目、地址、房号、逾期金额、逾期滞纳金或费用明细；只能继续确认本人或授权处理人身份。",
+        "身份确认后可以按本轮业务提示词中的系统记录回答所属项目、地址、逾期金额和逾期滞纳金；回答金额时必须同时说明缴费截止日期。",
+        "系统未提供、无法确定或缺少缴费截止日期的信息，不要猜测，统一引导用户联系物业公司获取准确信息。",
         *BUSINESS_CRITICAL_RUNTIME_RULES,
         *BUSINESS_DIALOG_STYLE_RULES,
         "严禁主动切换到化妆、天气、时间、学习知识、闲聊等无关话题。",
@@ -114,8 +117,15 @@ MAX_COMMITTED_HISTORY_CHARS = 1400
 OPENING_TURN_ID = 0
 OPENING_BARGE_IN_MIN_SENT_FRAMES = 10
 OPENING_BARGE_IN_MIN_PLAYBACK_MS = 300
-OPENING_ECHO_CORRELATION_THRESHOLD = 0.4
+OPENING_BARGE_IN_EARLY_GUARD_MS = 2000
+OPENING_BARGE_IN_EARLY_MIN_SPEECH_MS = 80
+OPENING_BARGE_IN_EARLY_MIN_RMS = 1000
+OPENING_BARGE_IN_EARLY_MIN_RMS_MULTIPLIER = 3
+OPENING_ECHO_CORRELATION_THRESHOLD = 0.34
 OPENING_ECHO_MAX_LAST_PLAYBACK_AGE_MS = 120
+PLAYBACK_INTERRUPT_FADE_OUT_MS = 40
+PLAYBACK_INTERRUPT_TRAILING_SILENCE_MS = 40
+PLAYBACK_INTERRUPT_SMOOTH_STOP_TIMEOUT_MS = 120
 DEFAULT_DIALOG_MODEL = "1.2.1.1"
 MAX_DIALOG_BOT_NAME_CHARS = 20
 DIALOG_PROMPT_SOFT_LIMIT_CHARS = 12000
@@ -262,6 +272,7 @@ class RealtimePhoneSessionStats:
     first_playback_at: float | None = None
     playback_last_send_at: float | None = None
     playback_last_send_turn_id: int | None = None
+    playback_last_payload: bytes | None = field(default=None, repr=False)
     disconnected_at: float | None = None
     failure_reason: str | None = None
     failure_error: str | None = None
@@ -1243,7 +1254,7 @@ class FreeSwitchRealtimeGatewayServer:
         session.opening_inbound_rms_values.append(inbound_rms)
 
         event = detector.process_frame_event(payload)
-        if not event.started:
+        if not event.started and not detector.active:
             return False
 
         playback_elapsed_ms = None
@@ -1279,6 +1290,39 @@ class FreeSwitchRealtimeGatewayServer:
                 reference_match.rms,
             )
             return True
+
+        early_min_rms = self._opening_early_barge_in_min_rms()
+        early_high_rms_ms = self._opening_recent_high_rms_ms(
+            session,
+            min_rms=early_min_rms,
+        )
+        if (
+            playback_elapsed_ms is not None
+            and playback_elapsed_ms < OPENING_BARGE_IN_EARLY_GUARD_MS
+            and early_high_rms_ms < OPENING_BARGE_IN_EARLY_MIN_SPEECH_MS
+        ):
+            LOGGER.info(
+                "realtime_phone_opening_barge_in_guarded call_id=%s "
+                "session_id=%s trigger_rms=%s opening_playback_elapsed_ms=%s "
+                "early_min_rms=%s early_high_rms_ms=%s "
+                "opening_sent_frames=%s opening_last_playback_rms=%s "
+                "opening_last_playback_age_ms=%s "
+                "opening_best_playback_correlation=%s "
+                "opening_best_playback_frame=%s opening_best_playback_rms=%s",
+                session.call_id,
+                session.session_id,
+                inbound_rms,
+                playback_elapsed_ms,
+                early_min_rms,
+                early_high_rms_ms,
+                session.opening_playback_sent_frames,
+                session.opening_last_playback_rms,
+                last_playback_age_ms,
+                _format_correlation(reference_match.correlation),
+                reference_match.frame_number,
+                reference_match.rms,
+            )
+            return False
 
         session.opening_trigger_rms = inbound_rms
         session.opening_trigger_rms_min = rms_min
@@ -1344,6 +1388,26 @@ class FreeSwitchRealtimeGatewayServer:
             audible_ms is not None
             and audible_ms >= OPENING_BARGE_IN_MIN_PLAYBACK_MS
         )
+
+    def _opening_early_barge_in_min_rms(self) -> int:
+        return max(
+            OPENING_BARGE_IN_EARLY_MIN_RMS,
+            self.config.vad.speech_rms_threshold
+            * OPENING_BARGE_IN_EARLY_MIN_RMS_MULTIPLIER,
+        )
+
+    def _opening_recent_high_rms_ms(
+        self,
+        session: RealtimePhoneSessionStats,
+        *,
+        min_rms: int,
+    ) -> int:
+        high_frames = 0
+        for rms in reversed(session.opening_inbound_rms_values):
+            if rms < min_rms:
+                break
+            high_frames += 1
+        return high_frames * self.frame_duration_ms
 
     async def _handle_server_vad_speech_started(
         self,
@@ -1650,7 +1714,7 @@ class FreeSwitchRealtimeGatewayServer:
         session.handoff_error = None
         try:
             await self._stop_ai_playback_for_handoff(session)
-            await self._play_handoff_connecting_prompt(session)
+            self._commit_handoff_prompt_turn(session, HANDOFF_CONNECTING_PROMPT_TEXT)
         finally:
             session.handoff_transitioning = False
         session.handoff_requested = True
@@ -1739,37 +1803,6 @@ class FreeSwitchRealtimeGatewayServer:
             reason,
             transcript,
         )
-
-    async def _play_handoff_connecting_prompt(
-        self,
-        session: RealtimePhoneSessionStats,
-    ) -> None:
-        realtime_session = self._realtime_sessions.get(session.session_id)
-        if realtime_session is None:
-            return
-        send_tts_text = getattr(realtime_session, "send_tts_text", None)
-        if send_tts_text is None:
-            LOGGER.warning(
-                "realtime_phone_handoff_prompt_unavailable call_id=%s "
-                "session_id=%s",
-                session.call_id,
-                session.session_id,
-            )
-            return
-        try:
-            await asyncio.wait_for(
-                send_tts_text(HANDOFF_CONNECTING_PROMPT_TEXT),
-                timeout=10,
-            )
-        except Exception:
-            LOGGER.warning(
-                "realtime_phone_handoff_prompt_failed call_id=%s session_id=%s",
-                session.call_id,
-                session.session_id,
-                exc_info=True,
-            )
-            return
-        self._commit_handoff_prompt_turn(session, HANDOFF_CONNECTING_PROMPT_TEXT)
 
     def _commit_handoff_prompt_turn(
         self,
@@ -2081,6 +2114,7 @@ class FreeSwitchRealtimeGatewayServer:
             session.playback_active = False
             raise
 
+        session.playback_last_payload = item.payload
         if item.turn_id == OPENING_TURN_ID:
             _record_opening_playback_frame(session, item.payload, send_started_at)
 
@@ -2401,6 +2435,11 @@ class FreeSwitchRealtimeGatewayServer:
             session.opening_barge_in_detector = None
         dropped_frames = self._clear_playback_queue(session)
         session.dropped_playback_frames += dropped_frames
+        await self._play_interruption_smooth_stop_tail(
+            session,
+            interrupted_output_turn_id,
+        )
+        self._clear_playback_queue(session)
         self._abandon_pending_turn(
             session,
             interrupted_output_turn_id,
@@ -2441,6 +2480,60 @@ class FreeSwitchRealtimeGatewayServer:
             session.realtime_interrupt_failures,
             session.context_repair_requests,
         )
+
+    async def _play_interruption_smooth_stop_tail(
+        self,
+        session: RealtimePhoneSessionStats,
+        interrupted_output_turn_id: int | None,
+    ) -> None:
+        if interrupted_output_turn_id is None:
+            return
+
+        frames = self._interruption_smooth_stop_frames(
+            session,
+            interrupted_output_turn_id,
+        )
+        if not frames:
+            return
+
+        session.jitter_prefilled_turns.add(interrupted_output_turn_id)
+        for payload in frames:
+            await self._enqueue_playback_frame(
+                session,
+                PlaybackFrame(interrupted_output_turn_id, payload),
+            )
+
+        smooth_stop_ms = min(
+            PLAYBACK_INTERRUPT_SMOOTH_STOP_TIMEOUT_MS,
+            PLAYBACK_INTERRUPT_FADE_OUT_MS
+            + PLAYBACK_INTERRUPT_TRAILING_SILENCE_MS,
+        )
+        await asyncio.sleep(smooth_stop_ms / 1000)
+
+    def _interruption_smooth_stop_frames(
+        self,
+        session: RealtimePhoneSessionStats,
+        interrupted_output_turn_id: int,
+    ) -> list[bytes]:
+        last_payload = session.playback_last_payload
+        if session.playback_last_send_turn_id != interrupted_output_turn_id:
+            return []
+        if not last_payload or len(last_payload) != self.expected_frame_bytes:
+            return []
+
+        fade_frames = math.ceil(
+            PLAYBACK_INTERRUPT_FADE_OUT_MS / self.frame_duration_ms
+        )
+        silence_frames = math.ceil(
+            PLAYBACK_INTERRUPT_TRAILING_SILENCE_MS / self.frame_duration_ms
+        )
+        frames: list[bytes] = []
+        for index in range(fade_frames):
+            scale = (fade_frames - index) / (fade_frames + 1)
+            frames.append(_scale_pcm_s16le(last_payload, scale))
+        silence = b"\x00" * self.expected_frame_bytes
+        frames.extend(silence for _ in range(silence_frames))
+        return frames
 
     async def _interrupt_realtime_playback_context(
         self,
@@ -3232,6 +3325,12 @@ def _pcm_abs_correlation(left_pcm: bytes, right_pcm: bytes) -> float | None:
     if left_square_sum == 0 or right_square_sum == 0:
         return None
     return abs(dot_product) / math.sqrt(left_square_sum * right_square_sum)
+
+
+def _scale_pcm_s16le(pcm: bytes, scale: float) -> bytes:
+    return samples_to_pcm_s16le(
+        sample * scale for sample in pcm_s16le_to_samples(pcm)
+    )
 
 
 def _int_window_stats(values: deque[int]) -> tuple[int | None, int | None, int | None]:

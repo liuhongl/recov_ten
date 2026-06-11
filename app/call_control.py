@@ -22,6 +22,10 @@ from .freeswitch_event_socket import (
     FreeSwitchEventSocketClient,
 )
 from .flow_callback import FlowCallbackWriterProtocol, build_flow_callback_event
+from .handoff_prompts import (
+    HANDOFF_AGENT_BUSY_PROMPT_TEXT,
+    HANDOFF_CONNECTING_PROMPT_TEXT,
+)
 from .opening import (
     OpeningAudioGenerator,
     OpeningAudioStore,
@@ -39,9 +43,6 @@ LOGGER = logging.getLogger(__name__)
 
 SAFE_TOKEN_RE = re.compile(r"^[^\s{},]+$")
 LOCAL_PLACEHOLDER_BUSINESS_ID_PREFIX = "handoff-local"
-HANDOFF_AGENT_BUSY_PROMPT_TEXT = (
-    "抱歉，当前人工座席繁忙，稍后我们会继续跟进，感谢您的理解。"
-)
 
 
 class CallControlError(ValueError):
@@ -692,11 +693,13 @@ class OutboundCallManager:
         sync_context: dict[str, Any] | None = None
         sync_business_id: str | None = None
         sync_status: str | None = None
+        sync_failed_message = "外呼失败"
         stop_handoff_recording_call_id: str | None = None
         cancel_handoff_timeout_call_id: str | None = None
         cleanup_handoff_agent: tuple[str, str] | None = None
         handoff_failed_callback: tuple[dict[str, Any], str | None] | None = None
-        handoff_connection_failed_callback: tuple[
+        handoff_connection_failed_result: tuple[
+            dict[str, Any],
             dict[str, Any],
             str | None,
         ] | None = None
@@ -710,6 +713,7 @@ class OutboundCallManager:
                 sync_context = dict(record.context)
                 sync_business_id = _business_id(record)
                 sync_status = record.status
+                sync_failed_message = _failed_flow_callback_message(record)
                 if record.handoff is not None:
                     cancel_handoff_timeout_call_id = record.call_id
                     if (
@@ -729,7 +733,7 @@ class OutboundCallManager:
                 record.handoff.updated_at_ms = _now_ms()
                 stop_handoff_recording_call_id = record.call_id
             handoff_failed_callback = self._handoff_failed_callback_locked(record)
-            handoff_connection_failed_callback = (
+            handoff_connection_failed_result = (
                 self._handoff_connection_failed_callback_locked(record)
             )
         if stop_handoff_recording_call_id is not None:
@@ -743,21 +747,57 @@ class OutboundCallManager:
             self._submit_handoff_agent_cleanup_hangup(*cleanup_handoff_agent)
         if handoff_failed_callback is not None:
             self._publish_handoff_failed_callback(*handoff_failed_callback)
-        if handoff_connection_failed_callback is not None:
-            self._publish_handoff_connection_failed_callback(
-                *handoff_connection_failed_callback
+        handoff_terminal_callback_sent = handoff_failed_callback is not None
+        handoff_call_record_sync_attempted = False
+        handoff_call_record_synced = False
+        if handoff_connection_failed_result is not None:
+            (
+                handoff_result_payload,
+                handoff_callback_context,
+                handoff_callback_business_id,
+            ) = handoff_connection_failed_result
+            handoff_terminal_callback_sent = True
+            handoff_call_record_sync_attempted = True
+            handoff_result_enqueued = self._enqueue_handoff_failed_result(
+                handoff_result_payload
             )
-        handoff_terminal_callback_sent = (
-            handoff_failed_callback is not None
-            or handoff_connection_failed_callback is not None
-        )
-        if self._sync_call_record_terminal(sync_context, sync_status) and (
-            not handoff_terminal_callback_sent
+            if handoff_result_enqueued:
+                handoff_call_record_synced = True
+            else:
+                handoff_call_record_synced = self._sync_call_record_failed(
+                    handoff_callback_context,
+                )
+                if (
+                    not handoff_call_record_synced
+                    and self._flow_callback_writer is not None
+                ):
+                    LOGGER.warning(
+                        "call_record_handoff_failed_sync_noop_before_flow_callback",
+                    )
+                self._publish_handoff_connection_failed_callback(
+                    handoff_callback_context,
+                    handoff_callback_business_id,
+                )
+        call_record_synced = handoff_call_record_synced
+        if not handoff_call_record_sync_attempted:
+            call_record_synced = self._sync_call_record_terminal(
+                sync_context,
+                sync_status,
+            )
+        if (
+            _is_failed_terminal_status(sync_status)
+            and not handoff_terminal_callback_sent
         ):
+            if not call_record_synced and self._flow_callback_writer is not None:
+                LOGGER.warning(
+                    "call_record_terminal_sync_noop_before_flow_callback "
+                    "status=%s",
+                    sync_status,
+                )
             self._publish_flow_callback(
                 sync_context or {},
                 status="FAILED",
-                message="外呼失败",
+                message=sync_failed_message,
                 business_id=sync_business_id,
             )
 
@@ -785,6 +825,8 @@ class OutboundCallManager:
             record = self._calls.get(call_id)
             if record is None:
                 raise CallControlError("call not found", status_code=404)
+            if _is_terminal_status(record.status):
+                return record.to_dict()
             if record.handoff is not None and record.handoff.state in {
                 "waiting_agent",
                 "agent_claimed",
@@ -799,11 +841,12 @@ class OutboundCallManager:
                 record.handoff.updated_at_ms = now_ms
                 cancel_handoff_timeout = True
             self._set_status_locked(record, "hangup_requested")
+            call_payload = record.to_dict()
 
         if cancel_handoff_timeout:
             self._cancel_handoff_timeout(call_id)
         self._executor.submit(self._run_hangup_worker, call_id, cause)
-        return record.to_dict()
+        return call_payload
 
     def request_handoff(self, call_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         _require_safe_token(call_id, "call_id")
@@ -840,6 +883,11 @@ class OutboundCallManager:
 
         if expires_at_ms is not None:
             self._schedule_handoff_timeout(call_id, expires_at_ms)
+        self._submit_handoff_notice_play(
+            call_id,
+            HANDOFF_CONNECTING_PROMPT_TEXT,
+            "handoff_connecting_notice_submit_failed",
+        )
         return call_payload
 
     def record_agent_takeover_suggestion(
@@ -1226,6 +1274,7 @@ class OutboundCallManager:
         try:
             resolved_endpoint = await dialer.resolve_endpoint(record.endpoint)
         except CallControlError as err:
+            failed_message = "外呼失败"
             with self._lock:
                 record = self._calls[call_id]
                 record.error = str(err)
@@ -1234,11 +1283,19 @@ class OutboundCallManager:
                 self._discard_opening_locked(record.call_id)
                 failed_context = dict(record.context)
                 failed_business_id = _business_id(record)
-            if self._sync_call_record_failed(failed_context):
+                failed_message = _failed_flow_callback_message(record)
+            if failed_context is not None:
+                if (
+                    not self._sync_call_record_failed(failed_context)
+                    and self._flow_callback_writer is not None
+                ):
+                    LOGGER.warning(
+                        "call_record_failed_sync_noop_before_flow_callback"
+                    )
                 self._publish_flow_callback(
                     failed_context,
                     status="FAILED",
-                    message="外呼失败",
+                    message=failed_message,
                     business_id=failed_business_id,
                 )
             LOGGER.info(
@@ -1259,6 +1316,7 @@ class OutboundCallManager:
         reply = await dialer.originate(command)
         stripped = reply.strip()
         failed_context = None
+        failed_message = "外呼失败"
         with self._lock:
             record = self._calls[call_id]
             record.freeswitch_reply = stripped
@@ -1270,15 +1328,21 @@ class OutboundCallManager:
                 self._discard_opening_locked(record.call_id)
                 failed_context = dict(record.context)
                 failed_business_id = _business_id(record)
+                failed_message = _failed_flow_callback_message(record)
             else:
                 if record.status in {"originating", "queued"}:
                     self._set_status_locked(record, "originated")
             record.originate_completed_at_ms = _now_ms()
-        if self._sync_call_record_failed(failed_context):
+        if failed_context is not None:
+            if (
+                not self._sync_call_record_failed(failed_context)
+                and self._flow_callback_writer is not None
+            ):
+                LOGGER.warning("call_record_failed_sync_noop_before_flow_callback")
             self._publish_flow_callback(
                 failed_context or {},
                 status="FAILED",
-                message="外呼失败",
+                message=failed_message,
                 business_id=failed_business_id,
             )
         LOGGER.info(
@@ -1369,6 +1433,31 @@ class OutboundCallManager:
         except RuntimeError:
             LOGGER.warning("%s call_id=%s", log_event, call_id, exc_info=True)
 
+    def _submit_handoff_notice_play(
+        self,
+        call_id: str,
+        text: str,
+        log_event: str,
+    ) -> None:
+        try:
+            self._executor.submit(
+                self._run_handoff_notice_play_worker,
+                call_id,
+                text,
+            )
+        except RuntimeError:
+            LOGGER.warning("%s call_id=%s", log_event, call_id, exc_info=True)
+
+    def _run_handoff_notice_play_worker(self, call_id: str, text: str) -> None:
+        try:
+            asyncio.run(self._play_handoff_notice(call_id, text))
+        except Exception:
+            LOGGER.warning(
+                "handoff_notice_play_worker_failed call_id=%s",
+                call_id,
+                exc_info=True,
+            )
+
     def _run_handoff_failure_notice_then_hangup_worker(self, call_id: str) -> None:
         try:
             asyncio.run(self._play_handoff_failure_notice_then_hangup(call_id))
@@ -1384,9 +1473,14 @@ class OutboundCallManager:
             )
 
     async def _play_handoff_failure_notice_then_hangup(self, call_id: str) -> None:
-        notice = self._prepare_handoff_notice_audio(
+        await self._play_handoff_notice(call_id, HANDOFF_AGENT_BUSY_PROMPT_TEXT)
+        await self._hangup(call_id, cause="NORMAL_CLEARING")
+
+    async def _play_handoff_notice(self, call_id: str, text: str) -> None:
+        notice = await asyncio.to_thread(
+            self._prepare_handoff_notice_audio,
             call_id,
-            HANDOFF_AGENT_BUSY_PROMPT_TEXT,
+            text,
         )
         if notice is not None:
             path, duration_seconds = notice
@@ -1394,7 +1488,7 @@ class OutboundCallManager:
                 reply = (await self._dialer_factory().play_file(call_id, path)).strip()
             except Exception:
                 LOGGER.warning(
-                    "handoff_failure_notice_play_failed call_id=%s path=%s",
+                    "handoff_notice_play_failed call_id=%s path=%s",
                     call_id,
                     path,
                     exc_info=True,
@@ -1402,7 +1496,7 @@ class OutboundCallManager:
             else:
                 if reply.startswith("-ERR"):
                     LOGGER.warning(
-                        "handoff_failure_notice_play_rejected call_id=%s path=%s "
+                        "handoff_notice_play_rejected call_id=%s path=%s "
                         "reply=%s",
                         call_id,
                         path,
@@ -1410,7 +1504,6 @@ class OutboundCallManager:
                     )
                 else:
                     await asyncio.sleep(duration_seconds)
-        await self._hangup(call_id, cause="NORMAL_CLEARING")
 
     def _prepare_handoff_notice_audio(
         self,
@@ -1450,7 +1543,7 @@ class OutboundCallManager:
             )
         except (OpeningGenerationFailed, OSError, ValueError):
             LOGGER.warning(
-                "handoff_failure_notice_generation_failed call_id=%s",
+                "handoff_notice_generation_failed call_id=%s",
                 call_id,
                 exc_info=True,
             )
@@ -1473,7 +1566,7 @@ class OutboundCallManager:
             )
         except OSError:
             LOGGER.warning(
-                "handoff_failure_notice_wav_write_failed call_id=%s path=%s",
+                "handoff_notice_wav_write_failed call_id=%s path=%s",
                 call_id,
                 host_path,
                 exc_info=True,
@@ -1537,25 +1630,41 @@ class OutboundCallManager:
         reply = await self._dialer_factory().hangup(call_id, cause=cause)
         stripped = reply.strip()
         failed_context = None
+        failed_message = "外呼失败"
         with self._lock:
             record = self._calls.get(call_id)
             if record is None:
                 return
             record.freeswitch_reply = stripped
             if stripped.startswith("-ERR"):
-                record.error = stripped
                 if "No such channel" in stripped:
                     record.completed_at_ms = record.completed_at_ms or _now_ms()
+                    record.hangup_cause = record.hangup_cause or cause
+                    if not _is_terminal_status(record.status):
+                        self._set_status_locked(
+                            record,
+                            _terminal_status_for_cause(record),
+                        )
+                    else:
+                        record.updated_at_ms = _now_ms()
+                    return
+                record.error = stripped
                 self._set_status_locked(record, "hangup_failed")
                 failed_context = dict(record.context)
                 failed_business_id = _business_id(record)
+                failed_message = _failed_flow_callback_message(record)
             else:
                 self._set_status_locked(record, "hangup_sent")
-        if self._sync_call_record_failed(failed_context):
+        if failed_context is not None:
+            if (
+                not self._sync_call_record_failed(failed_context)
+                and self._flow_callback_writer is not None
+            ):
+                LOGGER.warning("call_record_failed_sync_noop_before_flow_callback")
             self._publish_flow_callback(
                 failed_context or {},
                 status="FAILED",
-                message="外呼失败",
+                message=failed_message,
                 business_id=failed_business_id,
             )
 
@@ -1990,30 +2099,28 @@ class OutboundCallManager:
             record.updated_at_ms = record.handoff.updated_at_ms
             handoff_failed_callback = self._handoff_failed_callback_locked(record)
         if handoff_failed_callback is not None:
-            self._publish_handoff_failed_callback(*handoff_failed_callback)
+            context, business_id = handoff_failed_callback
+            if (
+                not self._sync_call_record_failed(context)
+                and self._flow_callback_writer is not None
+            ):
+                LOGGER.warning(
+                    "call_record_failed_sync_noop_before_handoff_failed_callback"
+                )
+            self._publish_handoff_failed_callback(context, business_id)
 
     def _handoff_failed_callback_locked(
         self,
         record: OutboundCallRecord,
     ) -> tuple[dict[str, Any], str | None] | None:
-        handoff = record.handoff
-        if handoff is None:
-            return None
-        if handoff.state != "completed":
-            return None
-        if handoff.human_transcript_status != "failed":
-            return None
-        if handoff.terminal_callback_status is not None:
-            return None
-        handoff.terminal_callback_status = "FAILED"
-        handoff.updated_at_ms = _now_ms()
-        record.updated_at_ms = handoff.updated_at_ms
-        return dict(record.context), _business_id(record)
+        # Human transcript and recording failures are post-processing diagnostics.
+        # They must not turn an otherwise completed handoff call into FAILED.
+        return None
 
     def _handoff_connection_failed_callback_locked(
         self,
         record: OutboundCallRecord,
-    ) -> tuple[dict[str, Any], str | None] | None:
+    ) -> tuple[dict[str, Any], dict[str, Any], str | None] | None:
         handoff = record.handoff
         if handoff is None:
             return None
@@ -2026,7 +2133,45 @@ class OutboundCallManager:
         handoff.terminal_callback_status = "FAILED"
         handoff.updated_at_ms = _now_ms()
         record.updated_at_ms = handoff.updated_at_ms
-        return dict(record.context), _business_id(record)
+        return (
+            self._build_handoff_failed_result_payload_locked(record),
+            dict(record.context),
+            _business_id(record),
+        )
+
+    def _build_handoff_failed_result_payload_locked(
+        self,
+        record: OutboundCallRecord,
+    ) -> dict[str, Any]:
+        handoff = record.handoff
+        ai_turns = [] if handoff is None else list(handoff.ai_turns)
+        failure_reason = (
+            "handoff failed"
+            if handoff is None
+            else handoff.error or "handoff failed"
+        )
+        return {
+            "call_id": record.call_id,
+            "business_id": _business_id(record),
+            "status": "handoff_failed",
+            "failure_reason": failure_reason,
+            "recording_path": record.recording_path,
+            "context": dict(record.context),
+            "turns": ai_turns,
+        }
+
+    def _enqueue_handoff_failed_result(self, payload: dict[str, Any]) -> bool:
+        if self._call_result_writer is None:
+            return False
+        try:
+            return bool(self._call_result_writer.enqueue_nowait(payload))
+        except Exception:
+            LOGGER.warning(
+                "handoff_failed_result_enqueue_failed call_id=%s",
+                payload.get("call_id"),
+                exc_info=True,
+            )
+            return False
 
     def _publish_handoff_failed_callback(
         self,
@@ -2054,6 +2199,7 @@ class OutboundCallManager:
 
     def _mark_failed(self, call_id: str, error: str) -> None:
         failed_context = None
+        failed_message = "外呼失败"
         with self._lock:
             record = self._calls.get(call_id)
             if record is None:
@@ -2064,11 +2210,17 @@ class OutboundCallManager:
             self._discard_opening_locked(record.call_id)
             failed_context = dict(record.context)
             failed_business_id = _business_id(record)
-        if self._sync_call_record_failed(failed_context):
+            failed_message = _failed_flow_callback_message(record)
+        if failed_context is not None:
+            if (
+                not self._sync_call_record_failed(failed_context)
+                and self._flow_callback_writer is not None
+            ):
+                LOGGER.warning("call_record_failed_sync_noop_before_flow_callback")
             self._publish_flow_callback(
                 failed_context,
                 status="FAILED",
-                message="外呼失败",
+                message=failed_message,
                 business_id=failed_business_id,
             )
 
@@ -2294,10 +2446,14 @@ def parse_create_call_request(payload: dict[str, Any]) -> CreateCallRequest:
     except OpeningGenerationFailed as err:
         raise CallControlError(str(err)) from err
 
-    call_id = _optional_safe_str(payload, "callId") or _optional_safe_str(
-        context,
-        "callId",
+    task_id = _optional_safe_str(context, "taskId")
+    call_id = (
+        _optional_safe_str(payload, "callId")
+        or _optional_safe_str(context, "callId")
+        or task_id
     )
+    if call_id is not None and _optional_safe_str(context, "callId") is None:
+        context["callId"] = call_id
     external_call_id = (
         _optional_safe_str(payload, "external_call_id")
         or _optional_safe_str(payload, "businessId")
@@ -2485,12 +2641,7 @@ async def _sleep_unless_stopped(stop_event: threading.Event, seconds: float) -> 
 
 
 def _build_call_diagnostics(record: OutboundCallRecord) -> dict[str, Any]:
-    raw_cause = (
-        record.hangup_cause
-        or _extract_failure_cause(record.error)
-        or _failure_cause_from_sip_status(record.sip_status)
-    )
-    hangup_cause = _normalize_failure_cause(record, raw_cause)
+    hangup_cause = _terminal_failure_cause(record)
     failure_reason = _failure_reason(record, hangup_cause)
     failure = _failure_details(failure_reason)
     return {
@@ -2522,9 +2673,51 @@ def _extract_failure_cause(value: str | None) -> str | None:
     return stripped or None
 
 
+def _failure_cause_from_sip_reason(sip_reason: str | None) -> str | None:
+    if not sip_reason:
+        return None
+    match = re.search(r"(?:cause=)?(\d{1,3})", sip_reason)
+    if match is None:
+        return None
+    code = match.group(1)
+    if code == "1":
+        return "UNALLOCATED_NUMBER"
+    if code == "17":
+        return "USER_BUSY"
+    if code in {"18", "19", "102"}:
+        return "NO_ANSWER"
+    if code == "20":
+        return "SUBSCRIBER_ABSENT"
+    if code == "21":
+        return "CALL_REJECTED"
+    if code in {"2", "3"}:
+        return "NO_ROUTE_DESTINATION"
+    if code == "27":
+        return "DESTINATION_OUT_OF_ORDER"
+    if code == "28":
+        return "ADDRESS_INCOMPLETE"
+    if code in {"34", "42"}:
+        return "NORMAL_CIRCUIT_CONGESTION"
+    if code in {"38", "41", "47"}:
+        return "NORMAL_TEMPORARY_FAILURE"
+    if code == "31":
+        return "NORMAL_UNSPECIFIED"
+    return None
+
+
 def _failure_cause_from_sip_status(sip_status: str | None) -> str | None:
     if sip_status in {"408", "480"}:
         return "NO_ANSWER"
+    if sip_status in {"486", "600"}:
+        return "USER_BUSY"
+    if sip_status == "603":
+        return "CALL_REJECTED"
+    if sip_status in {"404", "410", "604"}:
+        return "USER_NOT_REGISTERED"
+    if sip_status == "484":
+        return "ADDRESS_INCOMPLETE"
+    if sip_status == "503":
+        return "NORMAL_TEMPORARY_FAILURE"
     if sip_status == "508":
         return "SIP_508"
     return None
@@ -2535,6 +2728,8 @@ def _normalize_failure_cause(
     cause: str | None,
 ) -> str | None:
     if record.sip_status in {"408", "480"}:
+        return "NO_ANSWER"
+    if cause in {"NO_USER_RESPONSE", "RECOVERY_ON_TIMER_EXPIRE"}:
         return "NO_ANSWER"
     return cause
 
@@ -2548,19 +2743,42 @@ def _failure_reason(record: OutboundCallRecord, cause: str | None) -> str | None
 def _failure_details(cause: str | None) -> dict[str, str | None]:
     if cause == "USER_BUSY":
         return {
-            "label": "对端忙线或拒接",
-            "hint": "软电话或线路已收到 INVITE，但返回忙线/拒接；本地测试时确认 Linphone、Zoiper 或 MicroSIP 未占线，点发起后及时接听。",
+            "label": "线路忙",
+            "hint": "软电话、运营商线路或上游网关返回忙线；本地测试时确认 Linphone、Zoiper 或 MicroSIP 未占线。",
             "sip_status_hint": "486",
         }
     if cause == "CALL_REJECTED":
         return {
-            "label": "对端拒接",
+            "label": "拒接",
             "hint": "被叫端明确拒绝本次呼叫；真实线路下应结合运营商 CDR 或 SIP trace 确认。",
             "sip_status_hint": "603",
         }
+    if cause == "UNALLOCATED_NUMBER":
+        return {
+            "label": "空号",
+            "hint": "运营商或上游返回未分配号码；确认号码是否真实存在、是否需要加区号/前缀。",
+            "sip_status_hint": "404",
+        }
+    if cause in {
+        "USER_NOT_REGISTERED",
+        "NO_ROUTE_DESTINATION",
+        "SUBSCRIBER_ABSENT",
+        "DESTINATION_OUT_OF_ORDER",
+    }:
+        return {
+            "label": "号码不可达",
+            "hint": "号码不存在、暂不可达、路由不可达或本地分机未注册；确认号码格式、SIP trunk 路由和运营商 CDR。",
+            "sip_status_hint": "404",
+        }
+    if cause == "NORMAL_CIRCUIT_CONGESTION":
+        return {
+            "label": "线路拥塞",
+            "hint": "运营商或上游线路资源拥塞；稍后重试并检查供应商并发/路由限制。",
+            "sip_status_hint": None,
+        }
     if cause == "NORMAL_TEMPORARY_FAILURE":
         return {
-            "label": "临时失败",
+            "label": "线路临时故障",
             "hint": "通常是 SIP 503 或本地 NAT/软电话 Contact 瞬时不可用；刷新软电话注册或重启客户端后重试。",
             "sip_status_hint": "503",
         }
@@ -2570,15 +2788,15 @@ def _failure_details(cause: str | None) -> dict[str, str | None]:
             "hint": "真实 sip-provider 日志中该原因可能伴随 SIP 508 或 Q.850 cause=31；优先检查供应商 SBC、线路路由、公网 NAT/RTP 和运营商 CDR。",
             "sip_status_hint": "508",
         }
-    if cause == "USER_NOT_REGISTERED":
+    if cause == "ADDRESS_INCOMPLETE":
         return {
-            "label": "用户未注册",
-            "hint": "本地分机或真实线路目标不可达；确认分机注册、SIP trunk 路由和拨号格式。",
-            "sip_status_hint": "404",
+            "label": "号码格式不完整",
+            "hint": "SIP 484 通常表示拨号号码不完整或格式不符合线路要求；确认号码归一化和运营商拨号规则。",
+            "sip_status_hint": "484",
         }
     if cause == "NO_ANSWER":
         return {
-            "label": "无人接听",
+            "label": "未接听",
             "hint": "外呼已送达但在超时时间内未接听。",
             "sip_status_hint": None,
         }
@@ -2718,7 +2936,7 @@ def _talk_duration_ms(record: OutboundCallRecord) -> int | None:
 
 
 def _terminal_status_for_cause(record: OutboundCallRecord) -> str:
-    cause = record.hangup_cause or _extract_failure_cause(record.error)
+    cause = _terminal_failure_cause(record)
     if cause in {None, "NORMAL_CLEARING"}:
         return "completed" if record.answered_at_ms or record.media_connected_at_ms else "canceled"
     if cause in {"USER_BUSY", "CALL_REJECTED"}:
@@ -2728,6 +2946,31 @@ def _terminal_status_for_cause(record: OutboundCallRecord) -> str:
     if cause == "ORIGINATOR_CANCEL":
         return "canceled"
     return "failed"
+
+
+def _terminal_failure_cause(record: OutboundCallRecord) -> str | None:
+    raw_cause = record.hangup_cause or _extract_failure_cause(record.error)
+    if raw_cause is not None:
+        return _normalize_failure_cause(record, raw_cause)
+    sip_status_cause = _failure_cause_from_sip_status(record.sip_status)
+    if sip_status_cause == "SIP_508":
+        return _normalize_failure_cause(record, sip_status_cause)
+    raw_cause = _failure_cause_from_sip_reason(record.sip_reason) or sip_status_cause
+    return _normalize_failure_cause(record, raw_cause)
+
+
+def _failed_flow_callback_message(record: OutboundCallRecord) -> str:
+    failure_reason = _failure_reason(record, _terminal_failure_cause(record))
+    label = _failure_details(failure_reason)["label"]
+    if label:
+        return label
+    if failure_reason:
+        return f"外呼失败：{failure_reason}"
+    return "外呼失败"
+
+
+def _is_failed_terminal_status(status: str | None) -> bool:
+    return status in {"failed", "busy", "no_answer", "canceled", "hangup_failed"}
 
 
 def _business_id(record: OutboundCallRecord) -> str:

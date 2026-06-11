@@ -17,6 +17,7 @@ from app.handoff_asr_adapter import (
     HandoffAsrProcessor,
     TranscribedAudio,
     TranscriptUtterance,
+    TranscriptWord,
     VolcengineFileAsrCredentials,
     VolcengineFileAsrTranscriber,
 )
@@ -134,6 +135,129 @@ def test_handoff_asr_processor_merges_utterance_turns_by_start_time(tmp_path):
             "end_ms": 5600,
             "confidence": 0.92,
         },
+    ]
+
+
+def test_handoff_asr_processor_splits_word_timed_handoff_dialog_turns(tmp_path):
+    customer_wav = tmp_path / "call-1-customer.wav"
+    agent_wav = tmp_path / "call-1-agent.wav"
+    write_pcm16_wav(customer_wav, b"\x01\x00\x02\x00", sample_rate=8000)
+    write_pcm16_wav(agent_wav, b"\x03\x00\x04\x00", sample_rate=8000)
+    transcriber = FakeTranscriber(
+        {
+            str(agent_wav): TranscribedAudio(
+                text="一二三四五。四五六七八明天下雨吗？明天天气怎么样？",
+                utterances=[
+                    TranscriptUtterance(
+                        text="一二三四五。",
+                        start_ms=9590,
+                        end_ms=11070,
+                        words=_words(
+                            [
+                                ("一", 9590, 9700),
+                                ("二", 9800, 9900),
+                                ("三", 10000, 10100),
+                                ("四", 10200, 10300),
+                                ("五", 10400, 10500),
+                            ]
+                        ),
+                    ),
+                    TranscriptUtterance(
+                        text="四五六七八明天下雨吗？明天天气怎么样？",
+                        start_ms=16120,
+                        end_ms=27480,
+                        words=_words(
+                            [
+                                ("四", 16120, 16300),
+                                ("五", 16400, 16600),
+                                ("六", 16700, 16900),
+                                ("七", 17000, 17200),
+                                ("八", 17300, 17500),
+                                ("明", 21000, 21200),
+                                ("天", 21200, 21400),
+                                ("下", 21400, 21600),
+                                ("雨", 21600, 21800),
+                                ("吗", 21800, 22000),
+                                ("明", 26000, 26200),
+                                ("天", 26200, 26400),
+                                ("天", 26400, 26600),
+                                ("气", 26600, 26800),
+                                ("怎", 26800, 27000),
+                                ("么", 27000, 27200),
+                                ("样", 27200, 27400),
+                            ]
+                        ),
+                    ),
+                ],
+            ),
+            str(customer_wav): TranscribedAudio(
+                text="你好，你是谁？明天不下雨，明天天气挺好的。晴空万里万里无云。",
+                utterances=[
+                    TranscriptUtterance(
+                        text="你好，你是谁？",
+                        start_ms=18890,
+                        end_ms=20450,
+                        words=_words(
+                            [
+                                ("你", 18890, 19000),
+                                ("好", 19000, 19100),
+                                ("你", 19400, 19500),
+                                ("是", 19500, 19600),
+                                ("谁", 19600, 19800),
+                            ]
+                        ),
+                    ),
+                    TranscriptUtterance(
+                        text="明天不下雨，明天天气挺好的。晴空万里万里无云。",
+                        start_ms=22700,
+                        end_ms=30200,
+                        words=_words(
+                            [
+                                ("明", 22700, 22900),
+                                ("天", 22900, 23100),
+                                ("不", 23100, 23300),
+                                ("下", 23300, 23500),
+                                ("雨", 23500, 23700),
+                                ("明", 23800, 24000),
+                                ("天", 24000, 24200),
+                                ("天", 24200, 24400),
+                                ("气", 24400, 24600),
+                                ("挺", 24600, 24800),
+                                ("好", 24800, 25000),
+                                ("的", 25000, 25200),
+                                ("晴", 28600, 28800),
+                                ("空", 28800, 29000),
+                                ("万", 29000, 29200),
+                                ("里", 29200, 29400),
+                                ("万", 29400, 29600),
+                                ("里", 29600, 29800),
+                                ("无", 29800, 30000),
+                                ("云", 30000, 30200),
+                            ]
+                        ),
+                    ),
+                ],
+            ),
+        }
+    )
+
+    processor = HandoffAsrProcessor(transcriber)
+    turns = processor.process(
+        {
+            "agent_id": "1001",
+            "customer_recording_path": str(customer_wav),
+            "agent_recording_path": str(agent_wav),
+        }
+    )
+
+    assert [(turn["speaker_type"], turn["text"]) for turn in turns] == [
+        ("human_agent", "一二三四五。"),
+        ("human_agent", "四五六七八"),
+        ("customer", "你好，你是谁？"),
+        ("human_agent", "明天下雨吗？"),
+        ("customer", "明天不下雨，明天天气挺好的。"),
+        ("human_agent", "明天天气怎么样？"),
+        ("customer", "晴空万里万里无云。"),
     ]
 
 
@@ -288,6 +412,18 @@ def test_volcengine_file_asr_transcriber_submits_wav_and_parses_utterances(tmp_p
                                 "text": "您好，我是物业客服。",
                                 "start_time": 1200,
                                 "end_time": 2600,
+                                "words": [
+                                    {
+                                        "text": "您",
+                                        "start_time": 1200,
+                                        "end_time": 1320,
+                                    },
+                                    {
+                                        "text": "好",
+                                        "start_time": 1320,
+                                        "end_time": 1440,
+                                    },
+                                ],
                             }
                         ],
                     }
@@ -316,6 +452,10 @@ def test_volcengine_file_asr_transcriber_submits_wav_and_parses_utterances(tmp_p
                 text="您好，我是物业客服。",
                 start_ms=1200,
                 end_ms=2600,
+                words=[
+                    TranscriptWord(text="您", start_ms=1200, end_ms=1320),
+                    TranscriptWord(text="好", start_ms=1320, end_ms=1440),
+                ],
             )
         ],
     )
@@ -449,6 +589,13 @@ class FakeTranscriber:
         if isinstance(value, TranscribedAudio):
             return value
         return TranscribedAudio(text=value, utterances=[])
+
+
+def _words(items):
+    return [
+        TranscriptWord(text=text, start_ms=start_ms, end_ms=end_ms)
+        for text, start_ms, end_ms in items
+    ]
 
 
 class FakeHttpResponse:

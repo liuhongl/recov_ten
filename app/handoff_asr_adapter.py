@@ -10,7 +10,7 @@ import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -37,10 +37,19 @@ DEFAULT_FILE_ASR_SUBMIT_URL = (
 DEFAULT_FILE_ASR_QUERY_URL = (
     "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query"
 )
+TURN_SPLIT_WORD_GAP_MS = 1200
+TERMINAL_PUNCTUATION = set("。！？!?；;")
 
 
 class HandoffAsrAdapterError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class TranscriptWord:
+    text: str
+    start_ms: int | None = None
+    end_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +58,7 @@ class TranscriptUtterance:
     start_ms: int | None = None
     end_ms: int | None = None
     confidence: float | None = None
+    words: list[TranscriptWord] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -520,21 +530,125 @@ def _turns_from_transcribed_audio(
         ]
 
     for utterance in utterances:
-        text = _clean_text(utterance.text)
-        if text is None:
+        split_utterances = _split_utterance_by_word_timing(utterance)
+        if not split_utterances:
+            split_utterances = [utterance]
+        for item in split_utterances:
+            text = _clean_text(item.text)
+            if text is None:
+                continue
+            turns.append(
+                _build_turn(
+                    role=role,
+                    speaker_type=speaker_type,
+                    text=text,
+                    agent_id=agent_id,
+                    start_ms=item.start_ms,
+                    end_ms=item.end_ms,
+                    confidence=item.confidence,
+                )
+            )
+    return turns
+
+
+def _split_utterance_by_word_timing(
+    utterance: TranscriptUtterance,
+) -> list[TranscriptUtterance]:
+    text = _clean_text(utterance.text)
+    if text is None or len(utterance.words) <= 1:
+        return [utterance]
+
+    word_segments = _word_segments_for_utterance_text(text, utterance.words)
+    if not word_segments:
+        return [utterance]
+
+    chunks: list[list[_WordTextSegment]] = []
+    current: list[_WordTextSegment] = []
+    for index, segment in enumerate(word_segments):
+        current.append(segment)
+        next_segment = (
+            word_segments[index + 1] if index + 1 < len(word_segments) else None
+        )
+        if next_segment is None:
+            chunks.append(current)
+            break
+        if _should_split_after_word(segment, next_segment):
+            chunks.append(current)
+            current = []
+
+    split_utterances: list[TranscriptUtterance] = []
+    for chunk in chunks:
+        chunk_text = _clean_text("".join(item.text for item in chunk))
+        if chunk_text is None:
             continue
-        turns.append(
-            _build_turn(
-                role=role,
-                speaker_type=speaker_type,
-                text=text,
-                agent_id=agent_id,
-                start_ms=utterance.start_ms,
-                end_ms=utterance.end_ms,
+        split_utterances.append(
+            TranscriptUtterance(
+                text=chunk_text,
+                start_ms=chunk[0].word.start_ms,
+                end_ms=chunk[-1].word.end_ms,
                 confidence=utterance.confidence,
+                words=[item.word for item in chunk],
             )
         )
-    return turns
+    return split_utterances or [utterance]
+
+
+@dataclass(frozen=True)
+class _WordTextSegment:
+    word: TranscriptWord
+    text: str
+
+
+def _word_segments_for_utterance_text(
+    utterance_text: str,
+    words: list[TranscriptWord],
+) -> list[_WordTextSegment]:
+    cursor = 0
+    spans: list[tuple[TranscriptWord, int, int]] = []
+    for word in words:
+        word_text = _clean_text(word.text)
+        if word_text is None:
+            continue
+        start = utterance_text.find(word_text, cursor)
+        if start < 0:
+            return _word_segments_from_words(words)
+        end = start + len(word_text)
+        spans.append((word, start, end))
+        cursor = end
+
+    if not spans:
+        return []
+
+    segments: list[_WordTextSegment] = []
+    for index, (word, start, end) in enumerate(spans):
+        next_start = (
+            spans[index + 1][1] if index + 1 < len(spans) else len(utterance_text)
+        )
+        piece = utterance_text[start:next_start]
+        piece = piece.strip()
+        if piece:
+            segments.append(_WordTextSegment(word=word, text=piece))
+    return segments or _word_segments_from_words(words)
+
+
+def _word_segments_from_words(words: list[TranscriptWord]) -> list[_WordTextSegment]:
+    segments: list[_WordTextSegment] = []
+    for word in words:
+        text = _clean_text(word.text)
+        if text is not None:
+            segments.append(_WordTextSegment(word=word, text=text))
+    return segments
+
+
+def _should_split_after_word(
+    segment: _WordTextSegment,
+    next_segment: _WordTextSegment,
+) -> bool:
+    if segment.text and segment.text[-1] in TERMINAL_PUNCTUATION:
+        return True
+    if segment.word.end_ms is None or next_segment.word.start_ms is None:
+        return False
+    return next_segment.word.start_ms - segment.word.end_ms >= TURN_SPLIT_WORD_GAP_MS
 
 
 def _build_turn(
@@ -586,11 +700,32 @@ def _parse_file_asr_payload(payload: dict[str, Any]) -> TranscribedAudio:
                     start_ms=_optional_int(item.get("start_time")),
                     end_ms=_optional_int(item.get("end_time")),
                     confidence=_optional_float(item.get("confidence")),
+                    words=_parse_transcript_words(item.get("words")),
                 )
             )
     if not text and not utterances:
         raise HandoffAsrAdapterError("Volcengine file ASR response has no transcript")
     return TranscribedAudio(text=text, utterances=utterances)
+
+
+def _parse_transcript_words(value: object) -> list[TranscriptWord]:
+    if not isinstance(value, list):
+        return []
+    words: list[TranscriptWord] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        text = _clean_text(item.get("text"))
+        if text is None:
+            continue
+        words.append(
+            TranscriptWord(
+                text=text,
+                start_ms=_optional_int(item.get("start_time")),
+                end_ms=_optional_int(item.get("end_time")),
+            )
+        )
+    return words
 
 
 def _audio_format(path: Path) -> str:

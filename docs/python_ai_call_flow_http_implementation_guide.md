@@ -92,6 +92,10 @@ Python 依赖字段：
 
 Python 不应依赖 `params` 和 `flowContext` 做核心业务判断；它们是 Java 流程上下文，保留只是为了当前实现兼容和排查。
 
+Java 下发 AI 外呼节点时必须显式设置 `params.timeoutMinutes`。催收外呼建议
+5 到 30 分钟，常规场景可用 30 分钟；不要依赖流程引擎默认 24 小时，否则空号、
+拒接、线路异常或 Python 未返回终态时会让节点长时间悬挂。
+
 当前 Python 网关内部还会生成 FreeSWITCH 通话 UUID，用于 `origination_uuid` 和媒体链路关联。这个内部 UUID 可以和 Java `callId` 不同；流程回调、`call_record` 更新和幂等判断仍以 Java `callId/taskId` 为准。
 
 号码解析规则：
@@ -164,8 +168,8 @@ call_record.id = callId = taskId
 | 已受理 / 等待拨打 | `0` 或 `1` | `ACCEPTED`，可由 Java 在 `/calls` 成功后自动写入流程节点。 |
 | 拨打中 | `1` | `PROGRESS`，可选。 |
 | 转写完成 | `4` | `SUCCESS`。 |
-| 供应商失败 / 系统异常 / 参数不可执行 | `2` | `FAILED`。 |
-| 未接听 / 关机 / 忙线 / 拒接 / 无有效通话内容 | `3` 或失败终态 | `FAILED`。 |
+| 供应商失败 / 系统异常 / 参数不可执行 / 线路异常 | `2` | `FAILED`。 |
+| 空号 / 未接听 / 关机 / 忙线 / 拒接 / 无有效通话内容 | `3` 或失败终态 | `FAILED`。 |
 | 业务规则主动跳过外呼 | 按业务表记录跳过原因 | `SKIPPED`。 |
 
 注意：
@@ -173,7 +177,10 @@ call_record.id = callId = taskId
 1. `call_record.status='4'` 只表示转写完成，不表示语义分析完成。
 2. Python 不要写 `analysis_status`、`analysis_result`、`analysis_error`。
 3. Python 不要直接修改 Java 流程表，例如 `recov_node_execution_record`、`recov_flow_instance`。
-4. 终态 callback 必须在本地 `call_record` 状态和转写结果提交成功后发送。
+4. 成功终态 callback 必须在本地 `call_record` 状态和转写结果提交成功后发送。
+5. 失败终态应优先更新 `call_record`；如果失败场景里状态更新无行或异常，Python
+   仍必须回调 `FAILED`，并用日志暴露 `call_record` 同步失败，避免 Java 节点等待到
+   默认超时。
 
 ## 五、Python 回调 Java
 

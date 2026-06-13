@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
+import json
 import logging
 import re
+import socket
 import threading
 import time
+import urllib.error
+import urllib.request
+import uuid
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Protocol
@@ -16,7 +22,7 @@ from .audio_codec import (
     resample_pcm_s16le_mono,
     split_audio_frames,
 )
-from .config import DoubaoS2SConfig, GatewayConfig
+from .config import DoubaoS2SConfig, DoubaoTTSConfig, GatewayConfig
 from .doubao_s2s_client import (
     DoubaoS2SCredentials,
     DoubaoS2SError,
@@ -48,6 +54,7 @@ OPENING_TTS_PREFIX = (
 DEFAULT_OPENING_TIMEOUT_SECONDS = 60
 OPENING_LEADING_SILENCE_RMS_THRESHOLD = 120
 OPENING_MAX_LEADING_SILENCE_TRIM_MS = 500
+DOUBAO_TTS_FINAL_CODE = 20000000
 VOICE_SPEAKERS = {
     "female": "zh_female_vv_jupiter_bigtts",
     "male": "zh_male_yunzhou_jupiter_bigtts",
@@ -139,6 +146,15 @@ class OpeningAudioGenerator(Protocol):
     def generate(self, opening: OpeningRequest) -> OpeningAudio: ...
 
 
+@dataclass(frozen=True)
+class DoubaoTTSCredentials:
+    app_id: str
+    access_token: str
+    resource_id: str
+    endpoint: str
+    api_key: str = ""
+
+
 class OpeningAudioStore:
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -209,6 +225,174 @@ class DoubaoOpeningAudioGenerator:
             sample_rate=result.output_sample_rate,
             generation_ms=generation_ms,
         )
+
+
+class DoubaoTTSOpeningAudioGenerator:
+    def __init__(
+        self,
+        credentials: DoubaoTTSCredentials,
+        config: DoubaoTTSConfig,
+    ) -> None:
+        if config.timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        self.credentials = credentials
+        self.config = config
+
+    def generate(self, opening: OpeningRequest) -> OpeningAudio:
+        started_at = time.monotonic()
+        payload = self._build_payload(opening)
+        try:
+            raw_response = _post_doubao_tts(
+                self.credentials,
+                payload,
+                request_id=str(uuid.uuid4()),
+                timeout_seconds=self.config.timeout_seconds,
+            )
+            pcm16 = _decode_doubao_tts_audio(raw_response)
+        except (OpeningGenerationFailed, TimeoutError) as err:
+            LOGGER.info(
+                "tts_opening_generation_failed text_hash=%s error=%s",
+                opening.opening_text_hash,
+                err,
+            )
+            raise OpeningGenerationFailed("opening_tts_generation_failed") from err
+
+        return OpeningAudio(
+            pcm16=pcm16,
+            sample_rate=self.config.output_sample_rate,
+            generation_ms=int((time.monotonic() - started_at) * 1000),
+        )
+
+    def _build_payload(self, opening: OpeningRequest) -> dict[str, object]:
+        req_params: dict[str, object] = {
+            "text": opening.opening_text,
+            "speaker": self._speaker_for(opening),
+            "audio_params": {
+                "format": self.config.audio_format,
+                "sample_rate": self.config.output_sample_rate,
+            },
+        }
+        if opening.speaking_style:
+            req_params["additions"] = json.dumps(
+                {"context_texts": [_tts_context_text(opening.speaking_style)]},
+                ensure_ascii=False,
+            )
+        return {
+            "user": {"uid": "sip-realtime-opening-tts"},
+            "req_params": req_params,
+        }
+
+    def _speaker_for(self, opening: OpeningRequest) -> str:
+        if opening.voice == "male":
+            return self.config.male_speaker
+        return self.config.female_speaker
+
+
+class FallbackOpeningAudioGenerator:
+    def __init__(
+        self,
+        primary: OpeningAudioGenerator,
+        fallback: OpeningAudioGenerator,
+    ) -> None:
+        self.primary = primary
+        self.fallback = fallback
+
+    def generate(self, opening: OpeningRequest) -> OpeningAudio:
+        try:
+            return self.primary.generate(opening)
+        except OpeningGenerationFailed as err:
+            LOGGER.info(
+                "opening_primary_generator_failed_fallback_to_s2s "
+                "text_hash=%s error=%s",
+                opening.opening_text_hash,
+                err,
+            )
+            return self.fallback.generate(opening)
+
+
+def _tts_context_text(speaking_style: str) -> str:
+    style = " ".join(speaking_style.split())
+    return (
+        "请用正式、亲切、平稳的物业客服语气播报，语速适中，不要夸张情绪。"
+        f"业务语气要求：{style}"
+    )
+
+
+def _post_doubao_tts(
+    credentials: DoubaoTTSCredentials,
+    payload: dict[str, object],
+    *,
+    request_id: str,
+    timeout_seconds: float,
+) -> str:
+    headers = {
+        "Content-Type": "application/json",
+        "X-Api-Resource-Id": credentials.resource_id,
+        "X-Api-Request-Id": request_id,
+    }
+    if credentials.api_key:
+        headers["X-Api-Key"] = credentials.api_key
+    else:
+        headers["X-Api-App-Id"] = credentials.app_id
+        headers["X-Api-Access-Key"] = credentials.access_token
+        headers["Authorization"] = f"Bearer;{credentials.access_token}"
+
+    request = urllib.request.Request(
+        credentials.endpoint,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            return response.read().decode("utf-8")
+    except (TimeoutError, socket.timeout) as err:
+        raise TimeoutError("doubao_tts_timeout") from err
+    except urllib.error.HTTPError as err:
+        body = err.read().decode("utf-8", errors="replace")
+        raise OpeningGenerationFailed(
+            f"doubao_tts_http_{err.code}: {body[:200]}"
+        ) from err
+    except urllib.error.URLError as err:
+        raise OpeningGenerationFailed(f"doubao_tts_url_error: {err}") from err
+
+
+def _decode_doubao_tts_audio(raw_response: str | bytes) -> bytes:
+    if isinstance(raw_response, bytes):
+        text = raw_response.decode("utf-8")
+    else:
+        text = raw_response
+
+    decoder = json.JSONDecoder()
+    index = 0
+    chunks: list[bytes] = []
+    while index < len(text):
+        while index < len(text) and text[index] in " \r\n\t":
+            index += 1
+        if index >= len(text):
+            break
+        try:
+            item, index = decoder.raw_decode(text, index)
+        except json.JSONDecodeError as err:
+            raise OpeningGenerationFailed("invalid_doubao_tts_response") from err
+        if not isinstance(item, dict):
+            continue
+        data = item.get("data")
+        if isinstance(data, str) and data:
+            try:
+                chunks.append(base64.b64decode(data))
+            except ValueError as err:
+                raise OpeningGenerationFailed("invalid_doubao_tts_audio") from err
+            continue
+        code = item.get("code")
+        if code not in (None, 0, DOUBAO_TTS_FINAL_CODE):
+            message = item.get("message") or item.get("error") or code
+            raise OpeningGenerationFailed(f"doubao_tts_failed: {message}")
+
+    audio = b"".join(chunks)
+    if not audio:
+        raise OpeningGenerationFailed("empty_doubao_tts_audio")
+    return audio
 
 
 def parse_opening_request(payload: object) -> OpeningRequest | None:

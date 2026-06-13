@@ -515,6 +515,43 @@ def test_volcengine_file_asr_transcriber_polls_until_completed(tmp_path):
     assert sleeps == [0.25]
 
 
+def test_volcengine_file_asr_transcriber_uses_120_second_default_timeout(tmp_path):
+    wav_path = tmp_path / "agent.wav"
+    write_pcm16_wav(wav_path, b"\x01\x00\x02\x00", sample_rate=8000)
+    seen_timeouts = []
+
+    def fake_urlopen(request, *, timeout):
+        seen_timeouts.append(timeout)
+        if request.full_url.endswith("/submit"):
+            return FakeHttpResponse(
+                b"",
+                {
+                    "X-Api-Status-Code": "20000000",
+                    "X-Api-Message": "OK",
+                    "X-Tt-Logid": "submit-log",
+                },
+            )
+        return FakeHttpResponse(
+            json.dumps({"result": {"text": "客户文本。"}}).encode("utf-8"),
+            {
+                "X-Api-Status-Code": "20000000",
+                "X-Api-Message": "OK",
+                "X-Tt-Logid": "query-log",
+            },
+        )
+
+    transcriber = VolcengineFileAsrTranscriber(
+        credentials=VolcengineFileAsrCredentials(api_key="api-key"),
+        request_id_factory=lambda: "task-1",
+        urlopen=fake_urlopen,
+        sleep=lambda _: None,
+    )
+
+    transcriber.transcribe(str(wav_path))
+
+    assert seen_timeouts == [120.0, 120.0]
+
+
 def test_volcengine_file_asr_transcriber_reports_provider_failure(tmp_path):
     wav_path = tmp_path / "agent.wav"
     write_pcm16_wav(wav_path, b"\x01\x00\x02\x00", sample_rate=8000)

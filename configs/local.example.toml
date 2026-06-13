@@ -39,6 +39,20 @@ websocket_url = "wss://openspeech.bytedance.com/api/v3/realtime/dialogue"
 speaker = "zh_female_vv_jupiter_bigtts"
 output_sample_rate = 24000
 
+[doubao_tts]
+enabled = true
+app_id_env = "DOUBAO_S2S_APP_ID"
+access_token_env = "DOUBAO_S2S_ACCESS_TOKEN"
+api_key_env = "DOUBAO_TTS_API_KEY"
+resource_id = "seed-tts-2.0"
+endpoint = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
+female_speaker = "zh_female_xiaohe_uranus_bigtts"
+male_speaker = "zh_male_m191_uranus_bigtts"
+audio_format = "pcm"
+output_sample_rate = 24000
+timeout_seconds = 10.0
+fallback_to_s2s = true
+
 [server_vad]
 type = "server_vad"
 threshold = 0.5

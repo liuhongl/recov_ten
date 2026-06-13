@@ -6,9 +6,13 @@ from app.audio_codec import samples_to_pcm_s16le
 from app.config import FreeSwitchConfig, GatewayConfig, PlaybackConfig
 from app.doubao_s2s_client import DoubaoS2SCredentials
 from app.opening import (
+    DoubaoTTSConfig,
+    DoubaoTTSCredentials,
+    DoubaoTTSOpeningAudioGenerator,
     OpeningAudio,
     OpeningAudioStore,
     DoubaoOpeningAudioGenerator,
+    FallbackOpeningAudioGenerator,
     OpeningGenerationFailed,
     OpeningRequest,
     build_business_opening_request,
@@ -257,6 +261,95 @@ def test_opening_audio_generator_uses_natural_phone_tts_prompt(monkeypatch):
     assert "不要像朗读通知" in captured["input_text"]
     assert "严格朗读" not in captured["input_text"]
     assert captured["input_text"].endswith("您好，请问是金女士吗？")
+
+
+def test_tts_opening_audio_generator_posts_text_speaker_and_style(monkeypatch):
+    captured = {}
+    audio_bytes = samples_to_pcm_s16le([1000] * 240)
+
+    def fake_post(credentials, payload, *, request_id, timeout_seconds):
+        captured["credentials"] = credentials
+        captured["payload"] = payload
+        captured["request_id"] = request_id
+        captured["timeout_seconds"] = timeout_seconds
+        return (
+            '{"code":0,"data":"'
+            + __import__("base64").b64encode(audio_bytes).decode("ascii")
+            + '"}{"code":20000000,"message":"ok"}'
+        )
+
+    monkeypatch.setattr("app.opening._post_doubao_tts", fake_post)
+    generator = DoubaoTTSOpeningAudioGenerator(
+        DoubaoTTSCredentials(
+            app_id="app-a",
+            access_token="token-a",
+            resource_id="seed-tts-2.0",
+            endpoint="https://example.test/tts",
+        ),
+        DoubaoTTSConfig(
+            female_speaker="zh_female_xiaohe_uranus_bigtts",
+            output_sample_rate=24000,
+            timeout_seconds=7.5,
+        ),
+    )
+
+    audio = generator.generate(
+        OpeningRequest(
+            voice="female",
+            speaker="zh_female_vv_jupiter_bigtts",
+            business={},
+            opening_text="您好，请问是金女士吗？",
+            opening_text_hash="hash-opening",
+            speaking_style="协调型、耐心沟通的物业工作人员口吻。",
+        )
+    )
+
+    assert audio.pcm16 == audio_bytes
+    assert audio.sample_rate == 24000
+    assert audio.generation_ms >= 0
+    assert captured["credentials"].app_id == "app-a"
+    assert captured["request_id"]
+    assert captured["timeout_seconds"] == 7.5
+    req_params = captured["payload"]["req_params"]
+    assert req_params["text"] == "您好，请问是金女士吗？"
+    assert req_params["speaker"] == "zh_female_xiaohe_uranus_bigtts"
+    assert req_params["audio_params"] == {"format": "pcm", "sample_rate": 24000}
+    assert "协调型、耐心沟通" in req_params["additions"]
+
+
+def test_fallback_opening_audio_generator_uses_s2s_when_tts_fails():
+    class FailingGenerator:
+        def generate(self, opening):
+            raise OpeningGenerationFailed("tts_failed")
+
+    class WorkingGenerator:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, opening):
+            self.calls += 1
+            return OpeningAudio(
+                pcm16=samples_to_pcm_s16le([1000] * 160),
+                sample_rate=8000,
+                generation_ms=11,
+            )
+
+    fallback = WorkingGenerator()
+    generator = FallbackOpeningAudioGenerator(FailingGenerator(), fallback)
+
+    audio = generator.generate(
+        OpeningRequest(
+            voice="female",
+            speaker="zh_female_vv_jupiter_bigtts",
+            business={},
+            opening_text="您好，请问是金女士吗？",
+            opening_text_hash="hash-opening",
+        )
+    )
+
+    assert fallback.calls == 1
+    assert audio.sample_rate == 8000
+    assert audio.generation_ms == 11
 
 
 def test_build_prepared_opening_audio_resamples_to_phone_frames_and_adds_tail():

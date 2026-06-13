@@ -53,6 +53,20 @@ def test_load_config_from_toml(tmp_path):
             speaker = "zh_female_vv_jupiter_bigtts"
             output_sample_rate = 24000
 
+            [doubao_tts]
+            enabled = true
+            app_id_env = "TEST_TTS_APP_ID"
+            access_token_env = "TEST_TTS_ACCESS_TOKEN"
+            api_key_env = "TEST_TTS_API_KEY"
+            resource_id = "seed-tts-2.0"
+            endpoint = "https://example.test/tts"
+            female_speaker = "zh_female_xiaohe_uranus_bigtts"
+            male_speaker = "zh_male_m191_uranus_bigtts"
+            audio_format = "pcm"
+            output_sample_rate = 24000
+            timeout_seconds = 8.5
+            fallback_to_s2s = true
+
             [server_vad]
             type = "server_vad"
             threshold = 0.7
@@ -168,6 +182,18 @@ def test_load_config_from_toml(tmp_path):
     assert config.doubao_s2s.websocket_url == "wss://example.test/doubao"
     assert config.doubao_s2s.speaker == "zh_female_vv_jupiter_bigtts"
     assert config.doubao_s2s.output_sample_rate == 24000
+    assert config.doubao_tts.enabled is True
+    assert config.doubao_tts.app_id_env == "TEST_TTS_APP_ID"
+    assert config.doubao_tts.access_token_env == "TEST_TTS_ACCESS_TOKEN"
+    assert config.doubao_tts.api_key_env == "TEST_TTS_API_KEY"
+    assert config.doubao_tts.resource_id == "seed-tts-2.0"
+    assert config.doubao_tts.endpoint == "https://example.test/tts"
+    assert config.doubao_tts.female_speaker == "zh_female_xiaohe_uranus_bigtts"
+    assert config.doubao_tts.male_speaker == "zh_male_m191_uranus_bigtts"
+    assert config.doubao_tts.audio_format == "pcm"
+    assert config.doubao_tts.output_sample_rate == 24000
+    assert config.doubao_tts.timeout_seconds == 8.5
+    assert config.doubao_tts.fallback_to_s2s is True
     assert config.server_vad.threshold == 0.7
     assert config.server_vad.prefix_padding_ms == 400
     assert config.server_vad.silence_duration_ms == 1200
@@ -240,6 +266,18 @@ def test_environment_overrides(monkeypatch):
     monkeypatch.setenv("DOUBAO_S2S_SPEAKER", "env-speaker")
     monkeypatch.setenv("DOUBAO_S2S_WS_URL", "wss://env.example.test/doubao")
     monkeypatch.setenv("DOUBAO_S2S_OUTPUT_SAMPLE_RATE", "24000")
+    monkeypatch.setenv("DOUBAO_TTS_ENABLED", "true")
+    monkeypatch.setenv("DOUBAO_TTS_APP_ID_ENV", "ENV_TTS_APP_ID")
+    monkeypatch.setenv("DOUBAO_TTS_ACCESS_TOKEN_ENV", "ENV_TTS_ACCESS_TOKEN")
+    monkeypatch.setenv("DOUBAO_TTS_API_KEY_ENV", "ENV_TTS_API_KEY")
+    monkeypatch.setenv("DOUBAO_TTS_RESOURCE_ID", "seed-tts-2.0")
+    monkeypatch.setenv("DOUBAO_TTS_ENDPOINT", "https://env.example.test/tts")
+    monkeypatch.setenv("DOUBAO_TTS_FEMALE_SPEAKER", "env-female-tts")
+    monkeypatch.setenv("DOUBAO_TTS_MALE_SPEAKER", "env-male-tts")
+    monkeypatch.setenv("DOUBAO_TTS_AUDIO_FORMAT", "pcm")
+    monkeypatch.setenv("DOUBAO_TTS_OUTPUT_SAMPLE_RATE", "24000")
+    monkeypatch.setenv("DOUBAO_TTS_TIMEOUT_SECONDS", "6.5")
+    monkeypatch.setenv("DOUBAO_TTS_FALLBACK_TO_S2S", "true")
     monkeypatch.setenv("SERVER_VAD_THRESHOLD", "0.6")
     monkeypatch.setenv("SERVER_VAD_SILENCE_DURATION_MS", "2000")
     monkeypatch.setenv("SERVER_VAD_INTERRUPT_RESPONSE", "false")
@@ -313,6 +351,17 @@ def test_environment_overrides(monkeypatch):
     assert config.doubao_s2s.speaker == "env-speaker"
     assert config.doubao_s2s.websocket_url == "wss://env.example.test/doubao"
     assert config.doubao_s2s.output_sample_rate == 24000
+    assert config.doubao_tts.enabled is True
+    assert config.doubao_tts.app_id_env == "ENV_TTS_APP_ID"
+    assert config.doubao_tts.access_token_env == "ENV_TTS_ACCESS_TOKEN"
+    assert config.doubao_tts.api_key_env == "ENV_TTS_API_KEY"
+    assert config.doubao_tts.endpoint == "https://env.example.test/tts"
+    assert config.doubao_tts.female_speaker == "env-female-tts"
+    assert config.doubao_tts.male_speaker == "env-male-tts"
+    assert config.doubao_tts.audio_format == "pcm"
+    assert config.doubao_tts.output_sample_rate == 24000
+    assert config.doubao_tts.timeout_seconds == 6.5
+    assert config.doubao_tts.fallback_to_s2s is True
     assert config.server_vad.threshold == 0.6
     assert config.server_vad.silence_duration_ms == 2000
     assert config.server_vad.interrupt_response is False

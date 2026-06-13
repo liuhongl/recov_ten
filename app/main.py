@@ -23,6 +23,9 @@ from .logging_config import configure_logging
 from .opening import (
     DEFAULT_OPENING_TIMEOUT_SECONDS,
     DoubaoOpeningAudioGenerator,
+    DoubaoTTSCredentials,
+    DoubaoTTSOpeningAudioGenerator,
+    FallbackOpeningAudioGenerator,
     OpeningAudioStore,
 )
 from .postgres import PostgresRuntime, ThreadsafeBusinessPromptPreparer
@@ -103,11 +106,7 @@ async def _serve(config, *, media_mode: str) -> None:
     opening_generator = None
     if media_mode == "realtime":
         doubao_credentials = _load_doubao_s2s_credentials(config)
-        opening_generator = DoubaoOpeningAudioGenerator(
-            doubao_credentials,
-            config.doubao_s2s,
-            timeout_seconds=DEFAULT_OPENING_TIMEOUT_SECONDS,
-        )
+        opening_generator = _build_opening_audio_generator(config, doubao_credentials)
 
     business_prompt_preparer = None
     if postgres_runtime.prompt_store is not None:
@@ -240,6 +239,54 @@ def _load_doubao_s2s_credentials(config) -> DoubaoS2SCredentials:
         app_key=app_key,
         resource_id=doubao.resource_id,
         websocket_url=doubao.websocket_url,
+    )
+
+
+def _build_opening_audio_generator(
+    config,
+    doubao_credentials: DoubaoS2SCredentials,
+):
+    s2s_generator = DoubaoOpeningAudioGenerator(
+        doubao_credentials,
+        config.doubao_s2s,
+        timeout_seconds=DEFAULT_OPENING_TIMEOUT_SECONDS,
+    )
+    if not config.doubao_tts.enabled:
+        return s2s_generator
+
+    tts_credentials = _load_doubao_tts_credentials(config)
+    tts_generator = DoubaoTTSOpeningAudioGenerator(
+        tts_credentials,
+        config.doubao_tts,
+    )
+    if config.doubao_tts.fallback_to_s2s:
+        return FallbackOpeningAudioGenerator(tts_generator, s2s_generator)
+    return tts_generator
+
+
+def _load_doubao_tts_credentials(config) -> DoubaoTTSCredentials:
+    doubao = config.doubao_tts
+    api_key = os.getenv(doubao.api_key_env, "")
+    app_id = os.getenv(doubao.app_id_env, "")
+    access_token = os.getenv(doubao.access_token_env, "")
+    if not api_key:
+        missing = []
+        if not app_id:
+            missing.append(doubao.app_id_env)
+        if not access_token:
+            missing.append(doubao.access_token_env)
+        if missing:
+            raise RuntimeError(
+                "missing Doubao TTS credentials in environment: "
+                + ", ".join(missing)
+            )
+
+    return DoubaoTTSCredentials(
+        app_id=app_id,
+        access_token=access_token,
+        api_key=api_key,
+        resource_id=doubao.resource_id,
+        endpoint=doubao.endpoint,
     )
 
 

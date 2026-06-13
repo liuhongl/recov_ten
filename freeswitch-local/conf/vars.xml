@@ -59,7 +59,7 @@
       affect the sip authentication.  Please review conf/directory/default.xml for more
       information on this topic.
   -->
-  <X-PRE-PROCESS cmd="set" data="domain=192.168.0.100"/>
+  <X-PRE-PROCESS cmd="set" data="domain=192.168.0.102"/>
   <X-PRE-PROCESS cmd="set" data="domain_name=$${domain}"/>
   <X-PRE-PROCESS cmd="set" data="hold_music=local_stream://moh"/>
   <X-PRE-PROCESS cmd="set" data="use_profile=external"/>
@@ -292,7 +292,7 @@
        If unspecified, the bind_server_ip value is used.
        Used by: sofia.conf.xml dingaling.conf.xml
   -->
-  <X-PRE-PROCESS cmd="set" data="external_rtp_ip=192.168.0.100"/>
+  <X-PRE-PROCESS cmd="set" data="external_rtp_ip=192.168.0.102"/>
 
   <!-- external_sip_ip
       Used as the public IP address for SDP.
@@ -305,7 +305,7 @@
        If unspecified, the bind_server_ip value is used.
        Used by: sofia.conf.xml dingaling.conf.xml
   -->
-  <X-PRE-PROCESS cmd="set" data="external_sip_ip=192.168.0.100"/>
+  <X-PRE-PROCESS cmd="set" data="external_sip_ip=192.168.0.102"/>
 
   <!-- unroll-loops
        Used to turn on sip loopback unrolling.

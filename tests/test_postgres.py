@@ -214,6 +214,8 @@ def test_postgres_prompt_store_prepares_business_prompt_from_context():
     assert "避免使用“尽快缴纳”“不影响物业服务”" in prep.prompt_snapshot.instructions
     assert "用户询问不清楚、无法确定、系统未提供或与当前物业费事项无关的问题时" in prep.prompt_snapshot.instructions
     assert "统一引导用户联系物业公司获取准确信息或更多信息" in prep.prompt_snapshot.instructions
+    assert "用户要求转接或联系物业工作人员、项目人员、客服或财务核对时，应视为人工转接意图" in prep.prompt_snapshot.instructions
+    assert "不得主动说“要不要把物业电话报给您”" in prep.prompt_snapshot.instructions
     assert "无论用户是否主动提到租客" in prep.prompt_snapshot.instructions
     assert "不得索要租客联系方式" in prep.prompt_snapshot.instructions
     assert "不得建议联系租客" in prep.prompt_snapshot.instructions

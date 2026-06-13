@@ -37,6 +37,7 @@ DEFAULT_FILE_ASR_SUBMIT_URL = (
 DEFAULT_FILE_ASR_QUERY_URL = (
     "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query"
 )
+DEFAULT_FILE_ASR_HTTP_TIMEOUT_SECONDS = 120.0
 TURN_SPLIT_WORD_GAP_MS = 1200
 TERMINAL_PUNCTUATION = set("。！？!?；;")
 
@@ -134,7 +135,7 @@ class VolcengineFileAsrTranscriber:
     uid: str = "sip-realtime-handoff-asr-adapter"
     submit_url: str = DEFAULT_FILE_ASR_SUBMIT_URL
     query_url: str = DEFAULT_FILE_ASR_QUERY_URL
-    http_timeout_seconds: float = 15.0
+    http_timeout_seconds: float = DEFAULT_FILE_ASR_HTTP_TIMEOUT_SECONDS
     poll_interval_seconds: float = 2.0
     max_poll_attempts: int = 60
     request_id_factory: Callable[[], str] = lambda: str(uuid.uuid4())
@@ -388,7 +389,11 @@ def main() -> int:
     parser.add_argument("--env-file", default=".env")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9200)
-    parser.add_argument("--http-timeout-seconds", type=float, default=15.0)
+    parser.add_argument(
+        "--http-timeout-seconds",
+        type=float,
+        default=DEFAULT_FILE_ASR_HTTP_TIMEOUT_SECONDS,
+    )
     parser.add_argument("--poll-interval-seconds", type=float, default=2.0)
     parser.add_argument("--max-poll-attempts", type=int, default=60)
     parser.add_argument("--timeout-seconds", type=int, default=60, help=argparse.SUPPRESS)

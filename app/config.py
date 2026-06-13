@@ -61,6 +61,22 @@ class DoubaoS2SConfig:
 
 
 @dataclass(frozen=True)
+class DoubaoTTSConfig:
+    enabled: bool = True
+    app_id_env: str = "DOUBAO_S2S_APP_ID"
+    access_token_env: str = "DOUBAO_S2S_ACCESS_TOKEN"
+    api_key_env: str = "DOUBAO_TTS_API_KEY"
+    resource_id: str = "seed-tts-2.0"
+    endpoint: str = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
+    female_speaker: str = "zh_female_xiaohe_uranus_bigtts"
+    male_speaker: str = "zh_male_m191_uranus_bigtts"
+    audio_format: str = "pcm"
+    output_sample_rate: int = 24000
+    timeout_seconds: float = 10.0
+    fallback_to_s2s: bool = True
+
+
+@dataclass(frozen=True)
 class ServerVadConfig:
     type: str = "server_vad"
     threshold: float = 0.5
@@ -179,6 +195,7 @@ class GatewayConfig:
     event_socket: EventSocketConfig = EventSocketConfig()
     outbound: OutboundCallConfig = OutboundCallConfig()
     doubao_s2s: DoubaoS2SConfig = DoubaoS2SConfig()
+    doubao_tts: DoubaoTTSConfig = DoubaoTTSConfig()
     server_vad: ServerVadConfig = ServerVadConfig()
     playback: PlaybackConfig = PlaybackConfig()
     vad: VadConfig = VadConfig()
@@ -363,6 +380,80 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
                 "doubao_s2s",
                 "output_sample_rate",
                 default=DoubaoS2SConfig.output_sample_rate,
+            ),
+        ),
+        doubao_tts=DoubaoTTSConfig(
+            enabled=_get_bool(
+                raw,
+                "doubao_tts",
+                "enabled",
+                default=DoubaoTTSConfig.enabled,
+            ),
+            app_id_env=_get(
+                raw,
+                "doubao_tts",
+                "app_id_env",
+                default=DoubaoTTSConfig.app_id_env,
+            ),
+            access_token_env=_get(
+                raw,
+                "doubao_tts",
+                "access_token_env",
+                default=DoubaoTTSConfig.access_token_env,
+            ),
+            api_key_env=_get(
+                raw,
+                "doubao_tts",
+                "api_key_env",
+                default=DoubaoTTSConfig.api_key_env,
+            ),
+            resource_id=_get(
+                raw,
+                "doubao_tts",
+                "resource_id",
+                default=DoubaoTTSConfig.resource_id,
+            ),
+            endpoint=_get(
+                raw,
+                "doubao_tts",
+                "endpoint",
+                default=DoubaoTTSConfig.endpoint,
+            ),
+            female_speaker=_get(
+                raw,
+                "doubao_tts",
+                "female_speaker",
+                default=DoubaoTTSConfig.female_speaker,
+            ),
+            male_speaker=_get(
+                raw,
+                "doubao_tts",
+                "male_speaker",
+                default=DoubaoTTSConfig.male_speaker,
+            ),
+            audio_format=_get(
+                raw,
+                "doubao_tts",
+                "audio_format",
+                default=DoubaoTTSConfig.audio_format,
+            ),
+            output_sample_rate=_get_int(
+                raw,
+                "doubao_tts",
+                "output_sample_rate",
+                default=DoubaoTTSConfig.output_sample_rate,
+            ),
+            timeout_seconds=_get_float(
+                raw,
+                "doubao_tts",
+                "timeout_seconds",
+                default=DoubaoTTSConfig.timeout_seconds,
+            ),
+            fallback_to_s2s=_get_bool(
+                raw,
+                "doubao_tts",
+                "fallback_to_s2s",
+                default=DoubaoTTSConfig.fallback_to_s2s,
             ),
         ),
         server_vad=ServerVadConfig(
@@ -758,6 +849,7 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
     _validate_human_transcript_config(config.human_transcript, config.features)
     _validate_handoff_config(config.handoff)
     _validate_flow_callback_config(config.flow_callback)
+    _validate_doubao_tts_config(config.doubao_tts)
     _validate_cross_feature_config(config)
     _validate_rocketmq_config(config.rocketmq)
     return config
@@ -962,6 +1054,50 @@ def _apply_env_overrides(config: GatewayConfig) -> GatewayConfig:
             output_sample_rate=_env_int(
                 "DOUBAO_S2S_OUTPUT_SAMPLE_RATE",
                 config.doubao_s2s.output_sample_rate,
+            ),
+        ),
+        doubao_tts=DoubaoTTSConfig(
+            enabled=_env_bool("DOUBAO_TTS_ENABLED", config.doubao_tts.enabled),
+            app_id_env=os.getenv(
+                "DOUBAO_TTS_APP_ID_ENV",
+                config.doubao_tts.app_id_env,
+            ),
+            access_token_env=os.getenv(
+                "DOUBAO_TTS_ACCESS_TOKEN_ENV",
+                config.doubao_tts.access_token_env,
+            ),
+            api_key_env=os.getenv(
+                "DOUBAO_TTS_API_KEY_ENV",
+                config.doubao_tts.api_key_env,
+            ),
+            resource_id=os.getenv(
+                "DOUBAO_TTS_RESOURCE_ID",
+                config.doubao_tts.resource_id,
+            ),
+            endpoint=os.getenv("DOUBAO_TTS_ENDPOINT", config.doubao_tts.endpoint),
+            female_speaker=os.getenv(
+                "DOUBAO_TTS_FEMALE_SPEAKER",
+                config.doubao_tts.female_speaker,
+            ),
+            male_speaker=os.getenv(
+                "DOUBAO_TTS_MALE_SPEAKER",
+                config.doubao_tts.male_speaker,
+            ),
+            audio_format=os.getenv(
+                "DOUBAO_TTS_AUDIO_FORMAT",
+                config.doubao_tts.audio_format,
+            ),
+            output_sample_rate=_env_int(
+                "DOUBAO_TTS_OUTPUT_SAMPLE_RATE",
+                config.doubao_tts.output_sample_rate,
+            ),
+            timeout_seconds=_env_float(
+                "DOUBAO_TTS_TIMEOUT_SECONDS",
+                config.doubao_tts.timeout_seconds,
+            ),
+            fallback_to_s2s=_env_bool(
+                "DOUBAO_TTS_FALLBACK_TO_S2S",
+                config.doubao_tts.fallback_to_s2s,
             ),
         ),
         server_vad=ServerVadConfig(
@@ -1323,6 +1459,31 @@ def _validate_flow_callback_config(config: FlowCallbackConfig) -> None:
         raise ValueError("flow_callback.http.client_id is required when enabled")
     if http.enabled and not http.secret_env.strip():
         raise ValueError("flow_callback.http.secret_env is required when enabled")
+
+
+def _validate_doubao_tts_config(config: DoubaoTTSConfig) -> None:
+    if not config.resource_id.strip():
+        raise ValueError("doubao_tts.resource_id is required")
+    if not config.endpoint.strip():
+        raise ValueError("doubao_tts.endpoint is required")
+    if not config.female_speaker.strip():
+        raise ValueError("doubao_tts.female_speaker is required")
+    if not config.male_speaker.strip():
+        raise ValueError("doubao_tts.male_speaker is required")
+    if config.audio_format != "pcm":
+        raise ValueError("doubao_tts.audio_format must be pcm")
+    if config.output_sample_rate not in {
+        8000,
+        16000,
+        22050,
+        24000,
+        32000,
+        44100,
+        48000,
+    }:
+        raise ValueError("doubao_tts.output_sample_rate is unsupported")
+    if config.timeout_seconds <= 0:
+        raise ValueError("doubao_tts.timeout_seconds must be positive")
 
 
 def _validate_cross_feature_config(config: GatewayConfig) -> None:

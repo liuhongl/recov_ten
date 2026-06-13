@@ -222,11 +222,15 @@ def test_handoff_request_detection_is_conservative():
     assert _detect_handoff_request("我想找真人客服") == "request_human"
     assert _detect_handoff_request("我要找物业客服") == "request_human"
     assert _detect_handoff_request("让工作人员跟我说") == "request_human"
+    assert _detect_handoff_request("帮我转接一下物业的工作人员") == "request_human"
+    assert _detect_handoff_request("麻烦帮我联系一下物业工作人员") == "request_human"
+    assert _detect_handoff_request("给我找一下项目工作人员") == "request_human"
     assert _detect_handoff_request("我不想跟机器人说") == "request_human"
     assert _detect_handoff_request("不要机器人") == "request_human"
     assert _detect_handoff_request("不用转人工") is None
     assert _detect_handoff_request("不要转人工") is None
     assert _detect_handoff_request("先别找客服") is None
+    assert _detect_handoff_request("不用联系物业工作人员") is None
     assert _detect_handoff_request("我不是要转人工") is None
     assert _detect_handoff_request("你是机器人吗") is None
     assert _detect_handoff_request("你是人工客服吗") is None
@@ -826,6 +830,8 @@ def test_realtime_instructions_anchor_opening_confirmation_to_fee_followup():
     assert "要求勿扰后必须礼貌结束" in instructions
     assert "不得承诺回拨或约定回拨时间" in instructions
     assert "不得再询问付款时间、缴费计划或租客联系方式" in instructions
+    assert "用户要求转接或联系物业工作人员、项目人员、客服或财务核对时，应视为人工转接意图" in instructions
+    assert "不得主动说“要不要把物业电话报给您”" in instructions
     assert "即使用户主动提到租客" in instructions
     assert "用户只说没钱" in instructions
     assert "不得主动询问发薪日" in instructions

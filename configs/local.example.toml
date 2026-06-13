@@ -53,6 +53,15 @@ output_sample_rate = 24000
 timeout_seconds = 10.0
 fallback_to_s2s = true
 
+[qwen_omni_realtime]
+# Experimental probe-only settings. The gateway still defaults to Doubao S2S.
+api_key_env = "DASHSCOPE_API_KEY"
+model = "qwen3-omni-flash-realtime"
+websocket_url = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+voice = "Cherry"
+input_sample_rate = 16000
+output_sample_rate = 24000
+
 [server_vad]
 type = "server_vad"
 threshold = 0.5

@@ -77,6 +77,17 @@ def test_load_config_from_toml(tmp_path):
             voice = "Cherry"
             output_sample_rate = 24000
 
+            [opening_audio]
+            provider = "qwen"
+
+            [qwen_opening_audio]
+            api_key_env = "TEST_QWEN_OPENING_KEY"
+            endpoint = "https://example.test/qwen-tts"
+            model = "qwen3-tts-flash"
+            voice = "Cherry"
+            language_type = "Chinese"
+            timeout_seconds = 5.5
+
             [server_vad]
             type = "server_vad"
             threshold = 0.7
@@ -210,6 +221,13 @@ def test_load_config_from_toml(tmp_path):
     assert config.qwen_omni_realtime.model == "qwen3-omni-flash-realtime"
     assert config.qwen_omni_realtime.voice == "Cherry"
     assert config.qwen_omni_realtime.output_sample_rate == 24000
+    assert config.opening_audio.provider == "qwen"
+    assert config.qwen_opening_audio.api_key_env == "TEST_QWEN_OPENING_KEY"
+    assert config.qwen_opening_audio.endpoint == "https://example.test/qwen-tts"
+    assert config.qwen_opening_audio.model == "qwen3-tts-flash"
+    assert config.qwen_opening_audio.voice == "Cherry"
+    assert config.qwen_opening_audio.language_type == "Chinese"
+    assert config.qwen_opening_audio.timeout_seconds == 5.5
     assert config.server_vad.threshold == 0.7
     assert config.server_vad.prefix_padding_ms == 400
     assert config.server_vad.silence_duration_ms == 1200
@@ -303,6 +321,13 @@ def test_environment_overrides(monkeypatch):
     monkeypatch.setenv("QWEN_OMNI_REALTIME_MODEL", "qwen3-omni-flash-realtime")
     monkeypatch.setenv("QWEN_OMNI_REALTIME_VOICE", "Cherry")
     monkeypatch.setenv("QWEN_OMNI_REALTIME_OUTPUT_SAMPLE_RATE", "24000")
+    monkeypatch.setenv("OPENING_AUDIO_PROVIDER", "qwen")
+    monkeypatch.setenv("QWEN_OPENING_API_KEY_ENV", "ENV_QWEN_OPENING_KEY")
+    monkeypatch.setenv("QWEN_OPENING_ENDPOINT", "https://env.example.test/qwen-tts")
+    monkeypatch.setenv("QWEN_OPENING_MODEL", "qwen3-tts-flash")
+    monkeypatch.setenv("QWEN_OPENING_VOICE", "Cherry")
+    monkeypatch.setenv("QWEN_OPENING_LANGUAGE_TYPE", "Chinese")
+    monkeypatch.setenv("QWEN_OPENING_TIMEOUT_SECONDS", "7.5")
     monkeypatch.setenv("SERVER_VAD_THRESHOLD", "0.6")
     monkeypatch.setenv("SERVER_VAD_SILENCE_DURATION_MS", "2000")
     monkeypatch.setenv("SERVER_VAD_INTERRUPT_RESPONSE", "false")
@@ -393,6 +418,13 @@ def test_environment_overrides(monkeypatch):
     assert config.qwen_omni_realtime.model == "qwen3-omni-flash-realtime"
     assert config.qwen_omni_realtime.voice == "Cherry"
     assert config.qwen_omni_realtime.output_sample_rate == 24000
+    assert config.opening_audio.provider == "qwen"
+    assert config.qwen_opening_audio.api_key_env == "ENV_QWEN_OPENING_KEY"
+    assert config.qwen_opening_audio.endpoint == "https://env.example.test/qwen-tts"
+    assert config.qwen_opening_audio.model == "qwen3-tts-flash"
+    assert config.qwen_opening_audio.voice == "Cherry"
+    assert config.qwen_opening_audio.language_type == "Chinese"
+    assert config.qwen_opening_audio.timeout_seconds == 7.5
     assert config.server_vad.threshold == 0.6
     assert config.server_vad.silence_duration_ms == 2000
     assert config.server_vad.interrupt_response is False
@@ -521,6 +553,13 @@ def test_rejects_unsupported_realtime_provider(monkeypatch):
     monkeypatch.setenv("REALTIME_PROVIDER", "unknown")
 
     with pytest.raises(ValueError, match="realtime.provider"):
+        load_config()
+
+
+def test_rejects_unsupported_opening_audio_provider(monkeypatch):
+    monkeypatch.setenv("OPENING_AUDIO_PROVIDER", "unknown")
+
+    with pytest.raises(ValueError, match="opening_audio.provider"):
         load_config()
 
 

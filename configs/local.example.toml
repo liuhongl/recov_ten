@@ -64,6 +64,18 @@ websocket_url = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
 voice = "Cherry"
 output_sample_rate = 24000
 
+[opening_audio]
+# Set to "qwen" for the experimental Aliyun Qwen opening TTS provider.
+provider = "doubao_tts"
+
+[qwen_opening_audio]
+api_key_env = "DASHSCOPE_API_KEY"
+endpoint = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+model = "qwen3-tts-flash"
+voice = "Cherry"
+language_type = "Chinese"
+timeout_seconds = 30.0
+
 [server_vad]
 type = "server_vad"
 threshold = 0.5

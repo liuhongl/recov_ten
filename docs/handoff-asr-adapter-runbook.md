@@ -86,6 +86,22 @@ uv run python -m app.handoff_asr_adapter \
 当前主方案是双 mono：客户侧和坐席侧 WAV 分别提交给火山识别，再按
 `start_ms` 合并 turns。这个方案多一次 ASR 请求，但角色边界最清楚，优先保证准确率。
 
+### Qwen File ASR 实验开关
+
+Qwen 文件 ASR 是隔离实验，不改变默认 Volcengine 路径。启用时显式设置：
+
+```bash
+HANDOFF_ASR_TRANSCRIBER=qwen_file_asr
+DASHSCOPE_API_KEY=sk-...
+QWEN_FILE_ASR_MODEL=qwen3-asr-flash-filetrans
+QWEN_FILE_ASR_URL_PREFIX=https://your-oss.example.com/handoff-recordings
+```
+
+Qwen filetrans API 需要 provider 可访问的 `file_url`。adapter 收到的
+`customer_recording_path` / `agent_recording_path` 是本地路径，不能直接提交给百炼。
+小流量实验可用 `QWEN_FILE_ASR_URL_PREFIX` 把本地文件名映射到已上传的 OSS URL；
+生产化前应由录音上传链路返回每路 WAV 的真实 OSS URL。
+
 网关侧配置：
 
 ```toml

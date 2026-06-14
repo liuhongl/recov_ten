@@ -27,6 +27,8 @@ from .opening import (
     DoubaoTTSOpeningAudioGenerator,
     FallbackOpeningAudioGenerator,
     OpeningAudioStore,
+    QwenOpeningAudioGenerator,
+    QwenOpeningCredentials,
 )
 from .postgres import PostgresRuntime, ThreadsafeBusinessPromptPreparer
 from .doubao_s2s_client import (
@@ -337,6 +339,12 @@ def _build_opening_audio_generator(
     config,
     doubao_credentials: DoubaoS2SCredentials,
 ):
+    if config.opening_audio.provider == "qwen":
+        return QwenOpeningAudioGenerator(
+            _load_qwen_opening_credentials(config),
+            config.qwen_opening_audio,
+        )
+
     s2s_generator = DoubaoOpeningAudioGenerator(
         doubao_credentials,
         config.doubao_s2s,
@@ -353,6 +361,16 @@ def _build_opening_audio_generator(
     if config.doubao_tts.fallback_to_s2s:
         return FallbackOpeningAudioGenerator(tts_generator, s2s_generator)
     return tts_generator
+
+
+def _load_qwen_opening_credentials(config) -> QwenOpeningCredentials:
+    qwen = config.qwen_opening_audio
+    api_key = os.getenv(qwen.api_key_env, "")
+    if not api_key:
+        raise RuntimeError(
+            "missing Qwen opening credentials in environment: " + qwen.api_key_env
+        )
+    return QwenOpeningCredentials(api_key=api_key)
 
 
 def _load_doubao_tts_credentials(config) -> DoubaoTTSCredentials:

@@ -5,13 +5,17 @@ import asyncio
 import json
 import os
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 
+from .billing_comparison_report import build_billing_report
 from .env_loader import get_first_env, load_env_file
 from .qwen_omni_realtime_client import (
     DEFAULT_MODEL,
     DEFAULT_VOICE,
     DEFAULT_WS_URL,
+    MAINLAND_PRICES_RMB_PER_MILLION,
+    QwenOmniRealtimeProbeResult,
     QwenOmniRealtimeCredentials,
     QwenOmniRealtimeError,
     QwenOmniRealtimeSessionConfig,
@@ -101,6 +105,7 @@ def main() -> int:
         max_tokens=args.max_tokens,
     )
 
+    started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     try:
         result, output_audio = asyncio.run(
             run_qwen_omni_realtime_audio_probe(
@@ -119,6 +124,7 @@ def main() -> int:
     output_pcm_path = output_dir / "qwen_omni_realtime_audio_output.pcm"
     output_wav_path = output_dir / "qwen_omni_realtime_audio_output.wav"
     summary_path = output_dir / "qwen_omni_realtime_audio_summary.json"
+    billing_report_path = output_dir / "qwen_billing_report.json"
 
     output_pcm_path.write_bytes(output_audio)
     write_pcm16_wav(
@@ -140,12 +146,63 @@ def main() -> int:
         json.dumps(summary, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    billing_report = build_realtime_billing_report_from_result(
+        result,
+        sample_id=result.session_id or output_dir.name,
+        started_at=started_at,
+        local_summary_path=str(summary_path),
+    )
+    billing_report_path.write_text(
+        json.dumps(billing_report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
     console_summary = dict(summary)
     console_summary["sanitized_events_count"] = len(result.sanitized_events)
+    console_summary["billing_report_path"] = str(billing_report_path)
     console_summary.pop("sanitized_events", None)
     print(json.dumps(console_summary, ensure_ascii=False, indent=2))
     return 0
+
+
+def build_realtime_billing_report_from_result(
+    result: QwenOmniRealtimeProbeResult,
+    *,
+    sample_id: str,
+    started_at: str,
+    local_summary_path: str,
+) -> dict[str, object]:
+    return build_billing_report(
+        sample_id=sample_id,
+        started_at=started_at,
+        provider="qwen",
+        scenario="realtime",
+        model=result.model,
+        usage={
+            "realtime.input_text_tokens": result.usage.input_text_tokens,
+            "realtime.input_audio_tokens": result.usage.input_audio_tokens,
+            "realtime.output_text_tokens": result.usage.output_text_tokens,
+            "realtime.output_audio_tokens": result.usage.output_audio_tokens,
+        },
+        evidence={
+            "local_summary_path": local_summary_path,
+            "provider_request_id": result.session_id,
+            "console_bill_checked": False,
+        },
+        price_catalog=_qwen_realtime_price_catalog(result.model),
+    )
+
+
+def _qwen_realtime_price_catalog(model: str) -> dict[str, float]:
+    for prefix, prices in MAINLAND_PRICES_RMB_PER_MILLION.items():
+        if model == prefix or model.startswith(f"{prefix}-"):
+            return {
+                "realtime.input_text": prices.input_text_rmb_per_million,
+                "realtime.input_audio": prices.input_audio_rmb_per_million,
+                "realtime.output_text": prices.output_text_rmb_per_million,
+                "realtime.output_audio": prices.output_audio_rmb_per_million,
+            }
+    return {}
 
 
 if __name__ == "__main__":

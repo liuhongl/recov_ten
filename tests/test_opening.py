@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.audio_codec import samples_to_pcm_s16le
@@ -15,10 +17,14 @@ from app.opening import (
     FallbackOpeningAudioGenerator,
     OpeningGenerationFailed,
     OpeningRequest,
+    QwenOpeningAudioConfig,
+    QwenOpeningAudioGenerator,
+    QwenOpeningCredentials,
     build_business_opening_request,
     build_prepared_opening_audio,
     parse_opening_request,
 )
+from app.wav_io import write_pcm16_wav
 
 
 def test_parse_opening_request_renders_fixed_template_and_hashes_text():
@@ -317,6 +323,86 @@ def test_tts_opening_audio_generator_posts_text_speaker_and_style(monkeypatch):
     assert "协调型、耐心沟通" in req_params["additions"]
 
 
+def test_qwen_opening_audio_generator_posts_text_and_downloads_wav(tmp_path):
+    captured = {}
+    output_wav = tmp_path / "qwen-opening.wav"
+    audio_bytes = samples_to_pcm_s16le([1000] * 240)
+    write_pcm16_wav(output_wav, audio_bytes, sample_rate=24000)
+
+    def fake_urlopen(request, *, timeout):
+        captured.setdefault("calls", []).append(
+            {
+                "url": request.full_url,
+                "headers": dict(request.header_items()),
+                "body": json.loads(request.data.decode("utf-8"))
+                if request.data
+                else None,
+                "timeout": timeout,
+            }
+        )
+        if request.full_url == "https://example.test/qwen-tts":
+            return _FakeHttpResponse(
+                json.dumps(
+                    {
+                        "status_code": 200,
+                        "request_id": "qwen-req-1",
+                        "output": {
+                            "audio": {
+                                "url": "https://example.test/qwen-opening.wav",
+                            }
+                        },
+                        "usage": {
+                            "input_tokens": 11,
+                            "output_tokens": 22,
+                            "input_tokens_details": {"text_tokens": 11},
+                            "output_tokens_details": {"audio_tokens": 22},
+                        },
+                    }
+                ).encode("utf-8")
+            )
+        return _FakeHttpResponse(output_wav.read_bytes())
+
+    generator = QwenOpeningAudioGenerator(
+        QwenOpeningCredentials(api_key="sk-test"),
+        QwenOpeningAudioConfig(
+            endpoint="https://example.test/qwen-tts",
+            model="qwen3-tts-flash",
+            voice="Cherry",
+            language_type="Chinese",
+            timeout_seconds=3.5,
+        ),
+        urlopen=fake_urlopen,
+    )
+
+    audio = generator.generate(
+        OpeningRequest(
+            voice="female",
+            speaker="zh_female_vv_jupiter_bigtts",
+            business={},
+            opening_text="您好，请问是金女士吗？",
+            opening_text_hash="hash-opening",
+        )
+    )
+
+    assert audio.pcm16 == audio_bytes
+    assert audio.sample_rate == 24000
+    assert audio.generation_ms >= 0
+    assert len(captured["calls"]) == 2
+    request_call = captured["calls"][0]
+    assert request_call["headers"]["Authorization"] == "Bearer sk-test"
+    assert request_call["headers"]["Content-type"] == "application/json"
+    assert request_call["timeout"] == 3.5
+    assert request_call["body"] == {
+        "model": "qwen3-tts-flash",
+        "input": {
+            "text": "您好，请问是金女士吗？",
+            "voice": "Cherry",
+            "language_type": "Chinese",
+        },
+    }
+    assert captured["calls"][1]["url"] == "https://example.test/qwen-opening.wav"
+
+
 def test_fallback_opening_audio_generator_uses_s2s_when_tts_fails():
     class FailingGenerator:
         def generate(self, opening):
@@ -451,3 +537,18 @@ def test_opening_audio_store_pops_by_call_id():
 
     assert store.pop("call-1") is prepared
     assert store.pop("call-1") is None
+
+
+class _FakeHttpResponse:
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+        self.headers = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self.body

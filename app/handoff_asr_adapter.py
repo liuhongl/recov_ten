@@ -38,6 +38,13 @@ DEFAULT_FILE_ASR_QUERY_URL = (
     "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query"
 )
 DEFAULT_FILE_ASR_HTTP_TIMEOUT_SECONDS = 120.0
+DEFAULT_QWEN_FILE_ASR_MODEL = "qwen3-asr-flash-filetrans"
+DEFAULT_QWEN_FILE_ASR_SUBMIT_URL = (
+    "https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription"
+)
+DEFAULT_QWEN_FILE_ASR_TASK_URL_TEMPLATE = (
+    "https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
+)
 TURN_SPLIT_WORD_GAP_MS = 1200
 TERMINAL_PUNCTUATION = set("。！？!?；;")
 
@@ -127,6 +134,15 @@ class VolcengineFileAsrCredentials:
     app_key: str = ""
     access_key: str = ""
     resource_id: str = DEFAULT_FILE_ASR_RESOURCE_ID
+
+
+@dataclass(frozen=True)
+class QwenFileAsrCredentials:
+    api_key: str
+
+    def validate(self) -> None:
+        if not self.api_key:
+            raise ValueError("missing Qwen file ASR credential fields: ['api_key']")
 
 
 @dataclass(frozen=True)
@@ -274,6 +290,103 @@ class VolcengineFileAsrTranscriber:
 
 
 @dataclass(frozen=True)
+class QwenFileAsrTranscriber:
+    credentials: QwenFileAsrCredentials
+    model: str = DEFAULT_QWEN_FILE_ASR_MODEL
+    submit_url: str = DEFAULT_QWEN_FILE_ASR_SUBMIT_URL
+    task_url_template: str = DEFAULT_QWEN_FILE_ASR_TASK_URL_TEMPLATE
+    http_timeout_seconds: float = DEFAULT_FILE_ASR_HTTP_TIMEOUT_SECONDS
+    poll_interval_seconds: float = 2.0
+    max_poll_attempts: int = 60
+    file_url_resolver: Callable[[Path], str] = lambda path: _default_qwen_file_url(
+        path
+    )
+    urlopen: Callable[..., Any] = urllib.request.urlopen
+    sleep: Callable[[float], None] = time.sleep
+
+    def transcribe(self, path: str) -> TranscribedAudio:
+        self.credentials.validate()
+        audio_path = Path(path)
+        file_url = self.file_url_resolver(audio_path)
+        submit_result = self._post_json(
+            self.submit_url,
+            {
+                "model": self.model,
+                "input": {"file_url": file_url},
+                "parameters": {"enable_words": True},
+            },
+        )
+        task_id = _qwen_task_id(submit_result)
+        for _ in range(self.max_poll_attempts):
+            query_result = self._get_json(
+                self.task_url_template.format(task_id=task_id)
+            )
+            status = _qwen_task_status(query_result)
+            if status == "SUCCEEDED":
+                transcript_url = _qwen_transcription_url(query_result)
+                transcript_payload = self._get_json(transcript_url)
+                return _parse_qwen_file_asr_payload(transcript_payload)
+            if status in {"FAILED", "CANCELED", "UNKNOWN"}:
+                raise HandoffAsrAdapterError(
+                    "Qwen file ASR task failed: "
+                    f"status={status} message={_qwen_task_message(query_result)}"
+                )
+            self.sleep(self.poll_interval_seconds)
+        raise HandoffAsrAdapterError("Qwen file ASR query timed out")
+
+    def _post_json(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.credentials.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        return self._read_json(request, phase="submit")
+
+    def _get_json(self, url: str) -> dict[str, Any]:
+        request = urllib.request.Request(
+            url,
+            headers={"Authorization": f"Bearer {self.credentials.api_key}"},
+            method="GET",
+        )
+        return self._read_json(request, phase="query")
+
+    def _read_json(self, request: urllib.request.Request, *, phase: str) -> dict[str, Any]:
+        try:
+            with self.urlopen(request, timeout=self.http_timeout_seconds) as response:
+                body = response.read()
+        except urllib.error.HTTPError as err:
+            body = err.read().decode("utf-8", errors="replace")
+            raise HandoffAsrAdapterError(
+                f"Qwen file ASR {phase} HTTP failed: {err.code} {body}"
+            ) from err
+        except OSError as err:
+            raise HandoffAsrAdapterError(
+                f"Qwen file ASR {phase} HTTP failed: {err}"
+            ) from err
+        try:
+            decoded = json.loads(body.decode("utf-8")) if body else {}
+        except json.JSONDecodeError as err:
+            raise HandoffAsrAdapterError(
+                f"Qwen file ASR {phase} response must be JSON"
+            ) from err
+        if not isinstance(decoded, dict):
+            raise HandoffAsrAdapterError(
+                f"Qwen file ASR {phase} response must be a JSON object"
+            )
+        code = decoded.get("code")
+        if code and str(code) not in {"0", "200", "20000000"}:
+            message = decoded.get("message") or decoded.get("error") or code
+            raise HandoffAsrAdapterError(
+                f"Qwen file ASR {phase} failed: code={code} message={message}"
+            )
+        return decoded
+
+
+@dataclass(frozen=True)
 class _FileAsrHttpResult:
     status_code: str
     message: str
@@ -410,11 +523,7 @@ def main() -> int:
     if args.env_file:
         load_env_file(args.env_file)
 
-    transcriber = VolcengineFileAsrTranscriber(
-        credentials=_load_volcengine_file_asr_credentials(),
-        uid=os.getenv("DOUBAO_FILE_ASR_UID", "sip-realtime-handoff-asr-adapter"),
-        submit_url=os.getenv("DOUBAO_FILE_ASR_SUBMIT_URL", DEFAULT_FILE_ASR_SUBMIT_URL),
-        query_url=os.getenv("DOUBAO_FILE_ASR_QUERY_URL", DEFAULT_FILE_ASR_QUERY_URL),
+    transcriber = build_handoff_asr_transcriber(
         http_timeout_seconds=args.http_timeout_seconds,
         poll_interval_seconds=args.poll_interval_seconds,
         max_poll_attempts=args.max_poll_attempts,
@@ -432,6 +541,47 @@ def main() -> int:
     finally:
         server.server_close()
     return 0
+
+
+def build_handoff_asr_transcriber(
+    *,
+    http_timeout_seconds: float = DEFAULT_FILE_ASR_HTTP_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = 2.0,
+    max_poll_attempts: int = 60,
+) -> AudioTranscriberProtocol:
+    provider = os.getenv("HANDOFF_ASR_TRANSCRIBER", "volcengine_file_asr")
+    if provider == "volcengine_file_asr":
+        return VolcengineFileAsrTranscriber(
+            credentials=_load_volcengine_file_asr_credentials(),
+            uid=os.getenv("DOUBAO_FILE_ASR_UID", "sip-realtime-handoff-asr-adapter"),
+            submit_url=os.getenv(
+                "DOUBAO_FILE_ASR_SUBMIT_URL",
+                DEFAULT_FILE_ASR_SUBMIT_URL,
+            ),
+            query_url=os.getenv("DOUBAO_FILE_ASR_QUERY_URL", DEFAULT_FILE_ASR_QUERY_URL),
+            http_timeout_seconds=http_timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            max_poll_attempts=max_poll_attempts,
+        )
+    if provider == "qwen_file_asr":
+        return QwenFileAsrTranscriber(
+            credentials=_load_qwen_file_asr_credentials(),
+            model=os.getenv("QWEN_FILE_ASR_MODEL", DEFAULT_QWEN_FILE_ASR_MODEL),
+            submit_url=os.getenv(
+                "QWEN_FILE_ASR_SUBMIT_URL",
+                DEFAULT_QWEN_FILE_ASR_SUBMIT_URL,
+            ),
+            task_url_template=os.getenv(
+                "QWEN_FILE_ASR_TASK_URL_TEMPLATE",
+                DEFAULT_QWEN_FILE_ASR_TASK_URL_TEMPLATE,
+            ),
+            http_timeout_seconds=http_timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            max_poll_attempts=max_poll_attempts,
+        )
+    raise RuntimeError(
+        "HANDOFF_ASR_TRANSCRIBER must be volcengine_file_asr or qwen_file_asr"
+    )
 
 
 def _load_volcengine_file_asr_credentials() -> VolcengineFileAsrCredentials:
@@ -454,6 +604,16 @@ def _load_volcengine_file_asr_credentials() -> VolcengineFileAsrCredentials:
         access_key=access_key,
         resource_id=resource_id,
     )
+
+
+def _load_qwen_file_asr_credentials() -> QwenFileAsrCredentials:
+    api_key = os.getenv("QWEN_FILE_ASR_API_KEY") or os.getenv("DASHSCOPE_API_KEY", "")
+    if not api_key:
+        raise RuntimeError(
+            "missing Qwen file ASR credentials in environment: "
+            "DASHSCOPE_API_KEY or QWEN_FILE_ASR_API_KEY"
+        )
+    return QwenFileAsrCredentials(api_key=api_key)
 
 
 def _load_doubao_credentials() -> DoubaoS2SCredentials:
@@ -713,6 +873,52 @@ def _parse_file_asr_payload(payload: dict[str, Any]) -> TranscribedAudio:
     return TranscribedAudio(text=text, utterances=utterances)
 
 
+def _parse_qwen_file_asr_payload(payload: dict[str, Any]) -> TranscribedAudio:
+    transcripts = payload.get("transcripts")
+    if not isinstance(transcripts, list):
+        result = payload.get("result")
+        if isinstance(result, dict):
+            transcripts = result.get("transcripts")
+    if not isinstance(transcripts, list):
+        raise HandoffAsrAdapterError("Qwen file ASR response missing transcripts")
+
+    texts: list[str] = []
+    utterances: list[TranscriptUtterance] = []
+    for transcript in transcripts:
+        if not isinstance(transcript, dict):
+            continue
+        transcript_text = _clean_text(transcript.get("text"))
+        if transcript_text is not None:
+            texts.append(transcript_text)
+        sentences = transcript.get("sentences")
+        if not isinstance(sentences, list):
+            continue
+        for sentence in sentences:
+            if not isinstance(sentence, dict):
+                continue
+            sentence_text = _clean_text(sentence.get("text"))
+            if sentence_text is None:
+                continue
+            utterances.append(
+                TranscriptUtterance(
+                    text=sentence_text,
+                    start_ms=_optional_int(
+                        sentence.get("begin_time", sentence.get("start_time"))
+                    ),
+                    end_ms=_optional_int(
+                        sentence.get("end_time", sentence.get("stop_time"))
+                    ),
+                    confidence=_optional_float(sentence.get("confidence")),
+                    words=_parse_qwen_transcript_words(sentence.get("words")),
+                )
+            )
+
+    text = "".join(texts) if texts else "".join(item.text for item in utterances)
+    if not text and not utterances:
+        raise HandoffAsrAdapterError("Qwen file ASR response has no transcript")
+    return TranscribedAudio(text=text, utterances=utterances)
+
+
 def _parse_transcript_words(value: object) -> list[TranscriptWord]:
     if not isinstance(value, list):
         return []
@@ -731,6 +937,88 @@ def _parse_transcript_words(value: object) -> list[TranscriptWord]:
             )
         )
     return words
+
+
+def _parse_qwen_transcript_words(value: object) -> list[TranscriptWord]:
+    if not isinstance(value, list):
+        return []
+    words: list[TranscriptWord] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        text = _clean_text(item.get("text"))
+        if text is None:
+            continue
+        words.append(
+            TranscriptWord(
+                text=text,
+                start_ms=_optional_int(item.get("begin_time", item.get("start_time"))),
+                end_ms=_optional_int(item.get("end_time", item.get("stop_time"))),
+            )
+        )
+    return words
+
+
+def _qwen_task_id(payload: dict[str, Any]) -> str:
+    output = payload.get("output")
+    task_id = output.get("task_id") if isinstance(output, dict) else payload.get("task_id")
+    task_id = _clean_text(task_id)
+    if task_id is None:
+        raise HandoffAsrAdapterError("Qwen file ASR submit response missing task_id")
+    return task_id
+
+
+def _qwen_task_status(payload: dict[str, Any]) -> str:
+    output = payload.get("output")
+    status = (
+        output.get("task_status")
+        if isinstance(output, dict)
+        else payload.get("task_status")
+    )
+    status_text = _clean_text(status)
+    return status_text.upper() if status_text else "UNKNOWN"
+
+
+def _qwen_task_message(payload: dict[str, Any]) -> str:
+    output = payload.get("output")
+    if isinstance(output, dict):
+        message = output.get("message") or output.get("task_status")
+    else:
+        message = payload.get("message")
+    return _clean_text(message) or ""
+
+
+def _qwen_transcription_url(payload: dict[str, Any]) -> str:
+    output = payload.get("output")
+    result = output.get("result") if isinstance(output, dict) else None
+    candidates = []
+    if isinstance(result, dict):
+        candidates.extend(
+            [
+                result.get("transcription_url"),
+                result.get("url"),
+                result.get("transcriptionUrl"),
+            ]
+        )
+    if isinstance(output, dict):
+        candidates.extend([output.get("transcription_url"), output.get("url")])
+    for candidate in candidates:
+        text = _clean_text(candidate)
+        if text is not None:
+            return text
+    raise HandoffAsrAdapterError(
+        "Qwen file ASR query response missing transcription_url"
+    )
+
+
+def _default_qwen_file_url(path: Path) -> str:
+    prefix = os.getenv("QWEN_FILE_ASR_URL_PREFIX", "").strip().rstrip("/")
+    if prefix:
+        return f"{prefix}/{path.name}"
+    raise HandoffAsrAdapterError(
+        "Qwen file ASR requires a provider-accessible file URL; "
+        "set QWEN_FILE_ASR_URL_PREFIX or pass file_url_resolver"
+    )
 
 
 def _audio_format(path: Path) -> str:

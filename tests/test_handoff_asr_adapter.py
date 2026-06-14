@@ -15,11 +15,14 @@ from app.handoff_asr_adapter import (
     HandoffAsrAdapterError,
     HandoffAsrHttpHandler,
     HandoffAsrProcessor,
+    QwenFileAsrCredentials,
+    QwenFileAsrTranscriber,
     TranscribedAudio,
     TranscriptUtterance,
     TranscriptWord,
     VolcengineFileAsrCredentials,
     VolcengineFileAsrTranscriber,
+    build_handoff_asr_transcriber,
 )
 from app.doubao_s2s_client import (
     DoubaoS2SCredentials,
@@ -579,6 +582,141 @@ def test_volcengine_file_asr_transcriber_reports_provider_failure(tmp_path):
     assert str(exc.value) == (
         "Volcengine file ASR submit failed: status=45000002 message=empty audio"
     )
+
+
+def test_qwen_file_asr_transcriber_submits_url_polls_and_downloads_transcript(tmp_path):
+    wav_path = tmp_path / "customer.wav"
+    write_pcm16_wav(wav_path, b"\x01\x00\x02\x00", sample_rate=8000)
+    calls = []
+
+    def fake_urlopen(request, *, timeout):
+        body = json.loads(request.data.decode("utf-8")) if request.data else None
+        calls.append(
+            {
+                "method": request.get_method(),
+                "url": request.full_url,
+                "headers": dict(request.header_items()),
+                "body": body,
+                "timeout": timeout,
+            }
+        )
+        if request.full_url.endswith("/api/v1/services/audio/asr/transcription"):
+            return FakeHttpResponse(
+                json.dumps(
+                    {
+                        "request_id": "submit-req-1",
+                        "output": {
+                            "task_id": "task-1",
+                            "task_status": "PENDING",
+                        },
+                    }
+                ).encode("utf-8"),
+                {},
+            )
+        if request.full_url.endswith("/api/v1/tasks/task-1"):
+            return FakeHttpResponse(
+                json.dumps(
+                    {
+                        "request_id": "query-req-1",
+                        "output": {
+                            "task_id": "task-1",
+                            "task_status": "SUCCEEDED",
+                            "result": {
+                                "transcription_url": (
+                                    "https://example.test/qwen-transcript.json"
+                                ),
+                            },
+                        },
+                        "usage": {"seconds": 3},
+                    }
+                ).encode("utf-8"),
+                {},
+            )
+        return FakeHttpResponse(
+            json.dumps(
+                {
+                    "transcripts": [
+                        {
+                            "channel_id": 0,
+                            "text": "欢迎使用阿里云。",
+                            "sentences": [
+                                {
+                                    "sentence_id": 0,
+                                    "begin_time": 0,
+                                    "end_time": 1440,
+                                    "text": "欢迎使用阿里云。",
+                                    "words": [
+                                        {
+                                            "begin_time": 0,
+                                            "end_time": 160,
+                                            "text": "欢",
+                                            "punctuation": "",
+                                        },
+                                        {
+                                            "begin_time": 1120,
+                                            "end_time": 1440,
+                                            "text": "云",
+                                            "punctuation": "。",
+                                        },
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ).encode("utf-8"),
+            {},
+        )
+
+    transcriber = QwenFileAsrTranscriber(
+        credentials=QwenFileAsrCredentials(api_key="sk-test"),
+        model="qwen3-asr-flash-filetrans",
+        file_url_resolver=lambda path: f"https://oss.example.test/{path.name}",
+        urlopen=fake_urlopen,
+        sleep=lambda _: None,
+        poll_interval_seconds=0.1,
+    )
+
+    result = transcriber.transcribe(str(wav_path))
+
+    assert result == TranscribedAudio(
+        text="欢迎使用阿里云。",
+        utterances=[
+            TranscriptUtterance(
+                text="欢迎使用阿里云。",
+                start_ms=0,
+                end_ms=1440,
+                words=[
+                    TranscriptWord(text="欢", start_ms=0, end_ms=160),
+                    TranscriptWord(text="云", start_ms=1120, end_ms=1440),
+                ],
+            )
+        ],
+    )
+    assert [call["method"] for call in calls] == ["POST", "GET", "GET"]
+    assert calls[0]["headers"]["Authorization"] == "Bearer sk-test"
+    assert calls[0]["body"] == {
+        "model": "qwen3-asr-flash-filetrans",
+        "input": {"file_url": "https://oss.example.test/customer.wav"},
+        "parameters": {"enable_words": True},
+    }
+    assert calls[1]["url"] == "https://dashscope.aliyuncs.com/api/v1/tasks/task-1"
+    assert calls[2]["url"] == "https://example.test/qwen-transcript.json"
+
+
+def test_build_handoff_asr_transcriber_selects_qwen_from_env(monkeypatch):
+    monkeypatch.setenv("HANDOFF_ASR_TRANSCRIBER", "qwen_file_asr")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-test")
+
+    transcriber = build_handoff_asr_transcriber(
+        http_timeout_seconds=4.0,
+        poll_interval_seconds=0.1,
+        max_poll_attempts=2,
+    )
+
+    assert isinstance(transcriber, QwenFileAsrTranscriber)
+    assert transcriber.credentials.api_key == "sk-test"
+    assert transcriber.http_timeout_seconds == 4.0
 
 
 def test_doubao_audio_transcriber_wraps_probe_timeout(tmp_path):

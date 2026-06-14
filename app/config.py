@@ -55,6 +55,11 @@ class RealtimeProviderConfig:
 
 
 @dataclass(frozen=True)
+class OpeningAudioProviderConfig:
+    provider: str = "doubao_tts"
+
+
+@dataclass(frozen=True)
 class DoubaoS2SConfig:
     app_id_env: str = "DOUBAO_S2S_APP_ID"
     access_token_env: str = "DOUBAO_S2S_ACCESS_TOKEN"
@@ -88,6 +93,19 @@ class QwenOmniRealtimeConfig:
     model: str = "qwen3-omni-flash-realtime"
     voice: str = "Cherry"
     output_sample_rate: int = 24000
+
+
+@dataclass(frozen=True)
+class QwenOpeningAudioConfig:
+    api_key_env: str = "DASHSCOPE_API_KEY"
+    endpoint: str = (
+        "https://dashscope.aliyuncs.com/api/v1/services/aigc/"
+        "multimodal-generation/generation"
+    )
+    model: str = "qwen3-tts-flash"
+    voice: str = "Cherry"
+    language_type: str = "Chinese"
+    timeout_seconds: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -209,9 +227,11 @@ class GatewayConfig:
     event_socket: EventSocketConfig = EventSocketConfig()
     outbound: OutboundCallConfig = OutboundCallConfig()
     realtime: RealtimeProviderConfig = RealtimeProviderConfig()
+    opening_audio: OpeningAudioProviderConfig = OpeningAudioProviderConfig()
     doubao_s2s: DoubaoS2SConfig = DoubaoS2SConfig()
     doubao_tts: DoubaoTTSConfig = DoubaoTTSConfig()
     qwen_omni_realtime: QwenOmniRealtimeConfig = QwenOmniRealtimeConfig()
+    qwen_opening_audio: QwenOpeningAudioConfig = QwenOpeningAudioConfig()
     server_vad: ServerVadConfig = ServerVadConfig()
     playback: PlaybackConfig = PlaybackConfig()
     vad: VadConfig = VadConfig()
@@ -362,6 +382,14 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
                 default=RealtimeProviderConfig.provider,
             ),
         ),
+        opening_audio=OpeningAudioProviderConfig(
+            provider=_get(
+                raw,
+                "opening_audio",
+                "provider",
+                default=OpeningAudioProviderConfig.provider,
+            ),
+        ),
         doubao_s2s=DoubaoS2SConfig(
             app_id_env=_get(
                 raw,
@@ -510,6 +538,44 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
                 "qwen_omni_realtime",
                 "output_sample_rate",
                 default=QwenOmniRealtimeConfig.output_sample_rate,
+            ),
+        ),
+        qwen_opening_audio=QwenOpeningAudioConfig(
+            api_key_env=_get(
+                raw,
+                "qwen_opening_audio",
+                "api_key_env",
+                default=QwenOpeningAudioConfig.api_key_env,
+            ),
+            endpoint=_get(
+                raw,
+                "qwen_opening_audio",
+                "endpoint",
+                default=QwenOpeningAudioConfig.endpoint,
+            ),
+            model=_get(
+                raw,
+                "qwen_opening_audio",
+                "model",
+                default=QwenOpeningAudioConfig.model,
+            ),
+            voice=_get(
+                raw,
+                "qwen_opening_audio",
+                "voice",
+                default=QwenOpeningAudioConfig.voice,
+            ),
+            language_type=_get(
+                raw,
+                "qwen_opening_audio",
+                "language_type",
+                default=QwenOpeningAudioConfig.language_type,
+            ),
+            timeout_seconds=_get_float(
+                raw,
+                "qwen_opening_audio",
+                "timeout_seconds",
+                default=QwenOpeningAudioConfig.timeout_seconds,
             ),
         ),
         server_vad=ServerVadConfig(
@@ -901,6 +967,7 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
     config = _apply_env_overrides(config)
     _validate_media_contract(config.freeswitch)
     _validate_realtime_provider_config(config.realtime)
+    _validate_opening_audio_provider_config(config.opening_audio)
     _validate_postgres_config(config.postgres)
     _validate_call_recording_config(config.call_recording)
     _validate_human_transcript_config(config.human_transcript, config.features)
@@ -908,6 +975,7 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
     _validate_flow_callback_config(config.flow_callback)
     _validate_doubao_tts_config(config.doubao_tts)
     _validate_qwen_omni_realtime_config(config.qwen_omni_realtime)
+    _validate_qwen_opening_audio_config(config.qwen_opening_audio)
     _validate_cross_feature_config(config)
     _validate_rocketmq_config(config.rocketmq)
     return config
@@ -1087,6 +1155,12 @@ def _apply_env_overrides(config: GatewayConfig) -> GatewayConfig:
         realtime=RealtimeProviderConfig(
             provider=os.getenv("REALTIME_PROVIDER", config.realtime.provider),
         ),
+        opening_audio=OpeningAudioProviderConfig(
+            provider=os.getenv(
+                "OPENING_AUDIO_PROVIDER",
+                config.opening_audio.provider,
+            ),
+        ),
         doubao_s2s=DoubaoS2SConfig(
             app_id_env=os.getenv(
                 "DOUBAO_S2S_APP_ID_ENV",
@@ -1181,6 +1255,32 @@ def _apply_env_overrides(config: GatewayConfig) -> GatewayConfig:
             output_sample_rate=_env_int(
                 "QWEN_OMNI_REALTIME_OUTPUT_SAMPLE_RATE",
                 config.qwen_omni_realtime.output_sample_rate,
+            ),
+        ),
+        qwen_opening_audio=QwenOpeningAudioConfig(
+            api_key_env=os.getenv(
+                "QWEN_OPENING_API_KEY_ENV",
+                config.qwen_opening_audio.api_key_env,
+            ),
+            endpoint=os.getenv(
+                "QWEN_OPENING_ENDPOINT",
+                config.qwen_opening_audio.endpoint,
+            ),
+            model=os.getenv(
+                "QWEN_OPENING_MODEL",
+                config.qwen_opening_audio.model,
+            ),
+            voice=os.getenv(
+                "QWEN_OPENING_VOICE",
+                config.qwen_opening_audio.voice,
+            ),
+            language_type=os.getenv(
+                "QWEN_OPENING_LANGUAGE_TYPE",
+                config.qwen_opening_audio.language_type,
+            ),
+            timeout_seconds=_env_float(
+                "QWEN_OPENING_TIMEOUT_SECONDS",
+                config.qwen_opening_audio.timeout_seconds,
             ),
         ),
         server_vad=ServerVadConfig(
@@ -1471,6 +1571,13 @@ def _validate_realtime_provider_config(config: RealtimeProviderConfig) -> None:
         raise ValueError("realtime.provider must be doubao_s2s or qwen_omni_realtime")
 
 
+def _validate_opening_audio_provider_config(
+    config: OpeningAudioProviderConfig,
+) -> None:
+    if config.provider not in {"doubao_tts", "qwen"}:
+        raise ValueError("opening_audio.provider must be doubao_tts or qwen")
+
+
 def _validate_postgres_config(config: PostgresConfig) -> None:
     if config.min_pool_size < 0:
         raise ValueError("postgres.min_pool_size must be non-negative")
@@ -1585,6 +1692,21 @@ def _validate_qwen_omni_realtime_config(config: QwenOmniRealtimeConfig) -> None:
         raise ValueError("qwen_omni_realtime.voice is required")
     if config.output_sample_rate != 24000:
         raise ValueError("qwen_omni_realtime.output_sample_rate must be 24000")
+
+
+def _validate_qwen_opening_audio_config(config: QwenOpeningAudioConfig) -> None:
+    if not config.api_key_env.strip():
+        raise ValueError("qwen_opening_audio.api_key_env is required")
+    if not config.endpoint.strip():
+        raise ValueError("qwen_opening_audio.endpoint is required")
+    if not config.model.strip():
+        raise ValueError("qwen_opening_audio.model is required")
+    if not config.voice.strip():
+        raise ValueError("qwen_opening_audio.voice is required")
+    if not config.language_type.strip():
+        raise ValueError("qwen_opening_audio.language_type is required")
+    if config.timeout_seconds <= 0:
+        raise ValueError("qwen_opening_audio.timeout_seconds must be positive")
 
 
 def _validate_cross_feature_config(config: GatewayConfig) -> None:

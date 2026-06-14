@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import io
 import json
 import logging
 import re
@@ -12,17 +13,26 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+import wave
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from typing import Protocol
+from collections.abc import Callable
+from typing import Any, Protocol
 
 from .audio_codec import (
     pcm_s16le_frame_bytes,
+    pcm_s16le_to_samples,
     pcm_s16le_rms,
     resample_pcm_s16le_mono,
+    samples_to_pcm_s16le,
     split_audio_frames,
 )
-from .config import DoubaoS2SConfig, DoubaoTTSConfig, GatewayConfig
+from .config import (
+    DoubaoS2SConfig,
+    DoubaoTTSConfig,
+    GatewayConfig,
+    QwenOpeningAudioConfig,
+)
 from .doubao_s2s_client import (
     DoubaoS2SCredentials,
     DoubaoS2SError,
@@ -153,6 +163,15 @@ class DoubaoTTSCredentials:
     resource_id: str
     endpoint: str
     api_key: str = ""
+
+
+@dataclass(frozen=True)
+class QwenOpeningCredentials:
+    api_key: str
+
+    def validate(self) -> None:
+        if not self.api_key:
+            raise ValueError("missing Qwen opening credential fields: ['api_key']")
 
 
 class OpeningAudioStore:
@@ -288,6 +307,99 @@ class DoubaoTTSOpeningAudioGenerator:
         return self.config.female_speaker
 
 
+class QwenOpeningAudioGenerator:
+    def __init__(
+        self,
+        credentials: QwenOpeningCredentials,
+        config: QwenOpeningAudioConfig,
+        *,
+        urlopen: Callable[..., Any] = urllib.request.urlopen,
+    ) -> None:
+        credentials.validate()
+        self.credentials = credentials
+        self.config = config
+        self.urlopen = urlopen
+
+    def generate(self, opening: OpeningRequest) -> OpeningAudio:
+        started_at = time.monotonic()
+        payload = self._build_payload(opening)
+        try:
+            response = self._post_json(payload)
+            audio_bytes = self._audio_bytes_from_response(response)
+            pcm16, sample_rate = _decode_wav_pcm16_mono(audio_bytes)
+        except (OSError, TimeoutError, ValueError, urllib.error.URLError) as err:
+            LOGGER.info(
+                "qwen_opening_generation_failed text_hash=%s error=%s",
+                opening.opening_text_hash,
+                err,
+            )
+            raise OpeningGenerationFailed("qwen_opening_generation_failed") from err
+
+        return OpeningAudio(
+            pcm16=pcm16,
+            sample_rate=sample_rate,
+            generation_ms=int((time.monotonic() - started_at) * 1000),
+        )
+
+    def _build_payload(self, opening: OpeningRequest) -> dict[str, object]:
+        input_payload: dict[str, object] = {
+            "text": opening.opening_text,
+            "voice": self.config.voice,
+            "language_type": self.config.language_type,
+        }
+        if opening.speaking_style and "instruct" in self.config.model:
+            input_payload["instructions"] = _tts_context_text(opening.speaking_style)
+        return {
+            "model": self.config.model,
+            "input": input_payload,
+        }
+
+    def _post_json(self, payload: dict[str, object]) -> dict[str, Any]:
+        request = urllib.request.Request(
+            self.config.endpoint,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.credentials.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with self.urlopen(request, timeout=self.config.timeout_seconds) as response:
+            body = response.read()
+        try:
+            decoded = json.loads(body.decode("utf-8"))
+        except json.JSONDecodeError as err:
+            raise OpeningGenerationFailed("invalid_qwen_tts_response") from err
+        if not isinstance(decoded, dict):
+            raise OpeningGenerationFailed("invalid_qwen_tts_response")
+        code = decoded.get("code")
+        status_code = decoded.get("status_code")
+        if code and str(code) not in {"0", "200", "20000000"}:
+            message = decoded.get("message") or decoded.get("error") or code
+            raise OpeningGenerationFailed(f"qwen_tts_failed: {message}")
+        if status_code is not None and str(status_code) not in {"0", "200"}:
+            message = decoded.get("message") or decoded.get("error") or status_code
+            raise OpeningGenerationFailed(f"qwen_tts_failed: {message}")
+        return decoded
+
+    def _audio_bytes_from_response(self, response: dict[str, Any]) -> bytes:
+        audio = _qwen_response_audio(response)
+        if audio is None:
+            raise OpeningGenerationFailed("qwen_tts_response_missing_audio")
+        data = audio.get("data")
+        if isinstance(data, str) and data:
+            try:
+                return base64.b64decode(data)
+            except ValueError as err:
+                raise OpeningGenerationFailed("invalid_qwen_tts_audio") from err
+        url = audio.get("url")
+        if not isinstance(url, str) or not url:
+            raise OpeningGenerationFailed("qwen_tts_response_missing_audio_url")
+        request = urllib.request.Request(url, method="GET")
+        with self.urlopen(request, timeout=self.config.timeout_seconds) as response:
+            return response.read()
+
+
 class FallbackOpeningAudioGenerator:
     def __init__(
         self,
@@ -393,6 +505,59 @@ def _decode_doubao_tts_audio(raw_response: str | bytes) -> bytes:
     if not audio:
         raise OpeningGenerationFailed("empty_doubao_tts_audio")
     return audio
+
+
+def _qwen_response_audio(response: dict[str, Any]) -> dict[str, Any] | None:
+    output = response.get("output")
+    if isinstance(output, dict):
+        audio = output.get("audio")
+        if isinstance(audio, dict):
+            return audio
+        if isinstance(output.get("audio_url"), str):
+            return {"url": output["audio_url"]}
+        if isinstance(output.get("url"), str):
+            return {"url": output["url"]}
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices:
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        if isinstance(message, dict):
+            audio = message.get("audio")
+            if isinstance(audio, dict):
+                return audio
+    return None
+
+
+def _decode_wav_pcm16_mono(data: bytes) -> tuple[bytes, int]:
+    if not data:
+        raise OpeningGenerationFailed("empty_qwen_tts_audio")
+    try:
+        with wave.open(io.BytesIO(data), "rb") as wav_file:
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+            sample_rate = wav_file.getframerate()
+            compression = wav_file.getcomptype()
+            pcm = wav_file.readframes(wav_file.getnframes())
+    except wave.Error as err:
+        raise OpeningGenerationFailed("invalid_qwen_tts_audio") from err
+    if compression != "NONE":
+        raise OpeningGenerationFailed("qwen_tts_audio_must_be_pcm_wav")
+    if sample_width != 2:
+        raise OpeningGenerationFailed("qwen_tts_audio_must_be_pcm16_wav")
+    if channels < 1:
+        raise OpeningGenerationFailed("qwen_tts_audio_must_have_channel")
+    if channels > 1:
+        pcm = _downmix_interleaved_pcm16_to_mono(pcm, channels)
+    return pcm, sample_rate
+
+
+def _downmix_interleaved_pcm16_to_mono(pcm: bytes, channels: int) -> bytes:
+    samples = pcm_s16le_to_samples(pcm)
+    if len(samples) % channels != 0:
+        raise OpeningGenerationFailed("invalid_qwen_tts_audio_channels")
+    mono_samples: list[int] = []
+    for offset in range(0, len(samples), channels):
+        mono_samples.append(round(sum(samples[offset : offset + channels]) / channels))
+    return samples_to_pcm_s16le(mono_samples)
 
 
 def parse_opening_request(payload: object) -> OpeningRequest | None:

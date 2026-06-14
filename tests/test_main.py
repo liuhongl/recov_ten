@@ -2,16 +2,25 @@ from __future__ import annotations
 
 import pytest
 
-from app.config import GatewayConfig, HumanTranscriptConfig, QwenOmniRealtimeConfig
+from app.config import (
+    GatewayConfig,
+    HumanTranscriptConfig,
+    OpeningAudioProviderConfig,
+    QwenOmniRealtimeConfig,
+    QwenOpeningAudioConfig,
+)
+from app.doubao_s2s_client import DoubaoS2SCredentials
 from app.handoff_transcript import MockHumanHandoffTranscriptProcessor
 from app.main import (
     DOUBAO_DIALOG_FIELD_COMPAT_SYSTEM_PROMPT,
     _browser_first_prompt_snapshot_provider,
     _build_handoff_transcript_processor,
+    _build_opening_audio_generator,
     _load_qwen_omni_realtime_credentials,
     _qwen_instructions_for_session,
     _system_prompt_for_doubao_session,
 )
+from app.opening import QwenOpeningAudioGenerator
 from app.postgres import PromptSnapshot
 from app.realtime_types import RealtimeDialogConfig, RealtimeDialogContextItem
 
@@ -107,6 +116,27 @@ def test_load_qwen_omni_realtime_credentials_reports_missing_env(monkeypatch):
                 )
             )
         )
+
+
+def test_build_opening_audio_generator_selects_qwen_when_explicit(monkeypatch):
+    monkeypatch.setenv("TEST_DASHSCOPE_API_KEY", "sk-test")
+
+    generator = _build_opening_audio_generator(
+        GatewayConfig(
+            opening_audio=OpeningAudioProviderConfig(provider="qwen"),
+            qwen_opening_audio=QwenOpeningAudioConfig(
+                api_key_env="TEST_DASHSCOPE_API_KEY",
+                endpoint="https://example.test/qwen-tts",
+                model="qwen3-tts-flash",
+                voice="Cherry",
+            ),
+        ),
+        DoubaoS2SCredentials(app_id="app-id", access_token="access-token"),
+    )
+
+    assert isinstance(generator, QwenOpeningAudioGenerator)
+    assert generator.credentials.api_key == "sk-test"
+    assert generator.config.endpoint == "https://example.test/qwen-tts"
 
 
 def test_qwen_instructions_include_dialog_fields_and_history():

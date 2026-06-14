@@ -50,6 +50,11 @@ class OutboundCallConfig:
 
 
 @dataclass(frozen=True)
+class RealtimeProviderConfig:
+    provider: str = "doubao_s2s"
+
+
+@dataclass(frozen=True)
 class DoubaoS2SConfig:
     app_id_env: str = "DOUBAO_S2S_APP_ID"
     access_token_env: str = "DOUBAO_S2S_ACCESS_TOKEN"
@@ -74,6 +79,15 @@ class DoubaoTTSConfig:
     output_sample_rate: int = 24000
     timeout_seconds: float = 10.0
     fallback_to_s2s: bool = True
+
+
+@dataclass(frozen=True)
+class QwenOmniRealtimeConfig:
+    api_key_env: str = "DASHSCOPE_API_KEY"
+    websocket_url: str = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+    model: str = "qwen3-omni-flash-realtime"
+    voice: str = "Cherry"
+    output_sample_rate: int = 24000
 
 
 @dataclass(frozen=True)
@@ -194,8 +208,10 @@ class GatewayConfig:
     freeswitch: FreeSwitchConfig = FreeSwitchConfig()
     event_socket: EventSocketConfig = EventSocketConfig()
     outbound: OutboundCallConfig = OutboundCallConfig()
+    realtime: RealtimeProviderConfig = RealtimeProviderConfig()
     doubao_s2s: DoubaoS2SConfig = DoubaoS2SConfig()
     doubao_tts: DoubaoTTSConfig = DoubaoTTSConfig()
+    qwen_omni_realtime: QwenOmniRealtimeConfig = QwenOmniRealtimeConfig()
     server_vad: ServerVadConfig = ServerVadConfig()
     playback: PlaybackConfig = PlaybackConfig()
     vad: VadConfig = VadConfig()
@@ -338,6 +354,14 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
                 default=OutboundCallConfig.max_recent_calls,
             ),
         ),
+        realtime=RealtimeProviderConfig(
+            provider=_get(
+                raw,
+                "realtime",
+                "provider",
+                default=RealtimeProviderConfig.provider,
+            ),
+        ),
         doubao_s2s=DoubaoS2SConfig(
             app_id_env=_get(
                 raw,
@@ -454,6 +478,38 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
                 "doubao_tts",
                 "fallback_to_s2s",
                 default=DoubaoTTSConfig.fallback_to_s2s,
+            ),
+        ),
+        qwen_omni_realtime=QwenOmniRealtimeConfig(
+            api_key_env=_get(
+                raw,
+                "qwen_omni_realtime",
+                "api_key_env",
+                default=QwenOmniRealtimeConfig.api_key_env,
+            ),
+            websocket_url=_get(
+                raw,
+                "qwen_omni_realtime",
+                "websocket_url",
+                default=QwenOmniRealtimeConfig.websocket_url,
+            ),
+            model=_get(
+                raw,
+                "qwen_omni_realtime",
+                "model",
+                default=QwenOmniRealtimeConfig.model,
+            ),
+            voice=_get(
+                raw,
+                "qwen_omni_realtime",
+                "voice",
+                default=QwenOmniRealtimeConfig.voice,
+            ),
+            output_sample_rate=_get_int(
+                raw,
+                "qwen_omni_realtime",
+                "output_sample_rate",
+                default=QwenOmniRealtimeConfig.output_sample_rate,
             ),
         ),
         server_vad=ServerVadConfig(
@@ -844,12 +900,14 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
     )
     config = _apply_env_overrides(config)
     _validate_media_contract(config.freeswitch)
+    _validate_realtime_provider_config(config.realtime)
     _validate_postgres_config(config.postgres)
     _validate_call_recording_config(config.call_recording)
     _validate_human_transcript_config(config.human_transcript, config.features)
     _validate_handoff_config(config.handoff)
     _validate_flow_callback_config(config.flow_callback)
     _validate_doubao_tts_config(config.doubao_tts)
+    _validate_qwen_omni_realtime_config(config.qwen_omni_realtime)
     _validate_cross_feature_config(config)
     _validate_rocketmq_config(config.rocketmq)
     return config
@@ -1026,6 +1084,9 @@ def _apply_env_overrides(config: GatewayConfig) -> GatewayConfig:
                 config.outbound.max_recent_calls,
             ),
         ),
+        realtime=RealtimeProviderConfig(
+            provider=os.getenv("REALTIME_PROVIDER", config.realtime.provider),
+        ),
         doubao_s2s=DoubaoS2SConfig(
             app_id_env=os.getenv(
                 "DOUBAO_S2S_APP_ID_ENV",
@@ -1098,6 +1159,28 @@ def _apply_env_overrides(config: GatewayConfig) -> GatewayConfig:
             fallback_to_s2s=_env_bool(
                 "DOUBAO_TTS_FALLBACK_TO_S2S",
                 config.doubao_tts.fallback_to_s2s,
+            ),
+        ),
+        qwen_omni_realtime=QwenOmniRealtimeConfig(
+            api_key_env=os.getenv(
+                "QWEN_OMNI_REALTIME_API_KEY_ENV",
+                config.qwen_omni_realtime.api_key_env,
+            ),
+            websocket_url=os.getenv(
+                "QWEN_OMNI_REALTIME_WS_URL",
+                config.qwen_omni_realtime.websocket_url,
+            ),
+            model=os.getenv(
+                "QWEN_OMNI_REALTIME_MODEL",
+                config.qwen_omni_realtime.model,
+            ),
+            voice=os.getenv(
+                "QWEN_OMNI_REALTIME_VOICE",
+                config.qwen_omni_realtime.voice,
+            ),
+            output_sample_rate=_env_int(
+                "QWEN_OMNI_REALTIME_OUTPUT_SAMPLE_RATE",
+                config.qwen_omni_realtime.output_sample_rate,
             ),
         ),
         server_vad=ServerVadConfig(
@@ -1383,6 +1466,11 @@ def _validate_media_contract(config: FreeSwitchConfig) -> None:
     build_realtime_phone_contract(config)
 
 
+def _validate_realtime_provider_config(config: RealtimeProviderConfig) -> None:
+    if config.provider not in {"doubao_s2s", "qwen_omni_realtime"}:
+        raise ValueError("realtime.provider must be doubao_s2s or qwen_omni_realtime")
+
+
 def _validate_postgres_config(config: PostgresConfig) -> None:
     if config.min_pool_size < 0:
         raise ValueError("postgres.min_pool_size must be non-negative")
@@ -1484,6 +1572,19 @@ def _validate_doubao_tts_config(config: DoubaoTTSConfig) -> None:
         raise ValueError("doubao_tts.output_sample_rate is unsupported")
     if config.timeout_seconds <= 0:
         raise ValueError("doubao_tts.timeout_seconds must be positive")
+
+
+def _validate_qwen_omni_realtime_config(config: QwenOmniRealtimeConfig) -> None:
+    if not config.api_key_env.strip():
+        raise ValueError("qwen_omni_realtime.api_key_env is required")
+    if not config.websocket_url.strip():
+        raise ValueError("qwen_omni_realtime.websocket_url is required")
+    if not config.model.strip():
+        raise ValueError("qwen_omni_realtime.model is required")
+    if not config.voice.strip():
+        raise ValueError("qwen_omni_realtime.voice is required")
+    if config.output_sample_rate != 24000:
+        raise ValueError("qwen_omni_realtime.output_sample_rate must be 24000")
 
 
 def _validate_cross_feature_config(config: GatewayConfig) -> None:

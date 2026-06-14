@@ -44,6 +44,9 @@ def test_load_config_from_toml(tmp_path):
             originate_timeout_seconds = 45
             max_recent_calls = 300
 
+            [realtime]
+            provider = "qwen_omni_realtime"
+
             [doubao_s2s]
             app_id_env = "TEST_DOUBAO_APP_ID"
             access_token_env = "TEST_DOUBAO_ACCESS_TOKEN"
@@ -66,6 +69,13 @@ def test_load_config_from_toml(tmp_path):
             output_sample_rate = 24000
             timeout_seconds = 8.5
             fallback_to_s2s = true
+
+            [qwen_omni_realtime]
+            api_key_env = "TEST_DASHSCOPE_API_KEY"
+            websocket_url = "wss://example.test/qwen"
+            model = "qwen3-omni-flash-realtime"
+            voice = "Cherry"
+            output_sample_rate = 24000
 
             [server_vad]
             type = "server_vad"
@@ -175,6 +185,7 @@ def test_load_config_from_toml(tmp_path):
     assert config.outbound.caller_id_number == "95500"
     assert config.outbound.originate_timeout_seconds == 45
     assert config.outbound.max_recent_calls == 300
+    assert config.realtime.provider == "qwen_omni_realtime"
     assert config.doubao_s2s.app_id_env == "TEST_DOUBAO_APP_ID"
     assert config.doubao_s2s.access_token_env == "TEST_DOUBAO_ACCESS_TOKEN"
     assert config.doubao_s2s.app_key_env == "TEST_DOUBAO_APP_KEY"
@@ -194,6 +205,11 @@ def test_load_config_from_toml(tmp_path):
     assert config.doubao_tts.output_sample_rate == 24000
     assert config.doubao_tts.timeout_seconds == 8.5
     assert config.doubao_tts.fallback_to_s2s is True
+    assert config.qwen_omni_realtime.api_key_env == "TEST_DASHSCOPE_API_KEY"
+    assert config.qwen_omni_realtime.websocket_url == "wss://example.test/qwen"
+    assert config.qwen_omni_realtime.model == "qwen3-omni-flash-realtime"
+    assert config.qwen_omni_realtime.voice == "Cherry"
+    assert config.qwen_omni_realtime.output_sample_rate == 24000
     assert config.server_vad.threshold == 0.7
     assert config.server_vad.prefix_padding_ms == 400
     assert config.server_vad.silence_duration_ms == 1200
@@ -263,6 +279,7 @@ def test_environment_overrides(monkeypatch):
     monkeypatch.setenv("OUTBOUND_DIALPLAN_EXTENSION", "9199")
     monkeypatch.setenv("OUTBOUND_CALLER_ID_NUMBER", "9000")
     monkeypatch.setenv("OUTBOUND_ORIGINATE_TIMEOUT_SECONDS", "15")
+    monkeypatch.setenv("REALTIME_PROVIDER", "qwen_omni_realtime")
     monkeypatch.setenv("DOUBAO_S2S_SPEAKER", "env-speaker")
     monkeypatch.setenv("DOUBAO_S2S_WS_URL", "wss://env.example.test/doubao")
     monkeypatch.setenv("DOUBAO_S2S_OUTPUT_SAMPLE_RATE", "24000")
@@ -278,6 +295,14 @@ def test_environment_overrides(monkeypatch):
     monkeypatch.setenv("DOUBAO_TTS_OUTPUT_SAMPLE_RATE", "24000")
     monkeypatch.setenv("DOUBAO_TTS_TIMEOUT_SECONDS", "6.5")
     monkeypatch.setenv("DOUBAO_TTS_FALLBACK_TO_S2S", "true")
+    monkeypatch.setenv("QWEN_OMNI_REALTIME_API_KEY_ENV", "ENV_DASHSCOPE_API_KEY")
+    monkeypatch.setenv(
+        "QWEN_OMNI_REALTIME_WS_URL",
+        "wss://env.example.test/qwen",
+    )
+    monkeypatch.setenv("QWEN_OMNI_REALTIME_MODEL", "qwen3-omni-flash-realtime")
+    monkeypatch.setenv("QWEN_OMNI_REALTIME_VOICE", "Cherry")
+    monkeypatch.setenv("QWEN_OMNI_REALTIME_OUTPUT_SAMPLE_RATE", "24000")
     monkeypatch.setenv("SERVER_VAD_THRESHOLD", "0.6")
     monkeypatch.setenv("SERVER_VAD_SILENCE_DURATION_MS", "2000")
     monkeypatch.setenv("SERVER_VAD_INTERRUPT_RESPONSE", "false")
@@ -348,6 +373,7 @@ def test_environment_overrides(monkeypatch):
     assert config.outbound.dialplan_extension == "9199"
     assert config.outbound.caller_id_number == "9000"
     assert config.outbound.originate_timeout_seconds == 15
+    assert config.realtime.provider == "qwen_omni_realtime"
     assert config.doubao_s2s.speaker == "env-speaker"
     assert config.doubao_s2s.websocket_url == "wss://env.example.test/doubao"
     assert config.doubao_s2s.output_sample_rate == 24000
@@ -362,6 +388,11 @@ def test_environment_overrides(monkeypatch):
     assert config.doubao_tts.output_sample_rate == 24000
     assert config.doubao_tts.timeout_seconds == 6.5
     assert config.doubao_tts.fallback_to_s2s is True
+    assert config.qwen_omni_realtime.api_key_env == "ENV_DASHSCOPE_API_KEY"
+    assert config.qwen_omni_realtime.websocket_url == "wss://env.example.test/qwen"
+    assert config.qwen_omni_realtime.model == "qwen3-omni-flash-realtime"
+    assert config.qwen_omni_realtime.voice == "Cherry"
+    assert config.qwen_omni_realtime.output_sample_rate == 24000
     assert config.server_vad.threshold == 0.6
     assert config.server_vad.silence_duration_ms == 2000
     assert config.server_vad.interrupt_response is False
@@ -482,7 +513,15 @@ def test_default_outbound_caller_avoids_local_self_call():
     config = load_config()
 
     assert config.outbound.caller_id_number == "9000"
+    assert config.realtime.provider == "doubao_s2s"
     assert config.features.inbound_rms_diagnostics_enabled is False
+
+
+def test_rejects_unsupported_realtime_provider(monkeypatch):
+    monkeypatch.setenv("REALTIME_PROVIDER", "unknown")
+
+    with pytest.raises(ValueError, match="realtime.provider"):
+        load_config()
 
 
 def test_invalid_boolean_env(monkeypatch):

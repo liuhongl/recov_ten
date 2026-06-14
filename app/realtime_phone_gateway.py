@@ -403,7 +403,7 @@ class RealtimePhoneSessionStats:
 
 
 class FreeSwitchRealtimeGatewayServer:
-    """FreeSWITCH media server backed by Doubao S2S Server VAD."""
+    """FreeSWITCH media server backed by a realtime speech provider."""
 
     def __init__(
         self,
@@ -413,6 +413,9 @@ class FreeSwitchRealtimeGatewayServer:
         instructions: str = DEFAULT_PHONE_INSTRUCTIONS,
         frame_duration_ms: int | None = None,
         model_output_sample_rate: int | None = None,
+        realtime_provider: str | None = None,
+        realtime_model_name: str | None = None,
+        realtime_voice_name: str | None = None,
         realtime_session_factory: RealtimeSessionFactory | None = None,
         playback_control: PlaybackControlProtocol | None = None,
         prompt_store: PromptStoreProtocol | None = None,
@@ -435,6 +438,9 @@ class FreeSwitchRealtimeGatewayServer:
         self.config = config
         self.api_key = api_key
         self.instructions = instructions
+        self.realtime_provider = realtime_provider or "doubao_s2s"
+        self.realtime_model_name = realtime_model_name
+        self.realtime_voice_name = realtime_voice_name
         self.frame_duration_ms = (
             frame_duration_ms
             if frame_duration_ms is not None
@@ -547,7 +553,7 @@ class FreeSwitchRealtimeGatewayServer:
             self.contract.codec,
             self.expected_frame_bytes,
             self.contract.encoded_payload_bytes,
-            "doubao_s2s",
+            self.realtime_provider,
             model_name,
             voice_name,
             self.config.server_vad.type,
@@ -563,7 +569,10 @@ class FreeSwitchRealtimeGatewayServer:
         )
 
     def _realtime_identity_for_log(self) -> tuple[str, str]:
-        return self.config.doubao_s2s.resource_id, self.config.doubao_s2s.speaker
+        return (
+            self.realtime_model_name or self.config.doubao_s2s.resource_id,
+            self.realtime_voice_name or self.config.doubao_s2s.speaker,
+        )
 
     def _notify_media_connected(self, call_id: str) -> None:
         if self._on_media_connected is None:

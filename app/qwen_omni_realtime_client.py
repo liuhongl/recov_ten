@@ -203,6 +203,9 @@ class QwenOmniRealtimeSession:
     async def create_response(self) -> None:
         await self._send_json({"event_id": _event_id(), "type": "response.create"})
 
+    async def cancel_response(self) -> None:
+        await self._send_json({"event_id": _event_id(), "type": "response.cancel"})
+
     async def recv_event(self) -> QwenOmniRealtimeEvent:
         if self._ws is None:
             raise RuntimeError("Qwen Omni Realtime session is not connected")

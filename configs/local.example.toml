@@ -30,6 +30,10 @@ caller_id_number = "9000"
 originate_timeout_seconds = 30
 max_recent_calls = 200
 
+[realtime]
+# Set to "qwen_omni_realtime" for the experimental Aliyun Qwen Realtime provider.
+provider = "doubao_s2s"
+
 [doubao_s2s]
 app_id_env = "DOUBAO_S2S_APP_ID"
 access_token_env = "DOUBAO_S2S_ACCESS_TOKEN"
@@ -54,12 +58,10 @@ timeout_seconds = 10.0
 fallback_to_s2s = true
 
 [qwen_omni_realtime]
-# Experimental probe-only settings. The gateway still defaults to Doubao S2S.
 api_key_env = "DASHSCOPE_API_KEY"
 model = "qwen3-omni-flash-realtime"
 websocket_url = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
 voice = "Cherry"
-input_sample_rate = 16000
 output_sample_rate = 24000
 
 [server_vad]

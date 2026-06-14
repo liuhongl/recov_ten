@@ -35,6 +35,11 @@ from .doubao_s2s_client import (
     DoubaoS2SSessionConfig,
 )
 from .doubao_s2s_realtime import DoubaoS2SServerVadSession
+from .qwen_omni_realtime import QwenOmniRealtimeServerVadSession
+from .qwen_omni_realtime_client import (
+    QwenOmniRealtimeCredentials,
+    QwenOmniRealtimeSessionConfig,
+)
 from .realtime_phone_gateway import (
     DEFAULT_PHONE_INSTRUCTIONS,
     FreeSwitchRealtimeGatewayServer,
@@ -150,44 +155,22 @@ async def _serve(config, *, media_mode: str) -> None:
         media_server = FreeSwitchMediaEchoServer(config.freeswitch)
     elif media_mode == "realtime":
         assert doubao_credentials is not None
-        session_config = DoubaoS2SSessionConfig(
-            speaker=config.doubao_s2s.speaker,
-            output_sample_rate=config.doubao_s2s.output_sample_rate,
-        )
-
-        def session_factory(
-            on_speech_started,
-            on_input_transcript,
-            on_audio_delta,
-            on_turn_completed,
-            turn_id_start,
-            instructions,
-            speaker,
-            dialog_config,
-        ):
-            return DoubaoS2SServerVadSession(
-                doubao_credentials,
-                replace(
-                    session_config,
-                    system_prompt=_system_prompt_for_doubao_session(
-                        instructions,
-                        dialog_config,
-                    ),
-                    speaker=speaker or session_config.speaker,
-                    dialog=dialog_config,
-                ),
-                turn_id_start=turn_id_start,
-                on_speech_started=on_speech_started,
-                on_input_transcript=on_input_transcript,
-                on_audio_delta=on_audio_delta,
-                on_turn_completed=on_turn_completed,
-            )
+        (
+            realtime_session_factory,
+            realtime_provider,
+            realtime_model_name,
+            realtime_voice_name,
+            realtime_output_sample_rate,
+        ) = _build_realtime_session_factory(config, doubao_credentials)
 
         media_server = FreeSwitchRealtimeGatewayServer(
             config,
-            api_key="doubao-s2s",
-            model_output_sample_rate=config.doubao_s2s.output_sample_rate,
-            realtime_session_factory=session_factory,
+            api_key=realtime_provider,
+            model_output_sample_rate=realtime_output_sample_rate,
+            realtime_session_factory=realtime_session_factory,
+            realtime_provider=realtime_provider,
+            realtime_model_name=realtime_model_name,
+            realtime_voice_name=realtime_voice_name,
             prompt_store=postgres_runtime.prompt_store,
             prompt_snapshot_provider=_browser_first_prompt_snapshot_provider(
                 browser_prompt_store,
@@ -240,6 +223,114 @@ def _load_doubao_s2s_credentials(config) -> DoubaoS2SCredentials:
         resource_id=doubao.resource_id,
         websocket_url=doubao.websocket_url,
     )
+
+
+def _load_qwen_omni_realtime_credentials(config) -> QwenOmniRealtimeCredentials:
+    qwen = config.qwen_omni_realtime
+    api_key = os.getenv(qwen.api_key_env, "")
+    if not api_key:
+        raise RuntimeError(
+            "missing Qwen Omni Realtime credentials in environment: "
+            + qwen.api_key_env
+        )
+    return QwenOmniRealtimeCredentials(
+        api_key=api_key,
+        websocket_url=qwen.websocket_url,
+        model=qwen.model,
+    )
+
+
+def _build_realtime_session_factory(config, doubao_credentials: DoubaoS2SCredentials):
+    provider = config.realtime.provider
+    if provider == "doubao_s2s":
+        session_config = DoubaoS2SSessionConfig(
+            speaker=config.doubao_s2s.speaker,
+            output_sample_rate=config.doubao_s2s.output_sample_rate,
+        )
+
+        def doubao_session_factory(
+            on_speech_started,
+            on_input_transcript,
+            on_audio_delta,
+            on_turn_completed,
+            turn_id_start,
+            instructions,
+            speaker,
+            dialog_config,
+        ):
+            return DoubaoS2SServerVadSession(
+                doubao_credentials,
+                replace(
+                    session_config,
+                    system_prompt=_system_prompt_for_doubao_session(
+                        instructions,
+                        dialog_config,
+                    ),
+                    speaker=speaker or session_config.speaker,
+                    dialog=dialog_config,
+                ),
+                turn_id_start=turn_id_start,
+                on_speech_started=on_speech_started,
+                on_input_transcript=on_input_transcript,
+                on_audio_delta=on_audio_delta,
+                on_turn_completed=on_turn_completed,
+            )
+
+        return (
+            doubao_session_factory,
+            "doubao_s2s",
+            config.doubao_s2s.resource_id,
+            config.doubao_s2s.speaker,
+            config.doubao_s2s.output_sample_rate,
+        )
+
+    if provider == "qwen_omni_realtime":
+        qwen_credentials = _load_qwen_omni_realtime_credentials(config)
+        session_config = QwenOmniRealtimeSessionConfig(
+            voice=config.qwen_omni_realtime.voice,
+            output_sample_rate=config.qwen_omni_realtime.output_sample_rate,
+            manual_turn_detection=False,
+            turn_detection_type=config.server_vad.type,
+            turn_detection_threshold=config.server_vad.threshold,
+            silence_duration_ms=config.server_vad.silence_duration_ms,
+        )
+
+        def qwen_session_factory(
+            on_speech_started,
+            on_input_transcript,
+            on_audio_delta,
+            on_turn_completed,
+            turn_id_start,
+            instructions,
+            speaker,
+            dialog_config,
+        ):
+            del speaker
+            return QwenOmniRealtimeServerVadSession(
+                qwen_credentials,
+                replace(
+                    session_config,
+                    instructions=_qwen_instructions_for_session(
+                        instructions,
+                        dialog_config,
+                    ),
+                ),
+                turn_id_start=turn_id_start,
+                on_speech_started=on_speech_started,
+                on_input_transcript=on_input_transcript,
+                on_audio_delta=on_audio_delta,
+                on_turn_completed=on_turn_completed,
+            )
+
+        return (
+            qwen_session_factory,
+            "qwen_omni_realtime",
+            config.qwen_omni_realtime.model,
+            config.qwen_omni_realtime.voice,
+            config.qwen_omni_realtime.output_sample_rate,
+        )
+
+    raise RuntimeError(f"unsupported realtime provider: {provider}")
 
 
 def _build_opening_audio_generator(
@@ -333,6 +424,30 @@ def _system_prompt_for_doubao_session(
     if getattr(dialog_config, "system_role", None):
         return DOUBAO_DIALOG_FIELD_COMPAT_SYSTEM_PROMPT
     return instructions
+
+
+def _qwen_instructions_for_session(
+    instructions: str,
+    dialog_config,
+) -> str:
+    parts = [instructions.strip()]
+    dialog_lines = []
+    for key in ("bot_name", "system_role", "speaking_style", "model", "dialog_id"):
+        value = getattr(dialog_config, key, None)
+        if value:
+            dialog_lines.append(f"{key}: {value}")
+    if dialog_lines:
+        parts.append("# dialog\n" + "\n".join(dialog_lines))
+
+    context_items = getattr(dialog_config, "dialog_context", ()) or ()
+    context_lines = [
+        f"{item.role}: {item.text}"
+        for item in context_items
+        if getattr(item, "text", "").strip()
+    ]
+    if context_lines:
+        parts.append("# recent_dialog_context\n" + "\n".join(context_lines))
+    return "\n\n".join(part for part in parts if part)
 
 
 def _browser_first_prompt_snapshot_provider(

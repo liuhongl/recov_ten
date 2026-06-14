@@ -1,15 +1,19 @@
 from __future__ import annotations
 
-from app.config import GatewayConfig, HumanTranscriptConfig
+import pytest
+
+from app.config import GatewayConfig, HumanTranscriptConfig, QwenOmniRealtimeConfig
 from app.handoff_transcript import MockHumanHandoffTranscriptProcessor
 from app.main import (
     DOUBAO_DIALOG_FIELD_COMPAT_SYSTEM_PROMPT,
     _browser_first_prompt_snapshot_provider,
     _build_handoff_transcript_processor,
+    _load_qwen_omni_realtime_credentials,
+    _qwen_instructions_for_session,
     _system_prompt_for_doubao_session,
 )
 from app.postgres import PromptSnapshot
-from app.realtime_types import RealtimeDialogConfig
+from app.realtime_types import RealtimeDialogConfig, RealtimeDialogContextItem
 
 
 def test_system_prompt_keeps_default_instructions_without_dialog_role():
@@ -72,3 +76,56 @@ def test_build_handoff_transcript_processor_supports_mock_provider():
     )
 
     assert isinstance(processor, MockHumanHandoffTranscriptProcessor)
+
+
+def test_load_qwen_omni_realtime_credentials_reads_configured_env(monkeypatch):
+    monkeypatch.setenv("TEST_DASHSCOPE_API_KEY", "sk-test")
+
+    credentials = _load_qwen_omni_realtime_credentials(
+        GatewayConfig(
+            qwen_omni_realtime=QwenOmniRealtimeConfig(
+                api_key_env="TEST_DASHSCOPE_API_KEY",
+                websocket_url="wss://example.test/qwen",
+                model="qwen3-omni-flash-realtime",
+            )
+        )
+    )
+
+    assert credentials.api_key == "sk-test"
+    assert credentials.websocket_url == "wss://example.test/qwen"
+    assert credentials.model == "qwen3-omni-flash-realtime"
+
+
+def test_load_qwen_omni_realtime_credentials_reports_missing_env(monkeypatch):
+    monkeypatch.delenv("TEST_DASHSCOPE_API_KEY", raising=False)
+
+    with pytest.raises(RuntimeError, match="TEST_DASHSCOPE_API_KEY"):
+        _load_qwen_omni_realtime_credentials(
+            GatewayConfig(
+                qwen_omni_realtime=QwenOmniRealtimeConfig(
+                    api_key_env="TEST_DASHSCOPE_API_KEY",
+                )
+            )
+        )
+
+
+def test_qwen_instructions_include_dialog_fields_and_history():
+    instructions = _qwen_instructions_for_session(
+        "默认提示词",
+        RealtimeDialogConfig(
+            bot_name="小林",
+            system_role="你是物业中心客服。",
+            speaking_style="语气简短自然。",
+            dialog_context=(
+                RealtimeDialogContextItem(role="assistant", text="您好，请问方便沟通吗？"),
+                RealtimeDialogContextItem(role="user", text="可以。"),
+            ),
+        ),
+    )
+
+    assert "默认提示词" in instructions
+    assert "bot_name: 小林" in instructions
+    assert "system_role: 你是物业中心客服。" in instructions
+    assert "speaking_style: 语气简短自然。" in instructions
+    assert "assistant: 您好，请问方便沟通吗？" in instructions
+    assert "user: 可以。" in instructions
